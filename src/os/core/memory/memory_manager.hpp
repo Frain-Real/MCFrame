@@ -1,7 +1,7 @@
 // memory_manager.hpp
 #pragma once
 
-#include "../task.hpp"
+#include "task.hpp"
 #include <cstdint>
 
 namespace embed {
@@ -238,7 +238,9 @@ namespace embed {
             }
 
             uint32_t* sp = stack + words;
-            return platform_stack_init_frame(sp, t->fn(), t->ctx());
+            sp = platform_stack_init_frame(sp, t->fn(), t->ctx());
+            t->save_sp(sp);   // ← теперь задача знает свой SP
+            return sp;
         }
 
         /// Снять задачу с учёта.
