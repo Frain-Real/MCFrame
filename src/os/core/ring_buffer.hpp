@@ -1,18 +1,17 @@
 #pragma once
 
 #include "types.hpp"
-#include <cstddef>
 
 namespace embed {
 
-    template <typename T, std::size_t N>
+    template <typename T, uint32_t N>
     class RingBuffer {
         static_assert(N >= 2,        "RingBuffer: N must be >= 2");
         static_assert((N & (N-1)) == 0, "RingBuffer: N must be a power of two");
 
     public:
         using value_type = T;
-        using size_type  = std::size_t;
+        using size_type  = uint32_t;
 
         static constexpr size_type capacity() noexcept { return N - 1; }
 

@@ -4,13 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-// ════════════════════════════════════════════════════════════════════════════
-//  Atomic — единственный тип, без которого не обойтись. Всё остальное выкинул.
-// ════════════════════════════════════════════════════════════════════════════
-
 namespace embed {
-
-    // Минимальный набор memory order'ов — только то, что реально используется.
     enum MemoryOrder {
         MemoryOrderRelaxed = __ATOMIC_RELAXED,
         MemoryOrderAcquire = __ATOMIC_ACQUIRE,
@@ -37,4 +31,4 @@ namespace embed {
         }
     };
 
-} // namespace embed
+}

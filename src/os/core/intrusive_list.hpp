@@ -1,35 +1,9 @@
 // intrusive_list.hpp
 #pragma once
 
-#include <cstddef>
+#include "types.hpp"
 
 namespace embed {
-
-    /**
-     * Intrusive singly-linked list.
-     *
-     * Особенности:
-     *  - T должен наследовать embed::list_node<T> (или содержать его как поле).
-     *  - Узлы сами знают про свои соседи → не аллоцирует, не освобождает память.
-     *  - O(1) push_front / pop_front / remove.
-     *  - Без блокировок: для thread-safety используй встроенные atomic-операции
-     *    на list_node::next_ снаружи класса, либо оборачивай в Spinlock / disable_irq.
-     *  - Владение: узлы не владеют payload'ом — payload сам управляет своим lifecycle.
-     *
-     * Использование:
-     *   struct Task : embed::list_node<Task> {
-     *       int priority;
-     *       void run();
-     *   };
-     *
-     *   embed::intrusive_list<Task> ready_queue;
-     *
-     *   Task t1; t1.priority = 1;
-     *   Task t2; t2.priority = 2;
-     *   ready_queue.push_front(&t2);
-     *   ready_queue.push_front(&t1);
-     *   for (auto* t : ready_queue) t->run();
-     */
     template <typename T>
     class list_node {
         template <typename U> friend class intrusive_list;
@@ -49,7 +23,7 @@ namespace embed {
     class intrusive_list {
         list_node<T>* head_ = nullptr;
         list_node<T>* tail_ = nullptr;
-        std::size_t   count_ = 0;
+        uint32_t   count_ = 0;
 
         static list_node<T>* node_of(T* t) noexcept {
             return static_cast<list_node<T>*>(t);
@@ -60,7 +34,7 @@ namespace embed {
 
     public:
         using value_type = T;
-        using size_type  = std::size_t;
+        using size_type  = uint32_t;
 
         intrusive_list() noexcept = default;
         intrusive_list(const intrusive_list&)            = delete;
@@ -69,7 +43,7 @@ namespace embed {
         // ──────────── Mutators ────────────
 
         bool empty() const noexcept { return head_ == nullptr; }
-        std::size_t size() const noexcept { return count_; }
+        uint32_t size() const noexcept { return count_; }
 
         /// Добавить в голову. O(1).
         void push_front(T* item) noexcept {
