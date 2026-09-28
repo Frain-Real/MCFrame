@@ -65,8 +65,8 @@ elseif(MCU_TARGET STREQUAL "esp32")
 
     # === Флаги для Xtensa ESP32 ===
     set(CPU_FLAGS
-        -mlongcalls                    # КРИТИЧНО: вызовы функций дальше 4KB
-        -mtext-section-literals        # Литералы в .text секции
+        -mlongcalls      
+        -mtext-section-literals     
         -Wall
         -Wstrict-prototypes
         -O2

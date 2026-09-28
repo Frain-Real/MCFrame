@@ -112,5 +112,71 @@ inline Status copy_buffer(T* dst, size_t dst_cap, const T* src, size_t src_len) 
     fast_memcpy(dst, src, src_len * sizeof(T));
     return Status::Ok;
 }
+
+/**
+ * @brief Контекст генератора. 
+ * Хранится либо на стеке задачи, либо в статической памяти модуля.
+ */
+typedef struct {
+    uint32_t state;
+} os_rand_ctx_t;
+
+/**
+ * @brief Инициализация ГПСЧ.
+ * @param ctx   Указатель на контекст.
+ * @param seed  Начальное значение. (Внимание: Xorshift не терпит seed == 0).
+ */
+static inline void os_rand_init(os_rand_ctx_t *ctx, uint32_t seed) {
+    // Xorshift не может работать с нулевым состоянием, защищаемся от этого.
+    ctx->state = (seed == 0U) ? 1U : seed;
+}
+
+/**
+ * @brief Генерация следующего псевдослучайного числа (0 .. UINT32_MAX).
+ * @param ctx Указатель на контекст.
+ * @return Случайное 32-битное число.
+ */
+static inline uint32_t os_rand(os_rand_ctx_t *ctx) {
+    uint32_t x = ctx->state;
+    x ^= x << 13U;
+    x ^= x >> 17U;
+    x ^= x << 5U;
+    ctx->state = x;
+    return x;
+}
+
+/**
+ * @brief Генерация числа в заданном диапазоне [min, max] включительно.
+ * @details Использует метод отклонения (rejection sampling) для исключения 
+ *          modulo bias (смещения модуля), не используя тяжёлую 64-битную математику.
+ */
+static inline uint32_t os_rand_range(os_rand_ctx_t *ctx, uint32_t min, uint32_t max) {
+    if (min >= max) return min;
+    
+    uint32_t range = max - min + 1U;
+    // Находим максимальное значение, кратное range, чтобы избежать смещения
+    uint32_t limit = UINT32_MAX - (UINT32_MAX % range);
+    uint32_t r;
+    
+    do {
+        r = os_rand(ctx);
+    } while (r >= limit);
+    
+    return min + (r % range);
+}
+static os_rand_ctx_t _legacy_rand_ctx;
+static bool _legacy_rand_inited = false;
+int rand(void) {
+    if (!_legacy_rand_inited) {
+        os_rand_init(&_legacy_rand_ctx, 1); // Дефолтный seed
+        _legacy_rand_inited = true;
+    }
+    return (int)(os_rand(&_legacy_rand_ctx) & 0x7FFFFFFF); // Обрезаем до 31 бита
+}
+
+void srand(unsigned int seed) {
+    os_rand_init(&_legacy_rand_ctx, (uint32_t)seed);
+    _legacy_rand_inited = true;
+}
 }
 }
