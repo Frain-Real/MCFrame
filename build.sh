@@ -1,5 +1,6 @@
-
-cmake -S . -B .build
-cmake --build .build
-
-cp .build/example/example out/MCFrame_Test
+set -e
+rm -rf .build 
+mkdir -p .build
+cd .build
+cmake ..
+cmake --build .

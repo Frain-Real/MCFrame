@@ -1,11 +1,9 @@
-// queue.hpp
 #pragma once
+#include "../../common.hpp"
 
-#include "types.hpp"
 
 namespace embed {
 
-    /// Узел intrusive-очереди. Наследуйся от него (или встрой полем).
     template <typename T>
     class queue_node {
         template <typename U> friend class queue;
@@ -20,7 +18,6 @@ namespace embed {
         bool in_queue() const noexcept { return next_ != nullptr; }
     };
 
-    /// Intrusive FIFO-очередь. Не владеет элементами.
     template <typename T>
     class queue {
         queue_node<T>* head_ = nullptr;
@@ -36,20 +33,18 @@ namespace embed {
 
     public:
         using value_type = T;
-        using size_type  = uint32_t;
+        using Size  = uint32_t;
 
         queue() noexcept = default;
         queue(const queue&)            = delete;
         queue& operator=(const queue&) = delete;
 
-        // ──────────── Capacity ────────────
-
+        // Capacity
         bool        empty() const noexcept { return head_ == nullptr; }
-        size_type   size()  const noexcept { return count_; }
+        Size   size()  const noexcept { return count_; }
 
-        // ──────────── Mutators ────────────
+        // Mutators
 
-        /// Положить в хвост. O(1).
         void push(T* item) noexcept {
             auto* n = node_of(item);
             n->next_ = nullptr;
@@ -59,7 +54,6 @@ namespace embed {
             ++count_;
         }
 
-        /// Забрать из головы. O(1). Возвращает nullptr если пусто.
         T* pop() noexcept {
             if (!head_) return nullptr;
             T* item = static_cast<T*>(head_);
@@ -70,7 +64,6 @@ namespace embed {
             return item;
         }
 
-        /// Убрать все элементы, не удаляя их. O(n).
         void clear() noexcept {
             for (auto* n = head_; n != nullptr; ) {
                 auto* next = n->next_;
@@ -82,15 +75,13 @@ namespace embed {
             count_ = 0;
         }
 
-        // ──────────── Accessors ────────────
-
+        // Accessors
         T*       front()       noexcept { return static_cast<T*>(head_); }
         const T* front() const noexcept { return static_cast<T*>(head_); }
         T*       back()        noexcept { return static_cast<T*>(tail_); }
         const T* back()  const noexcept { return static_cast<T*>(tail_); }
 
-        // ──────────── Iterator ────────────
-
+        // Iterator
         class iterator {
             queue_node<T>* cur_;
         public:
@@ -104,26 +95,22 @@ namespace embed {
             bool operator==(const iterator& o) const noexcept { return cur_ == o.cur_; }
             bool operator!=(const iterator& o) const noexcept { return cur_ != o.cur_; }
         };
-
         iterator begin() noexcept { return iterator(head_); }
         iterator end()   noexcept { return iterator(nullptr); }
     };
 
-} // namespace embed
+}
 
 namespace embed {
-
-    /// Очередь выполнения функций. Фиксированная ёмкость, без аллокаций.
     template <uint32_t N>
     class task_queue {
         static_assert(N >= 2,        "task_queue: N must be >= 2");
         static_assert((N & (N-1)) == 0, "task_queue: N must be a power of two");
 
     public:
-        using size_type = uint32_t;
         using task_fn   = void (*)(void* ctx);
 
-        static constexpr size_type capacity() noexcept { return N - 1; }
+        static constexpr Size capacity() noexcept { return N - 1; }
 
     private:
         struct task {
@@ -131,27 +118,25 @@ namespace embed {
             void*   ctx = nullptr;
         };
 
-        static constexpr size_type kMask = N - 1;
+        static constexpr Size kMask = N - 1;
 
         task      buf_[N]{};
-        size_type head_  = 0;
-        size_type tail_  = 0;
-        size_type count_ = 0;
+        Size head_  = 0;
+        Size tail_  = 0;
+        Size count_ = 0;
 
     public:
         task_queue() noexcept = default;
         task_queue(const task_queue&)            = delete;
         task_queue& operator=(const task_queue&) = delete;
 
-        // ──────────── Capacity ────────────
+        // Capacity
 
         bool      empty() const noexcept { return count_ == 0; }
         bool      full()  const noexcept { return count_ == capacity(); }
-        size_type size()  const noexcept { return count_; }
+        Size size()  const noexcept { return count_; }
 
-        // ──────────── Mutators ────────────
-
-        /// Добавить задачу. Возвращает false если очередь полна. O(1).
+        // Mutators
         bool post(task_fn fn, void* ctx = nullptr) noexcept {
             if (full()) return false;
             buf_[head_] = {fn, ctx};
@@ -160,7 +145,6 @@ namespace embed {
             return true;
         }
 
-        /// Выполнить одну задачу. Возвращает false если очередь пуста. O(1).
         bool run_one() noexcept {
             if (empty()) return false;
             task& t = buf_[tail_];
@@ -170,12 +154,10 @@ namespace embed {
             return true;
         }
 
-        /// Выполнить все задачи. O(n).
         void run_all() noexcept {
             while (run_one()) {}
         }
 
-        /// Очистить очередь, не выполняя задачи. O(1).
         void clear() noexcept {
             head_  = 0;
             tail_  = 0;
@@ -183,4 +165,4 @@ namespace embed {
         }
     };
 
-} // namespace embed
+}

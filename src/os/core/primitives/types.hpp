@@ -1,8 +1,4 @@
-// embed/types.hpp
 #pragma once
-
-#include <cstddef>
-#include <cstdint>
 
 namespace embed {
     enum MemoryOrder {
@@ -13,7 +9,6 @@ namespace embed {
         MemoryOrderSeqCst  = __ATOMIC_SEQ_CST
     };
 
-    // Atomic wrapper. Только load/store — больше ничего не нужно.
     template <typename T>
     class atomic_t {
         volatile T v_;

@@ -1,17 +1,14 @@
-// semaphore.hpp
 #pragma once
 
 #include "types.hpp"
 
 namespace embed {
 
-    /// Тип семафора — задаётся шаблонным параметром.
     enum class sem_type {
-        binary,   // 0 или 1
-        counting  // 0 .. MaxCount
+        binary,
+        counting 
     };
 
-    /// Семафор: бинарный или счётный. Выбор — через шаблон.
     template <sem_type Type, uint32_t MaxCount = 1>
     class semaphore {
         static_assert(MaxCount >= 1, "semaphore: MaxCount must be >= 1");
@@ -23,8 +20,7 @@ namespace embed {
         semaphore(const semaphore&)            = delete;
         semaphore& operator=(const semaphore&) = delete;
 
-        // ──────────── Operations ────────────
-
+        // Operations
         /// Опустить (ждать). Крутится пока count == 0.
         void wait() noexcept {
             while (true) {
@@ -36,8 +32,7 @@ namespace embed {
                 }
             }
         }
-
-        /// Попробовать опустить без ожидания. true если удалось.
+        // Попробовать опустить без ожидания. true если удалось.
         bool try_wait() noexcept {
             uint32_t c = __atomic_load_n(&count_, __ATOMIC_ACQUIRE);
             do {
@@ -46,8 +41,7 @@ namespace embed {
                 __ATOMIC_RELEASE, __ATOMIC_RELAXED));
             return true;
         }
-
-        /// Поднять (сигнал).
+        // Поднять (сигнал).
         void signal() noexcept {
             if constexpr (Type == sem_type::binary) {
                 __atomic_store_n(&count_, 1, __ATOMIC_RELEASE);
@@ -59,11 +53,10 @@ namespace embed {
                     __ATOMIC_RELEASE, __ATOMIC_RELAXED));
             }
         }
-
-        /// Текущее значение (для отладки).
+        // Текущее значение (для отладки).
         uint32_t value() const noexcept {
             return __atomic_load_n(&count_, __ATOMIC_ACQUIRE);
         }
     };
 
-} // namespace embed
+}

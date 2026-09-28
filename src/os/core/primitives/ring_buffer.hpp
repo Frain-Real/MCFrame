@@ -1,5 +1,5 @@
 #pragma once
-
+#include "../../common.hpp"
 #include "types.hpp"
 
 namespace embed {
@@ -8,13 +8,8 @@ namespace embed {
     class RingBuffer {
         static_assert(N >= 2,        "RingBuffer: N must be >= 2");
         static_assert((N & (N-1)) == 0, "RingBuffer: N must be a power of two");
-
     public:
-        using value_type = T;
-        using size_type  = uint32_t;
-
-        static constexpr size_type capacity() noexcept { return N - 1; }
-
+        static constexpr Size capacity() noexcept { return N - 1; }
         RingBuffer() noexcept = default;
         RingBuffer(const RingBuffer&)            = delete;
         RingBuffer& operator=(const RingBuffer&) = delete;
@@ -73,7 +68,7 @@ namespace embed {
             return ((head_.load(MemoryOrderAcquire) + 1) & kMask) == tail_.load(MemoryOrderAcquire);
         }
 
-        size_type size() const noexcept {
+        Size size() const noexcept {
             return (head_.load(MemoryOrderAcquire) - tail_.load(MemoryOrderAcquire)) & kMask;
         }
 
@@ -85,14 +80,12 @@ namespace embed {
         }
 
     private:
-        static constexpr size_type kMask = N - 1;
-
-        embed::atomic_t<size_type> head_{0};
-        embed::atomic_t<size_type> tail_{0};
-        size_type head_cached_{0};
-        size_type tail_cached_{0};
-
+        static constexpr Size kMask = N - 1;
+        embed::atomic_t<Size> head_{0};
+        embed::atomic_t<Size> tail_{0};
+        Size head_cached_{0};
+        Size tail_cached_{0};
         T buf_[N]{};
     };
 
-} // namespace embed
+}

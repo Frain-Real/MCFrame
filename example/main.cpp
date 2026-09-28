@@ -1,15 +1,13 @@
-#include "../src/platforms/MopInterface.h"
+#include <mock_interface.hpp>
 #include <iostream>
-
-void inf_cb(IInterface *interface)
-{
-  
-}
 
 int main(void)
 {
-  MopInterface inf(inf_cb);
-  char *str = inf.read();
+  MockInterface inf;
+  char str[6] = {};
+  embed::Size byteread = 0;
+  inf.read(str, sizeof(str) - 1, byteread);
+  str[byteread] = '\0';
   std::cout << str << std::endl;
   return 0;
 }
