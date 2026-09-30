@@ -26,7 +26,7 @@ void* calloc(std::size_t count, std::size_t size) noexcept
 
     if (ptr != nullptr)
     {
-        embed::utilities::fast_memset(ptr, 0, total);
+        embed::utilities::fill(ptr, 0);
     }
 
     return ptr;

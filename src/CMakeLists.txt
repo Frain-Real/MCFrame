@@ -3,6 +3,7 @@ file(GLOB_RECURSE OS_CORE_SOURCES
     "os/core/memory/*.cpp" 
     "os/core/task/*.cpp" 
     "os/core/primitives/*.cpp" 
+    "os/crypto/*.cpp"
     "os/interfaces/*.cpp"
 )
 
@@ -25,6 +26,10 @@ add_library(MCFrame STATIC
 target_include_directories(MCFrame PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/os
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/memory
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/primitives
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/task
+    ${CMAKE_CURRENT_SOURCE_DIR}/crypto
     ${CMAKE_CURRENT_SOURCE_DIR}/interfaces
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/${MCU_TARGET}
 )

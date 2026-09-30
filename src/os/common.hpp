@@ -43,4 +43,41 @@ namespace embed {
         ReadWrite,
         Execute
     };
+
+    namespace dma {
+        enum class Direction : uint8_t {
+            MemToMem,
+            MemToPeriph,
+            PeriphToMem,
+            PeriphToPeriph
+        };
+        enum class TransferSize : uint8_t {
+            Byte,       // 8 bit
+            HalfWord,   // 16 bit
+            Word        // 32 bit
+        };
+
+        enum class Priority : uint8_t {
+            Low = 0,
+            Medium,
+            High,
+            VeryHigh
+        };
+
+        enum class Trigger : uint8_t {
+            Software,
+            Hardware
+        };
+
+        enum class BurstMode : uint8_t {
+            Single,
+            Incrementing,
+            Circular
+        };
+        struct BufferConfig {
+            void*  buffer;
+            Size   bytes;
+            bool   increment;
+        };
+    }
 }

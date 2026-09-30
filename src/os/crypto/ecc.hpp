@@ -2,207 +2,325 @@
 
 #include "../common.hpp"
 #include "../utilities.hpp"
+#include "../big_math.hpp"
 
 namespace embed {
-// Максимальный размер для больших чисел (например, для 32-битного поля, это может быть 1)
-// Если вы используете, например, 256-битное поле, то это будет 256/32 = 8
-#define BIGINT_WORD_SIZE 8
 
-// Класс для работы с арифметикой в конечном поле GF(p)
-class FiniteFieldArithmetic {
+enum class EccCurve {
+    SECP256K1,
+    SECP256R1
+};
+
+template <EccCurve Curve>
+struct EccTraits;
+
+template <>
+struct EccTraits<EccCurve::SECP256K1> {
+    static constexpr size_t Words = 8;
+    static constexpr BigInt<Words> P = { 0xFFFFFC2F, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF };
+    static constexpr BigInt<Words> A = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    static constexpr BigInt<Words> B = { 7, 0, 0, 0, 0, 0, 0, 0 };
+    static constexpr BigInt<Words> N = { 0xD0364141, 0xBFD25E8C, 0xAF48A03B, 0xBAAEDCE6, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF };
+    static constexpr BigInt<Words> Gx = { 0x16F81798, 0x59F2815B, 0x2DCE28D9, 0x029BFCDB, 0xCE870B07, 0x55A06295, 0xF9DCBBAC, 0x79BE667E };
+    static constexpr BigInt<Words> Gy = { 0xFB10D4B8, 0x9C47D08F, 0xA68554199, 0xFD557D33, 0xC1711CFE, 0x4A3B9373, 0x5C393111, 0x483ADA77 };
+};
+template <>
+struct EccTraits<EccCurve::SECP256R1> {
+    static constexpr size_t Words = 8;
+    static constexpr BigInt<Words> P = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x00000000, 0x00000000, 0x00000000, 0x00000001, 0xFFFFFFFF};
+    static constexpr BigInt<Words> A = {0xFFFFFFFC, 0xFFFFFFFF, 0xFFFFFFFF, 0x00000000, 0x00000000, 0x00000000, 0x00000001, 0xFFFFFFFF};
+    static constexpr BigInt<Words> B = {0x27D2604B, 0x3BCE3C3E, 0xCC53B0F6, 0x651D06B0, 0x769886BC, 0xB3EBBD55, 0x8EE7EB4A, 0x5AC635D8};
+    static constexpr BigInt<Words> N = {0xFC632551, 0xF3B9CAC2, 0xA7179E84, 0xBCE6FAAD, 0xFFFFFFFF, 0xFFFFFFFF, 0x00000000, 0xFFFFFFFF};
+    static constexpr BigInt<Words> Gx = {0xD898C296, 0xF4A13945, 0x2DEB33A0, 0x77037D81, 0x63A440F2, 0xF8BCE6E5, 0xE12C4247, 0x6B17D1F2};
+    static constexpr BigInt<Words> Gy = {0x37BF51F5, 0xCBB64068, 0x6B315ECE, 0x2BCE3357, 0x7C0F9E16, 0x8EE7EB4A, 0xFE1A7F9B, 0x4FE342E2};
+};
+
+template <size_t Words>
+struct EccPoint {
+    BigInt<Words> x;
+    BigInt<Words> y;
+    bool is_infinity;
+
+    constexpr EccPoint() : x(0), y(0), is_infinity(true) {}
+    constexpr EccPoint(const BigInt<Words>& x_val, const BigInt<Words>& y_val) : x(x_val), y(y_val), is_infinity(false) {}
+    
+    static constexpr EccPoint Infinity() { return EccPoint(); }
+    
+    bool operator==(const EccPoint& other) const {
+        if (is_infinity && other.is_infinity) return true;
+        if (is_infinity != other.is_infinity) return false;
+        return (x == other.x && y == other.y);
+    }
+};
+
+template <typename Impl, EccCurve Curve, bool EnableDecrypt = false>
+class ECC {
 public:
-    // Модуль поля P
-    uint32_t P;
-
-    FiniteFieldArithmetic(uint32_t modulus) : P(modulus) {}
-
-    // Сложение по модулю
-    uint32_t add(uint32_t a, uint32_t b) {
-        uint64_t sum = (uint64_t)a + b;
-        return sum % P;
+    bool GenerateKeyPair(const BigInt<EccTraits<Curve>::Words>& out_private, const EccPoint<EccTraits<Curve>::Words>& out_public) { 
+        return static_cast<Impl*>(this)->GenerateKeyPair(out_private, out_public); 
+    }
+    bool ComputePublicKey(BigInt<EccTraits<Curve>::Words>& private_key, const EccPoint<EccTraits<Curve>::Words>& out_public) { 
+        return static_cast<Impl*>(this)->ComputePublicKey(private_key, out_public); 
+    }
+    bool DeriveSharedSecret(BigInt<EccTraits<Curve>::Words>& private_key, const EccPoint<EccTraits<Curve>::Words>& remote_public, const EccPoint<EccTraits<Curve>::Words>& out_secret) { 
+        return static_cast<Impl*>(this)->DeriveSharedSecret(private_key, remote_public, out_secret); 
+    }
+    
+    bool Encrypt(const uint8_t* input, Size input_len, uint8_t* output, Size* output_len) { 
+        return static_cast<Impl*>(this)->Encrypt(input, input_len, output, output_len); 
+    }
+    bool Decrypt(const uint8_t* input, Size input_len, uint8_t* output, Size* output_len) { 
+        return static_cast<Impl*>(this)->Decrypt(input, input_len, output, output_len); 
     }
 
-    // Вычитание по модулю
-    uint32_t sub(uint32_t a, uint32_t b) {
-        if (a >= b) {
-            return (a - b) % P;
+    Size GetEncryptedSize(Size data_len) { 
+        return static_cast<Impl*>(this)->GetEncryptedSize(data_len); 
+    }
+};
+
+template <EccCurve Curve, bool EnableDecrypt = false>
+class SoftECC : public ECC<SoftECC<Curve, EnableDecrypt>, Curve, EnableDecrypt> {
+public:
+    static_assert(
+        EccTraits<Curve>::P > 2,
+        "Curve modulus P must be greater than 2"
+    );
+    static constexpr size_t Words = EccTraits<Curve>::Words;
+    using Point = EccPoint<Words>;
+    using Int = BigInt<Words>;
+
+    SoftECC(const SoftECC&) = delete;
+    SoftECC& operator=(const SoftECC&) = delete;
+
+    SoftECC(const Int& private_key = Int(), const Point& remote_public_key = Point::Infinity()) 
+        : m_private_key(private_key), m_remote_public_key(remote_public_key) 
+    {
+        if (m_private_key != 0) {
+            ComputePublicKey(m_private_key, m_public_key);
         } else {
-            return (P - (b - a)) % P;
+            m_public_key = Point::Infinity();
         }
     }
 
-    // Умножение по модулю
-    uint32_t mul(uint32_t a, uint32_t b) {
-        uint64_t product = (uint64_t)a * b;
-        return product % P;
+    bool GenerateKeyPair(Int& out_private, Point& out_public) {
+        for (size_t i = 0; i < Words; ++i) {
+            out_private.data[i] = utilities::rand();
+        }
+        out_private = out_private % Traits::N;
+        if (out_private.IsZero()) out_private.data[0] = 1;
+        
+        return ComputePublicKey(out_private, out_public);
     }
 
-    // Быстрое возведение в степень по модулю (a^exp % P)
-    uint32_t power(uint32_t base, uint32_t exp) {
-        uint32_t res = 1;
-        base %= P;
-        while (exp > 0) {
-            if (exp % 2 == 1) { // Если exp нечетное
-                res = mul(res, base);
+    bool ComputePublicKey(const Int& private_key, Point& out_public) {
+        if (private_key.IsZero() || private_key >= Traits::N) {
+            return false;
+        }
+        out_public = ScalarMul(private_key, m_G);
+        return true;
+    }
+
+    bool DeriveSharedSecret(const Int& private_key, const Point& remote_public, Point& out_secret) {
+        if (private_key.IsZero() || private_key >= Traits::N) return false;
+        if (!IsOnCurve(remote_public)) return false;
+        
+        out_secret = ScalarMul(private_key, remote_public);
+        return !out_secret.is_infinity;
+    }
+
+    Size GetEncryptedSize(Size data_len) {
+        return data_len + 64;
+    }
+
+    bool Encrypt(const uint8_t* input, Size input_len, uint8_t* output, Size* output_len) {
+        if (input == nullptr || output == nullptr || output_len == nullptr) return false;
+        if (m_remote_public_key.is_infinity) return false;
+
+        Size required_size = GetEncryptedSize(input_len);
+        if (*output_len < required_size && *output_len != 0) {
+            return false;
+        }
+
+        Int eph_private;
+        Point eph_public;
+        if (!GenerateKeyPair(eph_private, eph_public)) return false;
+
+        Point shared_secret;
+        if (!DeriveSharedSecret(eph_private, m_remote_public_key, shared_secret)) return false;
+
+        size_t offset = 0;
+        for (size_t i = 0; i < Words; ++i, offset += 4) {
+            utilities::fast_memcpy(output + offset, &eph_public.x.data[i], 4);
+        }
+        for (size_t i = 0; i < Words; ++i, offset += 4) {
+            utilities::fast_memcpy(output + offset, &eph_public.y.data[i], 4);
+        }
+
+        uint8_t sym_key[32];
+        for (size_t i = 0; i < Words && i < 8; ++i) {
+            utilities::fast_memcpy(sym_key + i * 4, &shared_secret.x.data[i], 4);
+        }
+        
+        for (Size i = 0; i < input_len; ++i) {
+            output[64 + i] = input[i] ^ sym_key[i % 32];
+        }
+        *output_len = required_size;
+        return true;
+    }
+
+    bool Decrypt(const uint8_t* input, Size input_len, uint8_t* output, Size* output_len) {
+        static_assert(EnableDecrypt, "ECC decryption is disabled");
+        if (input == nullptr || output == nullptr || output_len == nullptr) return false;
+        if (m_private_key.IsZero()) return false;
+        if (input_len < 64) return false;
+
+        Size payload_len = input_len - 64;
+        if (*output_len < payload_len && *output_len != 0) return false;
+
+        Point eph_public;
+        eph_public.is_infinity = false;
+        size_t offset = 0;
+        for (size_t i = 0; i < Words; ++i, offset += 4) {
+            utilities::fast_memcpy(&eph_public.x.data[i], input + offset, 4);
+        }
+        for (size_t i = 0; i < Words; ++i, offset += 4) {
+            utilities::fast_memcpy(&eph_public.y.data[i], input + offset, 4);
+        }
+        if (!IsOnCurve(eph_public)) return false;
+
+        Point shared_secret;
+        if (!DeriveSharedSecret(m_private_key, eph_public, shared_secret)) return false;
+
+        uint8_t sym_key[32];
+        for (size_t i = 0; i < Words && i < 8; ++i) {
+            utilities::fast_memcpy(sym_key + i * 4, &shared_secret.x.data[i], 4);
+        }
+
+        for (Size i = 0; i < payload_len; ++i) {
+            output[i] = input[64 + i] ^ sym_key[i % 32];
+        }
+
+        *output_len = payload_len;
+        return true;
+    }
+
+private:
+    using Traits = EccTraits<Curve>;
+    
+    Int m_private_key;
+    Point m_public_key;
+    Point m_remote_public_key;
+    
+    static constexpr Point m_G = Point(Traits::Gx, Traits::Gy);
+
+    static Int FieldAdd(const Int& a, const Int& b) {
+        Int sum = a + b;
+        if (sum >= Traits::P) {
+            sum = sum - Traits::P;
+        }
+        return sum;
+    }
+
+    static Int FieldSub(const Int& a, const Int& b) {
+        if (a >= b) {
+            return a - b;
+        } else {
+            return Traits::P - (b - a);
+        }
+    }
+
+    static Int FieldMul(const Int& a, const Int& b) {
+        Int product = a * b;
+        return product % Traits::P;
+    }
+
+    static Int FieldInv(const Int& a) {
+        Int res = Int(1);
+        Int base = a % Traits::P;
+        Int exp = Traits::P - Int(2);
+        
+        for (size_t i = 0; i < Words * 32; ++i) {
+            if (exp.GetBit(i)) {
+                res = FieldMul(res, base);
             }
-            base = mul(base, base);
-            exp /= 2;
+            base = FieldMul(base, base);
         }
         return res;
     }
 
-    // Расширенный алгоритм Евклида для нахождения мультипликативной инверсии
-    // Возвращает x такое, что (a * x) % P == 1
-    uint32_t inverse(uint32_t a) {
-        int32_t m = P;
-        int32_t n = a;
-        int32_t t = 0, q = 1;
-        int32_t r = m;
-        int32_t s = n;
-
-        while (s != 0) {
-            int32_t quotient = r / s;
-            int32_t temp_r = r;
-            int32_t temp_t = t;
-            r = s;
-            t = q;
-            s = temp_r - quotient * s;
-            q = temp_t - quotient * q;
-        }
-        if (r > 1) return 0; // Инверсия не существует
-        if (t < 0) t = t + m; // Приводим к положительному значению
-
-        return (uint32_t)t;
-    }
-};
-    // Структура для представления точки на эллиптической кривой
-struct Point {
-    uint32_t x;
-    uint32_t y;
-    bool isInfinity; // Флаг, указывающий, является ли точка "точкой на бесконечности"
-
-    // Конструктор для обычной точки
-    Point(uint32_t val_x = 0, uint32_t val_y = 0) : x(val_x), y(val_y), isInfinity(false) {}
-
-    // Конструктор для точки на бесконечности
-    static Point infinity() {
-        Point p;
-        p.isInfinity = true;
-        return p;
-    }
-
-    bool operator==(const Point& other) const {
-        if (isInfinity && other.isInfinity) return true;
-        if (isInfinity != other.isInfinity) return false;
-        return (x == other.x && y == other.y);
-    }
-
-    bool operator!=(const Point& other) const {
-        return !(*this == other);
-    }
-};
-// Класс для работы с эллиптическими кривыми
-class ECC {
-public:
-    uint32_t P; // Модуль поля
-    uint32_t A; // Коэффициент A кривой y^2 = x^3 + Ax + B (mod P)
-    uint32_t B; // Коэффициент B кривой y^2 = x^3 + Ax + B (mod P)
-    Point G;    // Базовая точка (генератор) кривой
-    uint32_t N; // Порядок базовой точки G (наименьшее целое N > 0 такое, что N*G = O (точка на бесконечности))
-
-    FiniteFieldArithmetic ff;
-
-    ECC(uint32_t modulus, uint32_t coeffA, uint32_t coeffB,
-        Point generator, uint32_t orderOfG)
-        : P(modulus), A(coeffA), B(coeffB), G(generator), N(orderOfG), ff(modulus)
-    {
-        // Проверка условия 4A^3 + 27B^2 != 0 (mod P)
-        uint32_t term1 = ff.mul(ff.mul(ff.power(A, 3), 4), 1); // 4 * A^3
-        uint32_t term2 = ff.mul(ff.mul(ff.power(B, 2), 27), 1); // 27 * B^2
-        uint32_t discriminant = ff.add(term1, term2);
-
-        if (discriminant == 0) {
-            // В реальном приложении здесь нужно выдать ошибку или исключение
-            // Для микроконтроллера можно просто зависнуть или войти в бесконечный цикл
-            // или использовать assert
-            // Для простоты примера, мы просто выведем сообщение, но это не безопасно.
-            // Вместо этого нужно убедиться, что используемые параметры кривой корректны.
-            // printf("Error: Curve parameters are invalid (4A^3 + 27B^2 == 0 mod P)\n");
-        }
-    }
-
-    // Проверка, лежит ли точка на кривой
-    bool isOnCurve(const Point& p) {
-        if (p.isInfinity) return true;
-        uint32_t lhs = ff.mul(p.y, p.y); // y^2
-        uint32_t rhs = ff.add(ff.add(ff.mul(ff.mul(p.x, p.x), p.x), ff.mul(A, p.x)), B); // x^3 + Ax + B
+    static bool IsOnCurve(const Point& p) {
+        if (p.is_infinity) return true;
+        
+        Int lhs = FieldMul(p.y, p.y);
+        Int x2 = FieldMul(p.x, p.x);
+        Int x3 = FieldMul(x2, p.x);
+        Int ax = FieldMul(Traits::A, p.x);
+        Int rhs = FieldAdd(FieldAdd(x3, ax), Traits::B);
+        
         return lhs == rhs;
     }
 
-    // Сложение двух точек P1 и P2
-    Point addPoints(const Point& p1, const Point& p2) {
-        if (p1.isInfinity) return p2;
-        if (p2.isInfinity) return p1;
+    static Point PointDouble(const Point& p) {
+        if (p.is_infinity || p.y.IsZero()) return Point::Infinity();
+        
+        Int x2 = FieldMul(p.x, p.x);
+        Int three_x2 = FieldAdd(FieldAdd(x2, x2), x2);
+        Int num = FieldAdd(three_x2, Traits::A);
+        Int den = FieldAdd(p.y, p.y);
+        Int lambda = FieldMul(num, FieldInv(den));
 
-        // Если P1 == -P2, то P1 + P2 = O (точка на бесконечности)
-        // То есть P1.x == P2.x и P1.y == P - P2.y
-        if (p1.x == p2.x && ff.add(p1.y, p2.y) == 0) {
-            return Point::infinity();
-        }
-
-        uint32_t lambda;
-        if (p1.x == p2.x && p1.y == p2.y) { // Удвоение точки P1 == P2
-            // lambda = (3x^2 + A) * (2y)^-1 (mod P)
-            uint32_t three_x_squared = ff.mul(ff.mul(p1.x, p1.x), 3);
-            uint32_t numerator = ff.add(three_x_squared, A);
-            uint32_t two_y_inv = ff.inverse(ff.mul(2, p1.y));
-            lambda = ff.mul(numerator, two_y_inv);
-        } else { // Сложение разных точек
-            // lambda = (y2 - y1) * (x2 - x1)^-1 (mod P)
-            uint32_t numerator = ff.sub(p2.y, p1.y);
-            uint32_t denominator_inv = ff.inverse(ff.sub(p2.x, p1.x));
-            lambda = ff.mul(numerator, denominator_inv);
-        }
-
-        uint32_t x3 = ff.sub(ff.sub(ff.mul(lambda, lambda), p1.x), p2.x);
-        uint32_t y3 = ff.sub(ff.mul(lambda, ff.sub(p1.x, x3)), p1.y);
-
+        Int lambda2 = FieldMul(lambda, lambda);
+        Int x3 = FieldSub(FieldSub(lambda2, p.x), p.x);
+        Int y3 = FieldSub(FieldMul(lambda, FieldSub(p.x, x3)), p.y);
+        
         return Point(x3, y3);
     }
 
-    // Умножение точки на скаляр (k * P)
-    Point scalarMultiply(uint32_t k, const Point& p) {
-        Point result = Point::infinity(); // Инициализируем результатом как точка на бесконечности
-        Point current = p;
-
-        while (k > 0) {
-            if (k & 1) { // Если младший бит k равен 1
-                result = addPoints(result, current);
-            }
-            current = addPoints(current, current); // Удваиваем current (current = 2 * current)
-            k >>= 1; // Сдвигаем k вправо на 1 бит (делим на 2)
+    static Point PointAdd(const Point& p1, const Point& p2) {
+        if (p1.is_infinity) return p2;
+        if (p2.is_infinity) return p1;
+        
+        if (p1.x == p2.x) {
+            if (p1.y == p2.y) return PointDouble(p1);
+            return Point::Infinity();
         }
-        return result;
+
+        Int num = FieldSub(p2.y, p1.y);
+        Int den = FieldSub(p2.x, p1.x);
+        Int lambda = FieldMul(num, FieldInv(den));
+
+        Int lambda2 = FieldMul(lambda, lambda);
+        Int x3 = FieldSub(FieldSub(lambda2, p1.x), p2.x);
+        Int y3 = FieldSub(FieldMul(lambda, FieldSub(p1.x, x3)), p1.y);
+        
+        return Point(x3, y3);
     }
 
-    // Генерация случайного закрытого ключа (для примера, используем rand(), в реальной системе нужен CSPRNG)
-    uint32_t generatePrivateKey() {
-        // Закрытый ключ должен быть в диапазоне [1, N-1]
-        // Для микроконтроллера, где нет хорошего RNG, это проблема.
-        // Здесь используется rand() из cstdlib, что НЕБЕЗОПАСНО для криптографии.
-        // Вам нужно будет реализовать или использовать аппаратный генератор случайных чисел.
-        return (utilities::rand() % (N - 1)) + 1;
-    }
+    static Point ScalarMul(const Int& k, const Point& p) {
+        Point r0 = Point::Infinity();
+        Point r1 = p;
+        for (size_t i = Words * 32; i > 0; --i) {
+            bool bit = k.GetBit(i - 1);
+            if (bit) {
+                Int temp_x = r0.x;
+                Int temp_y = r0.y;
+                bool temp_inf = r0.is_infinity;
+            
+                r0.x = r1.x;
+                r0.y = r1.y;
+                r0.is_infinity = r1.is_infinity;
+                
+                r1.x = temp_x;
+                r1.y = temp_y;
+                r1.is_infinity = temp_inf;
+            }
 
-    // Вычисление открытого ключа из закрытого
-    Point getPublicKey(uint32_t privateKey) {
-        return scalarMultiply(privateKey, G);
-    }
-
-    // Вычисление общего секрета ECDH
-    Point calculateSharedSecret(uint32_t privateKey, const Point& publicKeyOther) {
-        // S = privateKey * publicKeyOther
-        return scalarMultiply(privateKey, publicKeyOther);
+            Point sum = PointAdd(r0, r1);
+            Point dbl = PointDouble(r0);
+            r0 = dbl;
+            r1 = sum;
+        }
+        return r0;
     }
 };
 

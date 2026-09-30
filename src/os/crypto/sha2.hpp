@@ -504,39 +504,39 @@ void SHA512_Family::get_digest_bytes(uint8_t* digest) {
 
 // --- Реализация конкретных классов SHA256_Family ---
 SHA224::SHA224() {} // Конструктор базового класса уже вызван
-void SHA224::init_hash_values() { utilities::fast_memcpy(m_h, H224_INIT, sizeof(m_h)); }
+void SHA224::init_hash_values() { utilities::copy(m_h, H224_INIT); }
 void SHA224::finalize(uint8_t digest[SHA224_DIGEST_SIZE]) {
     SHA2_Base::finalize(digest, SHA224_DIGEST_SIZE);
 }
 
 SHA256::SHA256() {}
-void SHA256::init_hash_values() { utilities::fast_memcpy(m_h, H256_INIT, sizeof(m_h)); }
+void SHA256::init_hash_values() { utilities::copy(m_h, H256_INIT); }
 void SHA256::finalize(uint8_t digest[SHA256_DIGEST_SIZE]) {
     SHA2_Base::finalize(digest, SHA256_DIGEST_SIZE);
 }
 
 // --- Реализация конкретных классов SHA512_Family ---
 SHA384::SHA384() {}
-void SHA384::init_hash_values() { utilities::fast_memcpy(m_h, H384_INIT, sizeof(m_h)); }
+void SHA384::init_hash_values() { utilities::copy(m_h, H384_INIT); }
 void SHA384::finalize(uint8_t digest[SHA384_DIGEST_SIZE]) {
     // SHA-384 использует начальные H-значения от SHA-512, но усекает вывод
     SHA2_Base::finalize(digest, SHA384_DIGEST_SIZE);
 }
 
 SHA512::SHA512() {}
-void SHA512::init_hash_values() { utilities::fast_memcpy(m_h, H512_INIT, sizeof(m_h)); }
+void SHA512::init_hash_values() { utilities::copy(m_h, H512_INIT); }
 void SHA512::finalize(uint8_t digest[SHA512_DIGEST_SIZE]) {
     SHA2_Base::finalize(digest, SHA512_DIGEST_SIZE);
 }
 
 SHA512_224::SHA512_224() {}
-void SHA512_224::init_hash_values() { utilities::fast_memcpy(m_h, H512_224_INIT, sizeof(m_h)); }
+void SHA512_224::init_hash_values() { utilities::copy(m_h, H512_224_INIT); }
 void SHA512_224::finalize(uint8_t digest[SHA512_224_DIGEST_SIZE]) {
     SHA2_Base::finalize(digest, SHA512_224_DIGEST_SIZE);
 }
 
 SHA512_256::SHA512_256() {}
-void SHA512_256::init_hash_values() { utilities::fast_memcpy(m_h, H512_256_INIT, sizeof(m_h)); }
+void SHA512_256::init_hash_values() { utilities::copy(m_h, H512_256_INIT); }
 void SHA512_256::finalize(uint8_t digest[SHA512_256_DIGEST_SIZE]) {
     SHA2_Base::finalize(digest, SHA512_256_DIGEST_SIZE);
 }

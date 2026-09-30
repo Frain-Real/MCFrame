@@ -6,6 +6,9 @@
 #include <cstddef>
 #include "stm32f10x.h"
 #include "core_cm3.h"
+#include <cstring>
+#include "../../os/common.hpp"
+#include "../../os/config/dma_config.hpp"
 // Если CMSIS не подключен глобально, раскомментируйте нужное:
 // #include "stm32f10x.h" 
 // #include "core_cm3.h"
@@ -173,6 +176,390 @@ __attribute__((naked)) void platform_start_first_task(uint32_t* sp) noexcept {
         "BX R0             \n" // Запуск задачи через механизм возврата из прерывания
         : : : "r0", "memory"
     );
+}
+
+
+struct PeripheralRegs {
+    const char* name;
+    uint32_t tx_reg_addr;
+    uint32_t rx_reg_addr;
+};
+
+static const PeripheralRegs peripherals[] = {
+    { "USART1", USART1->DR, USART1->DR },
+    { "USART2", USART2->DR, USART2->DR },
+    { "USART3", USART3->DR, USART3->DR },
+    { "SPI1",   SPI1->DR,     SPI1->DR },
+    { "SPI2",   SPI2->DR,     SPI2->DR },
+    { "SPI3",   SPI3->DR,     SPI3->DR },
+    { "I2C1",   I2C1->DR,     I2C1->DR },
+    { "I2C2",   I2C2->DR,     I2C2->DR },
+    { "ADC1",   0,            ADC1->DR },
+    { "ADC2",   0,            ADC2->DR },
+    { "ADC3",   0,            ADC3->DR },
+};
+
+static const PeripheralRegs* find_periph(const char* name) noexcept {
+    for (const auto& p : peripherals) {
+        if (std::strcmp(p.name, name) == 0) return &p;
+    }
+    return nullptr;
+}
+
+struct ChannelCallback {
+    Callback_h cb;
+    void* arg;
+};
+
+static ChannelCallback callbacks[config::TOTAL_CHANNELS];
+
+static void global_id_to_hw(uint8_t global_id, uint8_t& ctrl, uint8_t& ch) noexcept {
+    if (global_id < 7) {
+        ctrl = 1;
+        ch = global_id + 1;
+    } else {
+        ctrl = 2;
+        ch = global_id - 7 + 1;
+    }
+}
+
+static DMA_TypeDef* get_dma_base(uint8_t ctrl) noexcept {
+    return (ctrl == 1) 
+        ? reinterpret_cast<DMA_TypeDef*>(DMA1_BASE)
+        : reinterpret_cast<DMA_TypeDef*>(DMA2_BASE);
+}
+
+static DMA_Channel_TypeDef* get_channel_regs(uint8_t ctrl, uint8_t ch) noexcept {
+    uint32_t base = (ctrl == 1) ? DMA1_BASE : DMA2_BASE;
+    base += 0x08;
+    return reinterpret_cast<DMA_Channel_TypeDef*>(base + (ch - 1) * 0x14);
+}
+
+static void enable_dma_clock(uint8_t ctrl) noexcept {
+    volatile uint32_t* rcc = reinterpret_cast<volatile uint32_t*>(RCC->AHBENR);
+    if (ctrl == 1) {
+        *rcc |= RCC_AHBENR_DMA1EN;
+    } else {
+        *rcc |= RCC_AHBENR_DMA2EN;
+    }
+}
+
+static void enable_channel_irq(uint8_t ctrl, uint8_t ch) noexcept {
+    uint32_t irqn;
+    if (ctrl == 1) {
+        irqn = DMA1_Channel1_IRQn + (ch - 1);
+    } else {
+        irqn = DMA2_Channel1_IRQn + (ch - 1);
+    }
+    
+    volatile uint32_t* nvic;
+    if (irqn < 32) {
+        nvic = reinterpret_cast<volatile uint32_t*>(NVIC_ISER_SETENA_0);
+        *nvic = (1 << irqn);
+    } else {
+        nvic = reinterpret_cast<volatile uint32_t*>(NVIC_ISER_SETENA_1);
+        *nvic = (1 << (irqn - 32));
+    }
+}
+
+static void disable_channel_irq(uint8_t ctrl, uint8_t ch) noexcept {
+    uint32_t irqn;
+    if (ctrl == 1) {
+        irqn = DMA1_Channel1_IRQn + (ch - 1);
+    } else {
+        irqn = DMA2_Channel1_IRQn + (ch - 1);
+    }
+    
+    volatile uint32_t* nvic;
+    if (irqn < 32) {
+        nvic = reinterpret_cast<volatile uint32_t*>(NVIC_ICER_CLRENA_0);
+        *nvic = (1 << irqn);
+    } else {
+        nvic = reinterpret_cast<volatile uint32_t*>(NVIC_ICER_CLRENA_1);
+        *nvic = (1 << (irqn - 32));
+    }
+}
+
+static uint32_t get_priority_bits(dma::Priority prio) noexcept {
+    switch (prio) {
+        case dma::Priority::Low:      return 0;
+        case dma::Priority::Medium:   return DMA_CCR1_PL_0;
+        case dma::Priority::High:     return DMA_CCR1_PL_1;
+        case dma::Priority::VeryHigh: return DMA_CCR1_PL_0 | DMA_CCR1_PL_1;
+    }
+    return 0;
+}
+
+static uint32_t get_size_bits(dma::TransferSize size) noexcept {
+    switch (size) {
+        case dma::TransferSize::Byte:     return 0;
+        case dma::TransferSize::HalfWord: return DMA_CCR1_PSIZE_0 | DMA_CCR1_MSIZE_0;
+        case dma::TransferSize::Word:     return DMA_CCR1_PSIZE_1 | DMA_CCR1_MSIZE_1;
+    }
+    return 0;
+}
+
+static void clear_interrupt_flags(uint8_t ctrl, uint8_t ch) noexcept {
+    auto* dma = get_dma_base(ctrl);
+    dma->IFCR = DMA_ISR_GIF1 << ch;
+}
+
+uint8_t platform_dma_max_channels() noexcept {
+    return config::TOTAL_CHANNELS;
+}
+
+Status platform_dma_configure_mem_to_periph(
+    uint8_t global_id,
+    const char* device_name,
+    const dma::BufferConfig& src,
+    dma::TransferSize unitSize,
+    dma::Priority prio,
+    dma::Trigger trig,
+    dma::BurstMode burst
+) noexcept {
+    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
+    if (!device_name || !src.buffer || src.bytes == 0) return Status::InvalidArg;
+
+    const auto* periph = find_periph(device_name);
+    if (!periph || periph->tx_reg_addr == 0) return Status::NotSupported;
+
+    uint8_t ctrl, ch;
+    global_id_to_hw(global_id, ctrl, ch);
+    
+    enable_dma_clock(ctrl);
+
+    auto* channel = get_channel_regs(ctrl, ch);
+    
+    channel->CCR &= ~DMA_CCR1_EN;
+
+    channel->CPAR = periph->tx_reg_addr;
+    channel->CMAR = reinterpret_cast<uint32_t>(src.buffer);
+    channel->CNDTR = src.bytes / (1 << static_cast<uint8_t>(unitSize));
+
+    uint32_t ccr = DMA_CCR1_DIR;
+
+    if (src.increment) ccr |= DMA_CCR1_MINC;
+    
+    switch (burst) {
+        case dma::BurstMode::Single:      break;
+        case dma::BurstMode::Incrementing: ccr |= DMA_CCR1_MINC; break;
+        case dma::BurstMode::Circular:     ccr |= DMA_CCR1_CIRC; break;
+    }
+
+    ccr |= get_priority_bits(prio);
+    ccr |= get_size_bits(unitSize);
+    ccr |= DMA_CCR1_TCIE;
+
+    channel->CCR = ccr;
+
+    clear_interrupt_flags(ctrl, ch);
+
+    return Status::Ok;
+}
+
+Status platform_dma_configure_periph_to_mem(
+    uint8_t global_id,
+    const char* device_name,
+    const dma::BufferConfig& dst,
+    dma::TransferSize unitSize,
+    dma::Priority prio,
+    dma::Trigger trig,
+    dma::BurstMode burst
+) noexcept {
+    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
+    if (!device_name || !dst.buffer || dst.bytes == 0) return Status::InvalidArg;
+
+    const auto* periph = find_periph(device_name);
+    if (!periph || periph->rx_reg_addr == 0) return Status::NotSupported;
+
+    uint8_t ctrl, ch;
+    global_id_to_hw(global_id, ctrl, ch);
+    
+    enable_dma_clock(ctrl);
+
+    auto* channel = get_channel_regs(ctrl, ch);
+    
+    channel->CCR &= ~DMA_CCR1_EN;
+
+    channel->CPAR = periph->rx_reg_addr;
+    channel->CMAR = reinterpret_cast<uint32_t>(dst.buffer);
+    channel->CNDTR = dst.bytes / (1 << static_cast<uint8_t>(unitSize));
+
+    uint32_t ccr = 0;
+
+    if (dst.increment) ccr |= DMA_CCR1_MINC;
+    
+    switch (burst) {
+        case dma::BurstMode::Single:      break;
+        case dma::BurstMode::Incrementing: ccr |= DMA_CCR1_MINC; break;
+        case dma::BurstMode::Circular:     ccr |= DMA_CCR1_CIRC; break;
+    }
+
+    ccr |= get_priority_bits(prio);
+    ccr |= get_size_bits(unitSize);
+    ccr |= DMA_CCR1_TCIE;
+
+    channel->CCR = ccr;
+
+    clear_interrupt_flags(ctrl, ch);
+
+    return Status::Ok;
+}
+
+Status platform_dma_configure_mem_to_mem(
+    uint8_t global_id,
+    const dma::BufferConfig& src,
+    const dma::BufferConfig& dst,
+    dma::TransferSize unitSize,
+    dma::Priority prio,
+    dma::BurstMode burst
+) noexcept {
+    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
+    if (!src.buffer || !dst.buffer || src.bytes == 0) return Status::InvalidArg;
+
+    uint8_t ctrl, ch;
+    global_id_to_hw(global_id, ctrl, ch);
+    
+    enable_dma_clock(ctrl);
+
+    auto* channel = get_channel_regs(ctrl, ch);
+    
+    channel->CCR &= ~DMA_CCR1_EN;
+
+    channel->CPAR = reinterpret_cast<uint32_t>(src.buffer);
+    channel->CMAR = reinterpret_cast<uint32_t>(dst.buffer);
+    channel->CNDTR = src.bytes / (1 << static_cast<uint8_t>(unitSize));
+
+    uint32_t ccr = DMA_CCR1_MEM2MEM | DMA_CCR1_DIR;
+
+    if (src.increment) ccr |= DMA_CCR1_PINC;
+    if (dst.increment) ccr |= DMA_CCR1_MINC;
+    
+    if (burst == dma::BurstMode::Circular) {
+        return Status::NotSupported;
+    }
+
+    ccr |= get_priority_bits(prio);
+    ccr |= get_size_bits(unitSize);
+    ccr |= DMA_CCR1_TCIE;
+
+    channel->CCR = ccr;
+
+    clear_interrupt_flags(ctrl, ch);
+
+    return Status::Ok;
+}
+
+Status platform_dma_start(uint8_t global_id) noexcept {
+    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
+
+    uint8_t ctrl, ch;
+    global_id_to_hw(global_id, ctrl, ch);
+
+    auto* channel = get_channel_regs(ctrl, ch);
+    
+    clear_interrupt_flags(ctrl, ch);
+    
+    channel->CCR |= DMA_CCR1_EN;
+    
+    enable_channel_irq(ctrl, ch);
+
+    return Status::Ok;
+}
+
+Status platform_dma_stop(uint8_t global_id) noexcept {
+    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
+
+    uint8_t ctrl, ch;
+    global_id_to_hw(global_id, ctrl, ch);
+
+    auto* channel = get_channel_regs(ctrl, ch);
+    channel->CCR &= ~DMA_CCR1_EN;
+
+    disable_channel_irq(ctrl, ch);
+
+    return Status::Ok;
+}
+
+bool platform_dma_is_complete(uint8_t global_id) noexcept {
+    if (global_id >= config::TOTAL_CHANNELS) return false;
+
+    uint8_t ctrl, ch;
+    global_id_to_hw(global_id, ctrl, ch);
+
+    auto* dma = get_dma_base(ctrl);
+    return (dma->ISR & (DMA_ISR_TCIF1 << ch)) != 0;
+}
+
+Size platform_dma_bytes_transferred(uint8_t global_id) noexcept {
+    if (global_id >= config::TOTAL_CHANNELS) return 0;
+
+    uint8_t ctrl, ch;
+    global_id_to_hw(global_id, ctrl, ch);
+
+    auto* channel = get_channel_regs(ctrl, ch);
+    return channel->CNDTR;
+}
+
+Status platform_dma_set_callback(
+    uint8_t global_id,
+    Callback_h cb,
+    void* arg
+) noexcept {
+    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
+
+    callbacks[global_id].cb = cb;
+    callbacks[global_id].arg = arg;
+
+    return Status::Ok;
+}
+
+Status platform_dma_clear_flags(uint8_t global_id) noexcept {
+    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
+
+    uint8_t ctrl, ch;
+    global_id_to_hw(global_id, ctrl, ch);
+
+    clear_interrupt_flags(ctrl, ch);
+
+    return Status::Ok;
+}
+
+void platform_dma_irq_handler(uint8_t global_id) noexcept {
+    if (global_id >= config::TOTAL_CHANNELS) return;
+
+    uint8_t ctrl, ch;
+    global_id_to_hw(global_id, ctrl, ch);
+
+    auto* dma = get_dma_base(ctrl);
+
+    if (dma->ISR & (DMA_ISR_TCIF1 << ch)) {
+        dma->IFCR = DMA_ISR_TCIF1 << ch;
+
+        auto& cb = callbacks[global_id];
+        if (cb.cb) {
+            struct CbContext {
+                Status  result;
+                void*   arg;
+            } ctx{ Status::Ok, cb.arg };
+
+            cb.cb(&ctx);
+        }
+    }
+
+    if (dma->ISR & (DMA_ISR_TEIF1 << ch)) {
+        dma->IFCR = DMA_ISR_TEIF1 << ch;
+
+        auto& cb = callbacks[global_id];
+        if (cb.cb) {
+            struct CbContext {
+                Status  result;
+                void*   arg;
+            } ctx{ Status::HardwareError, cb.arg };
+
+            cb.cb(&ctx);
+        }
+    }
 }
 
 } // namespace embed

@@ -66,8 +66,8 @@ SHA3::SHA3() {
 }
 
 void SHA3::clear_state() {
-    utilities::fast_memset(state, 0, sizeof(state));
-    utilities::fast_memset(block, 0, sizeof(block));
+    utilities::zero(state);
+    utilities::zero(block);
 }
 
 // Keccak-f[1600] permutation round constants
@@ -333,15 +333,7 @@ void SHA3::shake_update(const uint8_t* data, size_t len) {
 }
 
 void SHA3::shake_squeeze(uint8_t* output, size_t len) {
-    // This is called AFTER all input has been absorbed.
-    // The padding needs to be applied only once before the first squeeze call.
-    // To handle multiple squeeze calls, we need a flag.
-    // For simplicity here, assume squeeze is called after all updates and before further updates.
-    // A more robust XOF would manage an 'absorbing' vs 'squeezing' state.
-
-    // A simple approach for this context: if blockLen > 0, it means we are still in absorbing state.
-    // Pad and permute only if we haven't entered the squeezing phase yet for this context.
-    if (blockLen > 0 || state[0][0] == 0) { // Check if padding is needed (simple check if state is initial or not fully absorbed)
+    if (blockLen > 0 || state[0][0] == 0) {
         pad_and_absorb_last_block();
     }
     keccak_squeeze(output, len);
