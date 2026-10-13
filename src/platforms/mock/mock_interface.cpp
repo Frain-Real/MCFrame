@@ -1,17 +1,22 @@
+// platforms/mock/mock_interface.cpp
 #include "mock_interface.hpp"
+
 #include "../../os/utilities.hpp"
 
-embed::Status MockInterface::read(void* buffer, embed::Size size, embed::Size& bytesRead)
+embed::Status MockInterface::read(void* buffer, embed::Size size,
+                                  embed::Size& bytesRead) noexcept
 {
-	char data[] = "read";
-    embed::Size dataSize = sizeof(data) - 1;
+    // Тестовые данные: ровно то, что «пришло из UART».
+    static const char kData[] = "read";
+    constexpr embed::Size kDataSize = sizeof(kData) - 1u;
 
-    if (buffer == nullptr || size == 0) {
-        bytesRead = 0;
-        return embed::Status::Ok; // или ошибка, если так принято в интерфейсе
+    if (buffer == nullptr || size == 0u) {
+        bytesRead = 0u;
+        return embed::Status::InvalidArg;   // прежде молча возвращался Ok
     }
-    embed::Size n = (size < dataSize) ? size : dataSize;
-    embed::utilities::fast_memcpy(buffer, data, static_cast<embed::Size>(n));
+
+    const embed::Size n = (size < kDataSize) ? size : kDataSize;
+    (void)embed::utilities::memcpy_(buffer, kData, n);
     bytesRead = n;
-	return embed::Status::Ok;
+    return embed::Status::Ok;
 }

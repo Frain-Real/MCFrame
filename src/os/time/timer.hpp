@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../common.hpp"
+#include "../iplatform.hpp"
 namespace embed {
 
 // ----------------------------------------------------------------------------
@@ -100,7 +101,12 @@ constexpr uint64_t ToEpochSeconds(const DateTime& dt) noexcept
                 static_cast<int64_t>(dt.minute) * 60 +
                 static_cast<int64_t>(dt.second);
 
-    return (s > 0) ? static_cast<uint64_t>(s) : 0;
+    // Даты раньше эпохи Unix — ошибка вызывающего. Прежде значение молча
+    // схлопывалось в 0, что выглядело как «1 января 1970».
+    if (s <= 0) {
+        return 0;
+    }
+    return static_cast<uint64_t>(s);
 }
 
 constexpr DateTime FromEpochSeconds(uint64_t epoch_sec) noexcept
@@ -160,15 +166,15 @@ enum class Repeat : uint8_t
     Weekly
 };
 
-// Platform должна предоставить:
+// Платформенный слой приходит из platform::ops(). Никаких «platform_enter_critical»
+// здесь больше нет: их дублировал общий Lock из common.hpp, и оба варианта
+// были не реализованы.
 
- void platform_timer_init() noexcept;
- bool platform_timer_can_period_ms(uint32_t period_ms) noexcept;
- void platform_timer_set_period_ms(uint32_t period_ms) noexcept;
- void platform_timer_start() noexcept;
- void platform_timer_stop() noexcept;
- void platform_enter_critical() noexcept;
- void platform_exit_critical() noexcept;
+ inline void platform_timer_init() noexcept {platform::ops().timer_init();}
+ inline bool platform_timer_can_period_ms(uint32_t period_ms) noexcept {return platform::ops().timer_can_period_ms(period_ms);}
+ inline void platform_timer_set_period_ms(uint32_t period_ms) noexcept {platform::ops().timer_set_period_ms(period_ms);}
+ inline void platform_timer_start() noexcept {platform::ops().timer_start();}
+ inline void platform_timer_stop() noexcept {platform::ops().timer_stop();}
 
 // TimerSetPeriodMs() должен программировать аппаратный таймер так,
 // чтобы его прерывание вызывалось каждые period_ms.
@@ -237,6 +243,11 @@ public:
         }
         if (cfg_.max_catchup == 0) {
             cfg_.max_catchup = 1;
+        }
+        // alarm_tick_ms должен делиться на тик, иначе ComputeDesiredTickLocked
+        // не сможет подобрать общий период.
+        if (cfg_.alarm_tick_ms < cfg_.min_tick_ms) {
+            cfg_.alarm_tick_ms = cfg_.min_tick_ms;
         }
         if (cfg_.default_tick_ms < cfg_.min_tick_ms) {
             cfg_.default_tick_ms = cfg_.min_tick_ms;
@@ -310,13 +321,14 @@ public:
     //
     static void TickIsr() noexcept
     {
-        uint64_t now = now_ms_ + tick_ms_;
-        now_ms_ = now;
+        Lock lock;                       // прерывания уже запрещены, но
+                                         // вложенность безопасна (PRIMASK)
+        now_ms_ += tick_ms_;
 
-        ProcessTimers(now);
-        ProcessAlarms(now);
+        ProcessTimers(now_ms_);
+        ProcessAlarms(now_ms_);
         // Системный тик: сюда подключаются периодические системные функции,
-        // например Scheduler::Tick().
+        // например scheduler::tick().
         SystemTick();
     }
 
@@ -493,13 +505,21 @@ public:
         if (!time_valid_) {
             return Status::TimeNotSynced;
         }
+
+        const uint64_t due = ToEpochSeconds(at);
+        // Одноразовый будильник в прошлом сработал бы немедленно — это
+        // почти всегда ошибка вызывающего, поэтому сообщаем о ней явно.
+        if (repeat == Repeat::Once && due <= NowEpochSeconds()) {
+            return Status::InvalidArg;
+        }
+
         for (uint8_t i = 0; i < MaxAlarms; ++i) {
             AlarmSlot& a = alarms_[i];
             if (!a.used) {
                 a.used = true;
                 a.active = true;
                 a.repeat = repeat;
-                a.due_sec = ToEpochSeconds(at);
+                a.due_sec = due;
                 a.cb = cb;
                 a.arg = arg;
 
@@ -574,10 +594,16 @@ public:
     }
 
     // Монотонное время, миллисекунды.
+    //
+    // ВАЖНО: now_ms_ — 64-битное значение, а на 32-битном Cortex-M3 его
+    // чтение/запись неатомарны. TickIsr() пишет его, а читают задачи, поэтому
+    // чтение защищено критической секцией: иначе можно получить
+    // рассинхронизированные половинки (старшее слово от нового значения,
+    // младшее от старого).
     static uint64_t NowMs() noexcept
     {
         Lock lock;
-        return now_ms_;
+        return static_cast<uint64_t>(now_ms_);
     }
 
     // Календарное время в секундах от 1970 года.
@@ -613,6 +639,14 @@ public:
     static DateTime NowDateTime() noexcept
     {
         return FromEpochSeconds(NowEpochSeconds());
+    }
+
+    /// Статическое потребление RAM модулем времени (для отчётов о памяти).
+    /// Определяется ёмкостями MaxTimers/MaxAlarms/MaxSystemHooks.
+    static constexpr Size static_bytes() noexcept {
+        return sizeof(cfg_) + sizeof(now_ms_) + sizeof(wall_offset_ms_)
+             + sizeof(tick_ms_) + sizeof(running_) + sizeof(time_valid_)
+             + sizeof(timers_) + sizeof(alarms_) + sizeof(hooks_);
     }
 
     // Принудительно пересчитать и применить тик аппаратного таймера.

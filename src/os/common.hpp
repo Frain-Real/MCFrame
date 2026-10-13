@@ -1,20 +1,47 @@
-#pragma once 
+// common.hpp
+#pragma once
+
 #include <cstdint>
+#include "iplatform.hpp"   // даёт Size/Address/CoreId/... и platform::ops()
 
 namespace embed {
 
-    void platform_critical_enter() noexcept;
-    void platform_critical_exit() noexcept;
+    // ------------------------------------------------------------------------
+    // Критическая секция.
+    //
+    // Тонкие обёртки над platform::ops(). Платформа ОБЯЗАНА сохранять и
+    // восстанавливать маску прерываний, поэтому Lock реентерабелен:
+    // вложенный Lock не включает прерывания раньше внешнего.
+    // ------------------------------------------------------------------------
+    inline uint32_t platform_critical_enter() noexcept {
+        return platform::ops().critical_enter();
+    }
+    inline void platform_critical_exit(uint32_t state) noexcept {
+        platform::ops().critical_exit(state);
+    }
 
+    /// RAII-блокировка критической секции.
     struct Lock
     {
-        Lock() noexcept { platform_critical_enter(); }
-        ~Lock() noexcept { platform_critical_exit(); }
+        uint32_t state_;
+        Lock() noexcept  : state_(platform::ops().critical_enter()) {}
+        ~Lock() noexcept { platform::ops().critical_exit(state_); }
 
-        Lock(const Lock&) = delete;
+        Lock(const Lock&)            = delete;
         Lock& operator=(const Lock&) = delete;
     };
 
+    /// Досрочно покинуть критическую секцию (нужно перед блокировкой задачи,
+    /// чтобы не уснуть с выключенными прерываниями). Повторный вызов
+    /// в деструкторе становится безопасным no-op.
+    inline void unlock_early(Lock& l) noexcept {
+        platform::ops().critical_exit(l.state_);
+        l.state_ = 0u;
+    }
+
+    // ------------------------------------------------------------------------
+    // Общие типы
+    // ------------------------------------------------------------------------
     enum class Status : int
     {
         Ok = 0,
@@ -30,25 +57,25 @@ namespace embed {
         Unavailable,
         Fault,
         Aborted,
-        TimeNotSynced
+        TimeNotSynced,
+        Overflow,
+        Corruption
     };
 
-    using Size          = unsigned int;
-    using Address       = uintptr_t;
     using Handle        = unsigned int;
-    using CoreId        = unsigned char;
     using ThreadId      = unsigned short;
     using ProcessId     = unsigned short;
     using IrqNumber     = unsigned short;
-    using Priority      = unsigned char;
     using Milliseconds  = unsigned int;
     using Microseconds  = unsigned int;
 
-    constexpr Milliseconds WaitForever = 0xFFFFFFFFu;
+    /// Сентинел «ждать бесконечно». Отдельный тип не даёт перепутать его
+    /// с настоящим таймаутом (в отличие от прежнего UINT32_MAX).
+    using Timeout = uint64_t;
+    constexpr Timeout WaitForever = ~Timeout{0};
 
-    using Callback_h = void (*)(void* arg);
     using task_func = void (*)(void* ctx);
-    
+
     enum class Access : unsigned char
     {
         None = 0,
@@ -83,11 +110,15 @@ namespace embed {
             Hardware
         };
 
+        /// Режим передачи. «Инкремент адреса» задаётся отдельными флагами
+        /// BufferConfig::increment (PINC/MINC), здесь — только форма
+        /// цикла передачи. Значения Single/Incrementing/Circular были
+        /// синонимами и включали MINC дважды.
         enum class BurstMode : uint8_t {
             Single,
-            Incrementing,
             Circular
         };
+
         struct BufferConfig {
             void*  buffer;
             Size   bytes;

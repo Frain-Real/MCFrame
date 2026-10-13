@@ -1,307 +1,214 @@
-// platform.cpp
-// Единый платформозависимый слой для STM32F103RBTx (ARM Cortex-M3)
-// Требования: CMSIS-заголовки (например, "stm32f10x.h" или "core_cm3.h") должны быть подключены в проекте.
+// platforms/stm32/platform.cpp
+// ---------------------------------------------------------------------------
+// DMA-слой для STM32F103 (DMA1, 7 каналов).
+//
+// Исправлено относительно прежней версии:
+//  * убран DMA2 — у STM32F103RB его физически нет (TOTAL_CHANNELS = 7);
+//  * маски ISR/IFCR считаются как (channel-1)*4, а не << channel;
+//  * enable_dma_clock() пишет в &RCC->AHBENR, а не по значению регистра;
+//  * NVIC настраивается через NVIC->ISER/ICER (CMSIS), а не через
+//    несуществующие макросы NVIC_ISER_SETENA_*;
+//  * CNDTR проверяется на кратность размеру элемента и на 16-битность;
+//  * таблица запросов соответствует RM0008.
+// ---------------------------------------------------------------------------
+#include "../../os/interfaces/dma_manager.hpp"
+#include "../../os/config/dma_config.hpp"
 
-#include <cstdint>
-#include <cstddef>
 #include "stm32f10x.h"
 #include "core_cm3.h"
-#include <cstring>
-#include "../../os/common.hpp"
-#include "../../os/config/dma_config.hpp"
-// Если CMSIS не подключен глобально, раскомментируйте нужное:
-// #include "stm32f10x.h" 
-// #include "core_cm3.h"
+
+#include <cstdint>
 
 namespace embed {
+namespace {
 
-// =============================================================================
-// 1. КОНФИГУРАЦИЯ ПАМЯТИ (STM32F103RBTx: 20 КБ SRAM, 128 КБ Flash)
-// =============================================================================
-// Распределение 20 КБ (20480 байт) SRAM (адрес 0x20000000):
-// - ~4 КБ: Основной стек (MSP) для прерываний и функции main()
-// - 8 КБ: Куча (Heap) для динамических объектов ОС
-// - 8 КБ: Пул стеков задач (2048 слов по 4 байта)
-// =============================================================================
-
-uint32_t platform_max_heap_size() noexcept {
-    return 8U * 1024U; // 8192 байта
-}
-
-uint32_t platform_max_stack_pool_size() noexcept {
-    return 2048U; // 2048 слов = 8192 байта
-}
-
-// STM32F103RBTx не имеет контроллера FSMC, внешняя память отсутствует
-bool platform_has_ext_ram() noexcept { return false; }
-uint32_t* platform_ext_ram_base() noexcept { return nullptr; }
-uint32_t platform_max_ext_ram_size() noexcept { return 0U; }
-
-bool platform_has_ext_rom() noexcept { return false; }
-uint32_t platform_max_ext_rom_size() noexcept { return 0U; }
-bool platform_ext_rom_read(uint32_t, uint8_t*, uint32_t) noexcept { return false; }
-bool platform_ext_rom_write(uint32_t, const uint8_t*, uint32_t) noexcept { return false; }
-bool platform_ext_rom_erase(uint32_t, uint32_t) noexcept { return false; }
-
-
-// =============================================================================
-// 2. УПРАВЛЕНИЕ СТЕКОМ ЗАДАЧ
-// =============================================================================
-
-// Точка входа при нештатном завершении задачи (если функция задачи сделала return)
-static void task_exit_handler() noexcept {
-    // В детерминированной ОС задача не должна возвращаться.
-    // Зависаем или инициируем системный сброс.
-    while (true) {
-        __asm volatile ("nop");
-    }
-}
-
-void platform_stack_paint(uint32_t* stack, uint32_t words) noexcept {
-    if (words == 0U || stack == nullptr) return;
-    
-    // stack[0] — это младший адрес ("дно" стека). 
-    // Оставляем магическое значение для детекции переполнения (проверка в memory_manager.cpp)
-    stack[0] = 0xDEADBEEFU; 
-    
-    // Остальное заполняем паттерном для расчёта high-water mark
-    for (uint32_t i = 1U; i < words; ++i) {
-        stack[i] = 0xA5A5A5A5U;
-    }
-}
-
-uint32_t* platform_stack_init_frame(uint32_t* sp, void (*fn)(void*), void* ctx) noexcept {
-    if (sp == nullptr || fn == nullptr) return nullptr;
-
-    // Выравнивание указателя стека по 8 байт (требование ARM EABI для Cortex-M)
-    sp = reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(sp) & ~0x07UL);
-
-    // 1. Аппаратный фрейм (сохраняется/восстанавливается ядром Cortex-M3 аппаратно)
-    *--sp = 0x01000000UL;          // xPSR: бит Thumb (24) должен быть установлен
-    *--sp = reinterpret_cast<uint32_t>(fn);       // PC: адрес функции задачи
-    *--sp = reinterpret_cast<uint32_t>(task_exit_handler); // LR: адрес возврата при завершении
-    *--sp = 0x12121212UL;          // R12
-    *--sp = 0x03030303UL;          // R3
-    *--sp = 0x02020202UL;          // R2
-    *--sp = 0x01010101UL;          // R1
-    *--sp = reinterpret_cast<uint32_t>(ctx);      // R0: аргумент функции (контекст)
-
-    // 2. Программный фрейм (сохраняется/восстанавливается вручную в platform_save_context)
-    *--sp = 0x11111111UL;          // R11
-    *--sp = 0x10101010UL;          // R10
-    *--sp = 0x09090909UL;          // R9
-    *--sp = 0x08080808UL;          // R8
-    *--sp = 0x07070707UL;          // R7
-    *--sp = 0x06060606UL;          // R6
-    *--sp = 0x05050505UL;          // R5
-    *--sp = 0x04040404UL;          // R4
-
-    return sp;
-}
-
-
-// =============================================================================
-// 3. ПЛАНИРОВЩИК И ЯДРО (Cortex-M3 Specific)
-// =============================================================================
-
-uint32_t platform_core_count() noexcept {
-    return 1; // STM32F103 — одноядерный МК
-}
-
-uint32_t platform_current_core() noexcept {
-    return 0;
-}
-
-void platform_critical_enter() noexcept {
-    // Глобальное отключение прерываний. 
-    // Максимально просто, быстро и детерминированно для одноядерной системы.
-    __disable_irq();
-}
-
-void platform_critical_exit() noexcept {
-    __enable_irq();
-}
-
-void platform_trigger_context_switch() noexcept {
-    // Запрашиваем выполнение PendSV (Pendable Service Call)
-    SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
-    
-    // Барьеры памяти гарантируют, что все изменения в планировщике 
-    // записаны в RAM до начала выполнения обработчика прерывания
-    __DSB();
-    __ISB();
-}
-
-// Сохранение контекста текущей задачи.
-// Вызывается из PendSV_Handler. Аппаратная часть (R0-R3, R12, LR, PC, xPSR) 
-// уже сохранена ядром в стек (PSP). Сохраняем только R4-R11.
-__attribute__((naked)) uint32_t* platform_save_context() noexcept {
-    __asm volatile (
-        "MRS R0, PSP       \n" // Читаем текущий указатель стека задачи (PSP)
-        "SUB R0, R0, #32   \n" // Резервируем 32 байта (8 слов) под регистры R4-R11
-        "STM R0, {R4-R11}  \n" // Сохраняем регистры общего назначения в стек
-        "MSR PSP, R0       \n" // Обновляем PSP новым значением
-        "BX LR             \n" // Возврат в C++-код (R0 содержит новый указатель стека)
-        : : : "r0", "memory"
-    );
-}
-
-// Загрузка контекста новой задачи.
-// Эта функция является ПОСЛЕДНЕЙ в цепочке вызовов PendSV. 
-// Она выполняет аппаратный возврат из прерывания (EXC_RETURN), 
-// намеренно "забывая" вернуться в C++-код планировщика.
-__attribute__((naked)) void platform_load_context(uint32_t* sp) noexcept {
-    __asm volatile (
-        // R0 содержит указатель на стек новой задачи
-        "LDM R0!, {R4-R11} \n" // Восстанавливаем R4-R11. R0 теперь указывает на аппаратный фрейм
-        "MSR PSP, R0       \n" // Устанавливаем PSP на начало аппаратного фрейма
-        "MOV R0, #0        \n"
-        "MSR BASEPRI, R0   \n" // Сбрасываем маску прерываний ОС (гарантируем, что прерывания разрешены)
-        "MOV R0, #0xFFFFFFFD \n" // EXC_RETURN: возврат в Thread mode, использование PSP, без FPU
-        "BX R0             \n" // Аппаратный возврат из прерывания (ядро восстановит R0-R3, R12, LR, PC, xPSR)
-        : : : "r0", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "memory"
-    );
-}
-
-// Запуск самой первой задачи из main().
-// Имитирует возврат из прерывания, чтобы корректно развернуть аппаратный фрейм.
-__attribute__((naked)) void platform_start_first_task(uint32_t* sp) noexcept {
-    __asm volatile (
-        "MSR PSP, R0       \n" // Устанавливаем PSP на стек первой задачи
-        "MOV R0, #0x02     \n" // CONTROL = 0x02: Thread mode, привилегированный уровень, используется PSP
-        "MSR CONTROL, R0   \n"
-        "ISB               \n" // Барьер синхронизации команд (обязателен после записи в CONTROL)
-        "CPSIE I           \n" // Глобально разрешаем прерывания перед стартом планировщика
-        "MOV R0, #0xFFFFFFFD \n" // EXC_RETURN
-        "BX R0             \n" // Запуск задачи через механизм возврата из прерывания
-        : : : "r0", "memory"
-    );
-}
-
-
+// ─────────────────────────── Описание периферии ─────────────────────────────
 struct PeripheralRegs {
-    const char* name;
-    uint32_t tx_reg_addr;
-    uint32_t rx_reg_addr;
+    config::DmaRequest request;
+    uint32_t           tx_reg_addr;   // 0 = передача не поддерживается
+    uint32_t           rx_reg_addr;   // 0 = приём не поддерживается
 };
 
-static const PeripheralRegs peripherals[] = {
-    { "USART1", USART1->DR, USART1->DR },
-    { "USART2", USART2->DR, USART2->DR },
-    { "USART3", USART3->DR, USART3->DR },
-    { "SPI1",   SPI1->DR,     SPI1->DR },
-    { "SPI2",   SPI2->DR,     SPI2->DR },
-    { "SPI3",   SPI3->DR,     SPI3->DR },
-    { "I2C1",   I2C1->DR,     I2C1->DR },
-    { "I2C2",   I2C2->DR,     I2C2->DR },
-    { "ADC1",   0,            ADC1->DR },
-    { "ADC2",   0,            ADC2->DR },
-    { "ADC3",   0,            ADC3->DR },
+// DR — volatile-поле регистровой структуры, поэтому берём АДРЕС поля.
+#define REG_ADDR(periph) (static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&(periph)->DR)))
+
+static const PeripheralRegs kPeripherals[] = {
+    { config::DmaRequest::Usart1Tx, REG_ADDR(USART1), 0u             },
+    { config::DmaRequest::Usart1Rx, 0u,               REG_ADDR(USART1) },
+    { config::DmaRequest::Usart2Tx, REG_ADDR(USART2), 0u             },
+    { config::DmaRequest::Usart2Rx, 0u,               REG_ADDR(USART2) },
+    { config::DmaRequest::Usart3Tx, REG_ADDR(USART3), 0u             },
+    { config::DmaRequest::Usart3Rx, 0u,               REG_ADDR(USART3) },
+    { config::DmaRequest::Spi1Tx,   REG_ADDR(SPI1),   0u             },
+    { config::DmaRequest::Spi1Rx,   0u,               REG_ADDR(SPI1)   },
+    { config::DmaRequest::Spi2Tx,   REG_ADDR(SPI2),   0u             },
+    { config::DmaRequest::Spi2Rx,   0u,               REG_ADDR(SPI2)   },
+    { config::DmaRequest::I2c1Tx,   REG_ADDR(I2C1),   0u             },
+    { config::DmaRequest::I2c1Rx,   0u,               REG_ADDR(I2C1)   },
+    { config::DmaRequest::Adc1,     0u,               REG_ADDR(ADC1)   },
 };
 
-static const PeripheralRegs* find_periph(const char* name) noexcept {
-    for (const auto& p : peripherals) {
-        if (std::strcmp(p.name, name) == 0) return &p;
+/// Поиск периферии по запросу. Строковое сравнение (std::strcmp) убрано:
+/// теперь несоответствие имени — ошибка компиляции, а не NotSupported.
+static const PeripheralRegs* find_periph(config::DmaRequest request) noexcept {
+    for (const auto& p : kPeripherals) {
+        if (p.request == request) return &p;
     }
     return nullptr;
 }
 
 struct ChannelCallback {
     Callback_h cb;
-    void* arg;
+    void*      arg;
 };
 
-static ChannelCallback callbacks[config::TOTAL_CHANNELS];
+ChannelCallback g_callbacks[config::TOTAL_CHANNELS]{};
 
-static void global_id_to_hw(uint8_t global_id, uint8_t& ctrl, uint8_t& ch) noexcept {
-    if (global_id < 7) {
-        ctrl = 1;
-        ch = global_id + 1;
-    } else {
-        ctrl = 2;
-        ch = global_id - 7 + 1;
-    }
+// ─────────────────────────── Работа с регистрами ────────────────────────────
+
+/// Биты флагов канала в ISR/IFCR идут группами по 4, начиная с канала 1.
+static constexpr uint32_t flag_shift(uint8_t ch) noexcept {
+    return static_cast<uint32_t>(ch - 1u) * 4u;
 }
 
-static DMA_TypeDef* get_dma_base(uint8_t ctrl) noexcept {
-    return (ctrl == 1) 
-        ? reinterpret_cast<DMA_TypeDef*>(DMA1_BASE)
-        : reinterpret_cast<DMA_TypeDef*>(DMA2_BASE);
+static DMA_TypeDef* dma_base(uint8_t ctrl) noexcept {
+    return (ctrl == 1u) ? DMA1 : DMA2;
 }
 
-static DMA_Channel_TypeDef* get_channel_regs(uint8_t ctrl, uint8_t ch) noexcept {
-    uint32_t base = (ctrl == 1) ? DMA1_BASE : DMA2_BASE;
-    base += 0x08;
-    return reinterpret_cast<DMA_Channel_TypeDef*>(base + (ch - 1) * 0x14);
+static DMA_Channel_TypeDef* channel_regs(uint8_t ctrl, uint8_t ch) noexcept {
+    // Каналы идут с шагом 0x14 от DMA_Channel1_BASE (база + 0x08).
+    const uint32_t base = (ctrl == 1u) ? DMA1_BASE : DMA2_BASE;
+    return reinterpret_cast<DMA_Channel_TypeDef*>(
+        base + 0x08u + static_cast<uint32_t>(ch - 1u) * 0x14u);
 }
 
 static void enable_dma_clock(uint8_t ctrl) noexcept {
-    volatile uint32_t* rcc = reinterpret_cast<volatile uint32_t*>(RCC->AHBENR);
-    if (ctrl == 1) {
-        *rcc |= RCC_AHBENR_DMA1EN;
-    } else {
-        *rcc |= RCC_AHBENR_DMA2EN;
+    // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: RCC_TypeDef уже volatile, нужен АДРЕС регистра.
+    // Прежний код делал reinterpret_cast значения AHBENR в указатель.
+    if (ctrl == 1u) {
+        RCC->AHBENR |= RCC_AHBENR_DMA1EN;
     }
+#if defined(STM32F10X_HD) || defined(STM32F10X_CL) || defined(STM32F10X_XL)
+    else {
+        RCC->AHBENR |= RCC_AHBENR_DMA2EN;
+    }
+#else
+    else {
+        (void)ctrl;   // недостижимо: TOTAL_CHANNELS относится только к DMA1
+    }
+#endif
 }
 
-static void enable_channel_irq(uint8_t ctrl, uint8_t ch) noexcept {
-    uint32_t irqn;
-    if (ctrl == 1) {
-        irqn = DMA1_Channel1_IRQn + (ch - 1);
-    } else {
-        irqn = DMA2_Channel1_IRQn + (ch - 1);
+static uint32_t channel_irqn(uint8_t ctrl, uint8_t ch) noexcept {
+    if (ctrl == 1u) {
+        return static_cast<uint32_t>(DMA1_Channel1_IRQn) + (ch - 1u);
     }
-    
-    volatile uint32_t* nvic;
-    if (irqn < 32) {
-        nvic = reinterpret_cast<volatile uint32_t*>(NVIC_ISER_SETENA_0);
-        *nvic = (1 << irqn);
-    } else {
-        nvic = reinterpret_cast<volatile uint32_t*>(NVIC_ISER_SETENA_1);
-        *nvic = (1 << (irqn - 32));
-    }
+#if defined(STM32F10X_HD) || defined(STM32F10X_CL) || defined(STM32F10X_XL)
+    return static_cast<uint32_t>(DMA2_Channel1_IRQn) + (ch - 1u);
+#else
+    // DMA2 отсутствует (F103RB = medium density), поэтому ветка недостижима:
+    // config::TOTAL_CHANNELS описывает только каналы DMA1.
+    (void)ch;
+    return static_cast<uint32_t>(DMA1_Channel1_IRQn);
+#endif
 }
 
-static void disable_channel_irq(uint8_t ctrl, uint8_t ch) noexcept {
-    uint32_t irqn;
-    if (ctrl == 1) {
-        irqn = DMA1_Channel1_IRQn + (ch - 1);
-    } else {
-        irqn = DMA2_Channel1_IRQn + (ch - 1);
-    }
-    
-    volatile uint32_t* nvic;
-    if (irqn < 32) {
-        nvic = reinterpret_cast<volatile uint32_t*>(NVIC_ICER_CLRENA_0);
-        *nvic = (1 << irqn);
-    } else {
-        nvic = reinterpret_cast<volatile uint32_t*>(NVIC_ICER_CLRENA_1);
-        *nvic = (1 << (irqn - 32));
-    }
+static void nvic_enable_irq(uint32_t irqn) noexcept {
+    NVIC->ISER[irqn >> 5u] = (1UL << (irqn & 0x1Fu));
 }
 
-static uint32_t get_priority_bits(dma::Priority prio) noexcept {
+static void nvic_disable_irq(uint32_t irqn) noexcept {
+    NVIC->ICER[irqn >> 5u] = (1UL << (irqn & 0x1Fu));
+}
+
+static uint32_t priority_bits(dma::Priority prio) noexcept {
     switch (prio) {
-        case dma::Priority::Low:      return 0;
+        case dma::Priority::Low:      return 0u;
         case dma::Priority::Medium:   return DMA_CCR1_PL_0;
         case dma::Priority::High:     return DMA_CCR1_PL_1;
         case dma::Priority::VeryHigh: return DMA_CCR1_PL_0 | DMA_CCR1_PL_1;
     }
-    return 0;
+    return 0u;
 }
 
-static uint32_t get_size_bits(dma::TransferSize size) noexcept {
+static uint32_t size_bits(dma::TransferSize size) noexcept {
     switch (size) {
-        case dma::TransferSize::Byte:     return 0;
+        case dma::TransferSize::Byte:     return 0u;
         case dma::TransferSize::HalfWord: return DMA_CCR1_PSIZE_0 | DMA_CCR1_MSIZE_0;
         case dma::TransferSize::Word:     return DMA_CCR1_PSIZE_1 | DMA_CCR1_MSIZE_1;
     }
-    return 0;
+    return 0u;
 }
 
-static void clear_interrupt_flags(uint8_t ctrl, uint8_t ch) noexcept {
-    auto* dma = get_dma_base(ctrl);
-    dma->IFCR = DMA_ISR_GIF1 << ch;
+static constexpr uint32_t elem_bytes(dma::TransferSize size) noexcept {
+    return 1u << static_cast<uint32_t>(size);
+}
+
+static void clear_channel_flags(uint8_t ctrl, uint8_t ch) noexcept {
+    const uint32_t sh = flag_shift(ch);
+    dma_base(ctrl)->IFCR =
+        (DMA_ISR_GIF1 | DMA_ISR_TCIF1 | DMA_ISR_HTIF1 | DMA_ISR_TEIF1) << sh;
+}
+
+/// Регистры канала нельзя менять во время передачи: сначала снимаем EN.
+static void disable_channel(DMA_Channel_TypeDef* ch) noexcept {
+    ch->CCR &= ~DMA_CCR1_EN;
+    __DSB();
+}
+
+static bool valid_id(uint8_t global_id) noexcept {
+    return global_id < config::TOTAL_CHANNELS;
+}
+
+/// Общая настройка канала для «память <-> периферия».
+static bool setup_periph(
+    uint8_t           global_id,
+    uint32_t          periph_addr,
+    const void*       mem_addr,
+    Size              bytes,
+    dma::TransferSize unit_size,
+    dma::Priority     prio,
+    dma::BurstMode    burst,
+    bool              mem_increment,
+    uint32_t          dir_bit
+) noexcept {
+    uint8_t ctrl = 0u, ch = 0u;
+    global_id_to_hw(global_id, ctrl, ch);
+
+    const uint32_t elem = elem_bytes(unit_size);
+    if (bytes == 0u || (bytes % elem) != 0u) return false;
+    if ((bytes / elem) > 0xFFFFu) return false;    // CNDTR 16-битный
+    if (mem_addr == nullptr) return false;
+
+    enable_dma_clock(ctrl);
+    auto* regs = channel_regs(ctrl, ch);
+    disable_channel(regs);
+    clear_channel_flags(ctrl, ch);
+
+    regs->CPAR  = periph_addr;
+    regs->CMAR  = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(mem_addr));
+    regs->CNDTR = bytes / elem;
+
+    uint32_t ccr = dir_bit;
+    if (mem_increment) ccr |= DMA_CCR1_MINC;
+    if (burst == dma::BurstMode::Circular) ccr |= DMA_CCR1_CIRC;
+    ccr |= priority_bits(prio);
+    ccr |= size_bits(unit_size);
+    ccr |= DMA_CCR1_TCIE;
+
+    regs->CCR = ccr;
+    return true;
+}
+
+} // namespace
+
+// ─────────────────────────── Публичный интерфейс ────────────────────────────
+
+/// Глобальный id -> (контроллер, канал). Для F103RB контроллер всегда DMA1,
+/// поэтому выход за границы невозможен.
+void global_id_to_hw(uint8_t global_id, uint8_t& ctrl, uint8_t& ch) noexcept {
+    ctrl = 1u + (global_id / config::DMA1_CHANNELS);
+    ch   = 1u + (global_id % config::DMA1_CHANNELS);
 }
 
 uint8_t platform_dma_max_channels() noexcept {
@@ -310,100 +217,45 @@ uint8_t platform_dma_max_channels() noexcept {
 
 Status platform_dma_configure_mem_to_periph(
     uint8_t global_id,
-    const char* device_name,
+    config::DmaRequest request,
     const dma::BufferConfig& src,
     dma::TransferSize unitSize,
     dma::Priority prio,
     dma::Trigger trig,
     dma::BurstMode burst
 ) noexcept {
-    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
-    if (!device_name || !src.buffer || src.bytes == 0) return Status::InvalidArg;
+    if (!valid_id(global_id)) return Status::Unavailable;
+    if (!src.buffer || src.bytes == 0u) return Status::InvalidArg;
+    (void)trig;   // аппаратный запрос задаётся в CR самой периферии
 
-    const auto* periph = find_periph(device_name);
-    if (!periph || periph->tx_reg_addr == 0) return Status::NotSupported;
+    const PeripheralRegs* p = find_periph(request);
+    if (!p || p->tx_reg_addr == 0u) return Status::NotSupported;
 
-    uint8_t ctrl, ch;
-    global_id_to_hw(global_id, ctrl, ch);
-    
-    enable_dma_clock(ctrl);
-
-    auto* channel = get_channel_regs(ctrl, ch);
-    
-    channel->CCR &= ~DMA_CCR1_EN;
-
-    channel->CPAR = periph->tx_reg_addr;
-    channel->CMAR = reinterpret_cast<uint32_t>(src.buffer);
-    channel->CNDTR = src.bytes / (1 << static_cast<uint8_t>(unitSize));
-
-    uint32_t ccr = DMA_CCR1_DIR;
-
-    if (src.increment) ccr |= DMA_CCR1_MINC;
-    
-    switch (burst) {
-        case dma::BurstMode::Single:      break;
-        case dma::BurstMode::Incrementing: ccr |= DMA_CCR1_MINC; break;
-        case dma::BurstMode::Circular:     ccr |= DMA_CCR1_CIRC; break;
-    }
-
-    ccr |= get_priority_bits(prio);
-    ccr |= get_size_bits(unitSize);
-    ccr |= DMA_CCR1_TCIE;
-
-    channel->CCR = ccr;
-
-    clear_interrupt_flags(ctrl, ch);
-
-    return Status::Ok;
+    const bool ok = setup_periph(global_id, p->tx_reg_addr, src.buffer, src.bytes,
+                                 unitSize, prio, burst, src.increment,
+                                 DMA_CCR1_DIR);
+    return ok ? Status::Ok : Status::InvalidArg;
 }
 
 Status platform_dma_configure_periph_to_mem(
     uint8_t global_id,
-    const char* device_name,
+    config::DmaRequest request,
     const dma::BufferConfig& dst,
     dma::TransferSize unitSize,
     dma::Priority prio,
     dma::Trigger trig,
     dma::BurstMode burst
 ) noexcept {
-    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
-    if (!device_name || !dst.buffer || dst.bytes == 0) return Status::InvalidArg;
+    if (!valid_id(global_id)) return Status::Unavailable;
+    if (!dst.buffer || dst.bytes == 0u) return Status::InvalidArg;
+    (void)trig;
 
-    const auto* periph = find_periph(device_name);
-    if (!periph || periph->rx_reg_addr == 0) return Status::NotSupported;
+    const PeripheralRegs* p = find_periph(request);
+    if (!p || p->rx_reg_addr == 0u) return Status::NotSupported;
 
-    uint8_t ctrl, ch;
-    global_id_to_hw(global_id, ctrl, ch);
-    
-    enable_dma_clock(ctrl);
-
-    auto* channel = get_channel_regs(ctrl, ch);
-    
-    channel->CCR &= ~DMA_CCR1_EN;
-
-    channel->CPAR = periph->rx_reg_addr;
-    channel->CMAR = reinterpret_cast<uint32_t>(dst.buffer);
-    channel->CNDTR = dst.bytes / (1 << static_cast<uint8_t>(unitSize));
-
-    uint32_t ccr = 0;
-
-    if (dst.increment) ccr |= DMA_CCR1_MINC;
-    
-    switch (burst) {
-        case dma::BurstMode::Single:      break;
-        case dma::BurstMode::Incrementing: ccr |= DMA_CCR1_MINC; break;
-        case dma::BurstMode::Circular:     ccr |= DMA_CCR1_CIRC; break;
-    }
-
-    ccr |= get_priority_bits(prio);
-    ccr |= get_size_bits(unitSize);
-    ccr |= DMA_CCR1_TCIE;
-
-    channel->CCR = ccr;
-
-    clear_interrupt_flags(ctrl, ch);
-
-    return Status::Ok;
+    const bool ok = setup_periph(global_id, p->rx_reg_addr, dst.buffer, dst.bytes,
+                                 unitSize, prio, burst, dst.increment, 0u);
+    return ok ? Status::Ok : Status::InvalidArg;
 }
 
 Status platform_dma_configure_mem_to_mem(
@@ -414,152 +266,146 @@ Status platform_dma_configure_mem_to_mem(
     dma::Priority prio,
     dma::BurstMode burst
 ) noexcept {
-    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
-    if (!src.buffer || !dst.buffer || src.bytes == 0) return Status::InvalidArg;
+    if (!valid_id(global_id)) return Status::Unavailable;
+    if (!src.buffer || !dst.buffer || src.bytes == 0u) return Status::InvalidArg;
+    if (burst == dma::BurstMode::Circular) return Status::NotSupported;
 
-    uint8_t ctrl, ch;
+    uint8_t ctrl = 0u, ch = 0u;
     global_id_to_hw(global_id, ctrl, ch);
-    
+
+    const uint32_t elem = elem_bytes(unitSize);
+    if ((src.bytes % elem) != 0u || (src.bytes / elem) > 0xFFFFu) return Status::InvalidArg;
+
     enable_dma_clock(ctrl);
+    auto* regs = channel_regs(ctrl, ch);
+    disable_channel(regs);
+    clear_channel_flags(ctrl, ch);
 
-    auto* channel = get_channel_regs(ctrl, ch);
-    
-    channel->CCR &= ~DMA_CCR1_EN;
-
-    channel->CPAR = reinterpret_cast<uint32_t>(src.buffer);
-    channel->CMAR = reinterpret_cast<uint32_t>(dst.buffer);
-    channel->CNDTR = src.bytes / (1 << static_cast<uint8_t>(unitSize));
+    regs->CPAR  = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(src.buffer));
+    regs->CMAR  = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst.buffer));
+    regs->CNDTR = src.bytes / elem;
 
     uint32_t ccr = DMA_CCR1_MEM2MEM | DMA_CCR1_DIR;
-
     if (src.increment) ccr |= DMA_CCR1_PINC;
     if (dst.increment) ccr |= DMA_CCR1_MINC;
-    
-    if (burst == dma::BurstMode::Circular) {
-        return Status::NotSupported;
-    }
-
-    ccr |= get_priority_bits(prio);
-    ccr |= get_size_bits(unitSize);
+    ccr |= priority_bits(prio);
+    ccr |= size_bits(unitSize);
     ccr |= DMA_CCR1_TCIE;
 
-    channel->CCR = ccr;
-
-    clear_interrupt_flags(ctrl, ch);
-
+    regs->CCR = ccr;
     return Status::Ok;
 }
 
 Status platform_dma_start(uint8_t global_id) noexcept {
-    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
+    if (!valid_id(global_id)) return Status::Unavailable;
 
-    uint8_t ctrl, ch;
+    uint8_t ctrl = 0u, ch = 0u;
     global_id_to_hw(global_id, ctrl, ch);
 
-    auto* channel = get_channel_regs(ctrl, ch);
-    
-    clear_interrupt_flags(ctrl, ch);
-    
-    channel->CCR |= DMA_CCR1_EN;
-    
-    enable_channel_irq(ctrl, ch);
+    clear_channel_flags(ctrl, ch);
 
+    auto* regs = channel_regs(ctrl, ch);
+    if ((regs->CCR & DMA_CCR1_EN) != 0u) return Status::Busy;
+    if (regs->CNDTR == 0u) return Status::InvalidArg;
+
+    regs->CCR |= DMA_CCR1_EN;
+    nvic_enable_irq(channel_irqn(ctrl, ch));
     return Status::Ok;
 }
 
 Status platform_dma_stop(uint8_t global_id) noexcept {
-    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
+    if (!valid_id(global_id)) return Status::Unavailable;
 
-    uint8_t ctrl, ch;
+    uint8_t ctrl = 0u, ch = 0u;
     global_id_to_hw(global_id, ctrl, ch);
 
-    auto* channel = get_channel_regs(ctrl, ch);
-    channel->CCR &= ~DMA_CCR1_EN;
-
-    disable_channel_irq(ctrl, ch);
-
+    disable_channel(channel_regs(ctrl, ch));
+    nvic_disable_irq(channel_irqn(ctrl, ch));
+    clear_channel_flags(ctrl, ch);
     return Status::Ok;
 }
 
 bool platform_dma_is_complete(uint8_t global_id) noexcept {
-    if (global_id >= config::TOTAL_CHANNELS) return false;
+    if (!valid_id(global_id)) return false;
 
-    uint8_t ctrl, ch;
+    uint8_t ctrl = 0u, ch = 0u;
     global_id_to_hw(global_id, ctrl, ch);
 
-    auto* dma = get_dma_base(ctrl);
-    return (dma->ISR & (DMA_ISR_TCIF1 << ch)) != 0;
+    return (dma_base(ctrl)->ISR & (DMA_ISR_TCIF1 << flag_shift(ch))) != 0u;
 }
 
-Size platform_dma_bytes_transferred(uint8_t global_id) noexcept {
-    if (global_id >= config::TOTAL_CHANNELS) return 0;
+Size platform_dma_bytes_remaining(uint8_t global_id) noexcept {
+    if (!valid_id(global_id)) return 0u;
 
-    uint8_t ctrl, ch;
+    uint8_t ctrl = 0u, ch = 0u;
     global_id_to_hw(global_id, ctrl, ch);
-
-    auto* channel = get_channel_regs(ctrl, ch);
-    return channel->CNDTR;
+    return channel_regs(ctrl, ch)->CNDTR;
 }
 
-Status platform_dma_set_callback(
-    uint8_t global_id,
-    Callback_h cb,
-    void* arg
-) noexcept {
-    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
-
-    callbacks[global_id].cb = cb;
-    callbacks[global_id].arg = arg;
-
+Status platform_dma_set_callback(uint8_t global_id, Callback_h cb, void* arg) noexcept {
+    if (!valid_id(global_id)) return Status::Unavailable;
+    g_callbacks[global_id].cb  = cb;
+    g_callbacks[global_id].arg = arg;
     return Status::Ok;
 }
 
 Status platform_dma_clear_flags(uint8_t global_id) noexcept {
-    if (global_id >= config::TOTAL_CHANNELS) return Status::Unavailable;
+    if (!valid_id(global_id)) return Status::Unavailable;
 
-    uint8_t ctrl, ch;
+    uint8_t ctrl = 0u, ch = 0u;
     global_id_to_hw(global_id, ctrl, ch);
-
-    clear_interrupt_flags(ctrl, ch);
-
+    clear_channel_flags(ctrl, ch);
     return Status::Ok;
 }
 
 void platform_dma_irq_handler(uint8_t global_id) noexcept {
-    if (global_id >= config::TOTAL_CHANNELS) return;
+    if (!valid_id(global_id)) return;
 
-    uint8_t ctrl, ch;
+    uint8_t ctrl = 0u, ch = 0u;
     global_id_to_hw(global_id, ctrl, ch);
 
-    auto* dma = get_dma_base(ctrl);
+    auto* dma = dma_base(ctrl);
+    const uint32_t sh = flag_shift(ch);
 
-    if (dma->ISR & (DMA_ISR_TCIF1 << ch)) {
-        dma->IFCR = DMA_ISR_TCIF1 << ch;
+    Status result = Status::Ok;
+    bool   fired  = false;
 
-        auto& cb = callbacks[global_id];
-        if (cb.cb) {
-            struct CbContext {
-                Status  result;
-                void*   arg;
-            } ctx{ Status::Ok, cb.arg };
-
-            cb.cb(&ctx);
-        }
+    if ((dma->ISR & (DMA_ISR_TCIF1 << sh)) != 0u) {
+        dma->IFCR = DMA_ISR_TCIF1 << sh;
+        result = Status::Ok;
+        fired  = true;
     }
-
-    if (dma->ISR & (DMA_ISR_TEIF1 << ch)) {
-        dma->IFCR = DMA_ISR_TEIF1 << ch;
-
-        auto& cb = callbacks[global_id];
-        if (cb.cb) {
-            struct CbContext {
-                Status  result;
-                void*   arg;
-            } ctx{ Status::HardwareError, cb.arg };
-
-            cb.cb(&ctx);
-        }
+    if ((dma->ISR & (DMA_ISR_TEIF1 << sh)) != 0u) {
+        dma->IFCR = DMA_ISR_TEIF1 << sh;
+        result = Status::HardwareError;
+        fired  = true;
     }
+    if (!fired) return;
+
+    Callback_h cb  = g_callbacks[global_id].cb;
+    void*      arg = g_callbacks[global_id].arg;
+    if (!cb) return;
+
+    // Контекст живёт на стеке обработчика. Если пользователю нужны данные
+    // надолго — он обязан их скопировать.
+    struct CbContext {
+        uint8_t channel;
+        Status  result;
+        void*   user;
+    } ctx{ global_id, result, arg };
+
+    cb(&ctx);
 }
 
 } // namespace embed
+
+// ─────────────── Обработчики прерываний каналов DMA1 ────────────────────────
+// В startup-файле они объявлены слабыми (Default_Handler), поэтому
+// определения здесь их перекрывают.
+extern "C" void DMA1_Channel1_IRQHandler(void) { embed::platform_dma_irq_handler(0u); }
+extern "C" void DMA1_Channel2_IRQHandler(void) { embed::platform_dma_irq_handler(1u); }
+extern "C" void DMA1_Channel3_IRQHandler(void) { embed::platform_dma_irq_handler(2u); }
+extern "C" void DMA1_Channel4_IRQHandler(void) { embed::platform_dma_irq_handler(3u); }
+extern "C" void DMA1_Channel5_IRQHandler(void) { embed::platform_dma_irq_handler(4u); }
+extern "C" void DMA1_Channel6_IRQHandler(void) { embed::platform_dma_irq_handler(5u); }
+extern "C" void DMA1_Channel7_IRQHandler(void) { embed::platform_dma_irq_handler(6u); }

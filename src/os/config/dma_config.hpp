@@ -1,80 +1,92 @@
+// dma_config.hpp
 #pragma once
 #include <cstdint>
 
 namespace embed::config {
 
-// Глобальная нумерация каналов:
-// ID 0-6:   DMA1 Channel 1-7
-// ID 7-11:  DMA2 Channel 1-5
-
+// DMA STM32F103RB (medium density): ТОЛЬКО DMA1, 7 каналов.
+// DMA2 у этого кристалла отсутствует физически, поэтому его каналы
+// и запросы (ADC2/ADC3/SPI3/TIM5/TIM8/I2C2) здесь не описаны:
+// прежде они приводили к записи в несуществующие регистры и HardFault.
 constexpr uint8_t DMA1_CHANNELS = 7;
-constexpr uint8_t DMA2_CHANNELS = 5;
+constexpr uint8_t DMA2_CHANNELS = 0;
 constexpr uint8_t TOTAL_CHANNELS = DMA1_CHANNELS + DMA2_CHANNELS;
 
-struct DeviceMapping {
-    const char* device;
-    bool        is_tx;
-    uint8_t     channels[5];
-    uint8_t     channel_count;
+/// Запросы DMA. Строгое перечисление вместо строк: опечатка в имени
+/// периферии теперь ошибка компиляции, а не «NotSupported» в рантайме.
+enum class DmaRequest : uint8_t {
+    None = 0,
+
+    Adc1,        // DMA1 Ch1
+
+    Spi1Rx,      // DMA1 Ch2
+    Spi1Tx,      // DMA1 Ch3
+
+    Spi2Rx,      // DMA1 Ch4
+    Spi2Tx,      // DMA1 Ch5
+
+    Usart1Tx,    // DMA1 Ch4  (совпадает со Spi2Rx — взаимоисключающие)
+    Usart1Rx,    // DMA1 Ch5
+
+    Usart2Rx,    // DMA1 Ch6
+    Usart2Tx,    // DMA1 Ch7
+
+    Usart3Tx,    // DMA1 Ch3
+    Usart3Rx,    // DMA1 Ch2
+
+    I2c1Tx,      // DMA1 Ch6
+    I2c1Rx,      // DMA1 Ch7
+
+    Count_
 };
 
-// Конфигурация для STM32F103
+/// Описание запроса: в каком канале он может обслуживаться.
+/// Один запрос может допускать несколько каналов (альтернативные маппинги).
+struct DeviceMapping {
+    DmaRequest request;
+    uint8_t    channels[2];
+    uint8_t    channel_count;
+};
+
+// Соответствие по RM0008, таблица 78 (DMA1).
 inline constexpr DeviceMapping mappings[] = {
-    // === DMA1 (ID 0-6) ===
-    
-    // ADC1 — только DMA1 Channel 1 (ID 0)
-    { "ADC1",   false, {0}, 1 },
-    
-    // SPI1 — DMA1 Channel 2/3 (ID 1/2)
-    { "SPI1",   false, {1}, 1 },  // RX
-    { "SPI1",   true,  {2}, 1 },  // TX
-    
-    // SPI2 — DMA1 Channel 4/5 (ID 3/4)
-    { "SPI2",   false, {3}, 1 },  // RX
-    { "SPI2",   true,  {4}, 1 },  // TX
-    
-    // USART1 — DMA1 Channel 4/5 (ID 3/4)
-    { "USART1", true,  {3}, 1 },  // TX
-    { "USART1", false, {4}, 1 },  // RX
-    
-    // USART2 — DMA1 Channel 6/7 (ID 5/6)
-    { "USART2", false, {5}, 1 },  // RX
-    { "USART2", true,  {6}, 1 },  // TX
-    
-    // USART3 — DMA1 Channel 2/3 (ID 1/2)
-    { "USART3", true,  {1}, 1 },  // TX
-    { "USART3", false, {2}, 1 },  // RX
-    
-    // I2C1 — DMA1 Channel 6/7 (ID 5/6)
-    { "I2C1",   true,  {5}, 1 },  // TX
-    { "I2C1",   false, {6}, 1 },  // RX
-    
-    // I2C2 — DMA1 Channel 4/5 (ID 3/4)
-    { "I2C2",   true,  {3}, 1 },  // TX
-    { "I2C2",   false, {4}, 1 },  // RX
-    
-    // TIM2 — может использовать несколько каналов
-    { "TIM2",   true,  {1, 2, 5, 6}, 4 },
-    
-    // === DMA2 (ID 7-11) ===
-    
-    // ADC2 — DMA2 Channel 1 (ID 7)
-    { "ADC2",   false, {7}, 1 },
-    
-    // ADC3 — DMA2 Channel 2 (ID 8)
-    { "ADC3",   false, {8}, 1 },
-    
-    // TIM5 — DMA2 Channel 1-5 (ID 7-11)
-    { "TIM5",   true,  {7, 8, 9, 10, 11}, 5 },
-    
-    // TIM8 — DMA2 Channel 2-5 (ID 8-11)
-    { "TIM8",   true,  {8, 9, 10, 11}, 4 },
-    
-    // SPI3 — DMA2 Channel 1/2 (ID 7/8)
-    { "SPI3",   false, {7}, 1 },  // RX
-    { "SPI3",   true,  {8}, 1 },  // TX
+    { DmaRequest::Adc1,     {0},    1 },
+    { DmaRequest::Spi1Rx,   {1},    1 },
+    { DmaRequest::Spi1Tx,   {2},    1 },
+    { DmaRequest::Spi2Rx,   {3},    1 },
+    { DmaRequest::Spi2Tx,   {4},    1 },
+    { DmaRequest::Usart1Tx, {3},    1 },
+    { DmaRequest::Usart1Rx, {4},    1 },
+    { DmaRequest::Usart2Rx, {5},    1 },
+    { DmaRequest::Usart2Tx, {6},    1 },
+    { DmaRequest::Usart3Tx, {2},    1 },
+    { DmaRequest::Usart3Rx, {1},    1 },
+    { DmaRequest::I2c1Tx,   {5},    1 },
+    { DmaRequest::I2c1Rx,   {6},    1 },
 };
 
 inline constexpr uint8_t mappings_count = sizeof(mappings) / sizeof(mappings[0]);
 
-} // namespace os::dma::config
+/// Человекочитаемое имя запроса (для логов/отладки).
+inline const char* request_name(DmaRequest r) noexcept {
+    switch (r) {
+        case DmaRequest::None:     return "None";
+        case DmaRequest::Adc1:     return "ADC1";
+        case DmaRequest::Spi1Rx:   return "SPI1_RX";
+        case DmaRequest::Spi1Tx:   return "SPI1_TX";
+        case DmaRequest::Spi2Rx:   return "SPI2_RX";
+        case DmaRequest::Spi2Tx:   return "SPI2_TX";
+        case DmaRequest::Usart1Tx: return "USART1_TX";
+        case DmaRequest::Usart1Rx: return "USART1_RX";
+        case DmaRequest::Usart2Rx: return "USART2_RX";
+        case DmaRequest::Usart2Tx: return "USART2_TX";
+        case DmaRequest::Usart3Tx: return "USART3_TX";
+        case DmaRequest::Usart3Rx: return "USART3_RX";
+        case DmaRequest::I2c1Tx:   return "I2C1_TX";
+        case DmaRequest::I2c1Rx:   return "I2C1_RX";
+        case DmaRequest::Count_:   return "?";
+    }
+    return "?";
+}
+
+} // namespace embed::config

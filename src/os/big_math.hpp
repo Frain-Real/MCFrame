@@ -14,6 +14,10 @@ struct BigInt {
     size_t   len;   // число значащих слов (0 ⇒ значение 0)
     bool     neg;   // знак (для нуля всегда false)
 
+    /// Статус последней значащей операции (Overflow/InvalidArg).
+    /// mutable — операторы арифметики константны по сигнатуре.
+    mutable Status status_ = Status::Ok;
+
     constexpr BigInt() : d{}, len(0), neg(false) {}
 
     constexpr BigInt(int32_t v) : d{}, len(0), neg(false) {
@@ -73,35 +77,55 @@ struct BigInt {
         return 0;
     }
 
-    // Сложение модулей: out = |a| + |b|
-    static constexpr void add_abs(const BigInt& a, const BigInt& b, BigInt& out) {
-        out = BigInt();
+    // Сложение модулей: out = |a| + |b|.
+    // Возвращает Status::Overflow, если результат не помещается в N слов:
+    // прежде перенос молча терялся (max+1 давало 0), что для криптографии
+    // недопустимо.
+    static constexpr Status add_abs(const BigInt& a, const BigInt& b, BigInt& out) {
+        BigInt tmp{};                       // локальный: out может совпадать с a или b
         uint32_t carry = 0;
-        size_t mx = a.len > b.len ? a.len : b.len;
-        for (size_t i = 0; i < mx || carry; ++i) {
+        const size_t mx = a.len > b.len ? a.len : b.len;
+        size_t i = 0;
+        for (; i < mx; ++i) {
             uint64_t s = carry;
             if (i < a.len) s += a.d[i];
             if (i < b.len) s += b.d[i];
-            if (i < N) out.d[i] = (uint32_t)s;
-            carry = (uint32_t)(s >> 32);
+            if (i >= N) return Status::Overflow;
+            tmp.d[i] = static_cast<uint32_t>(s);
+            carry    = static_cast<uint32_t>(s >> 32);
         }
-        out.len = mx;
-        if (carry && mx < N) { out.d[mx] = carry; out.len = mx + 1; }
-        out.normalize();
+        if (carry != 0u) {
+            if (i >= N) return Status::Overflow;
+            tmp.d[i] = carry;
+            tmp.len  = i + 1u;
+        } else {
+            tmp.len = mx;
+        }
+        tmp.normalize();
+        out = tmp;
+        return Status::Ok;
     }
 
-    // Вычитание модулей: out = |a| - |b|,  гарантировано |a| >= |b|
-    static constexpr void sub_abs(const BigInt& a, const BigInt& b, BigInt& out) {
-        out = BigInt();
+    // Вычитание модулей: out = |a| - |b|, при условии |a| >= |b|.
+    // Возвращает Status::InvalidArg, если условие нарушено.
+    // Локальная переменная устраняет самоприсваивание out == a, из-за
+    // которого divmod_abs() давал неверный результат (100/7 == 8).
+    static constexpr Status sub_abs(const BigInt& a, const BigInt& b, BigInt& out) {
+        BigInt tmp{};
         uint32_t borrow = 0;
         for (size_t i = 0; i < a.len; ++i) {
-            uint64_t diff = (uint64_t)a.d[i] - borrow;
+            uint64_t diff = static_cast<uint64_t>(a.d[i]) - borrow;
             if (i < b.len) diff -= b.d[i];
-            out.d[i] = (uint32_t)diff;
-            borrow   = (uint32_t)(diff >> 63);   // 1 если underflow
+            if (i >= N) return Status::Overflow;
+            tmp.d[i] = static_cast<uint32_t>(diff);
+            // Заём — бит 32: результат вычитания лежит в 33 битах.
+            borrow   = static_cast<uint32_t>((diff >> 32) & 1u);
         }
-        out.len = a.len;
-        out.normalize();
+        if (borrow != 0u) return Status::InvalidArg;   // |a| < |b|
+        tmp.len = a.len;
+        tmp.normalize();
+        out = tmp;
+        return Status::Ok;
     }
 
     // Сдвиг влево на 1 бит (in-place)
@@ -115,24 +139,35 @@ struct BigInt {
         if (carry && a.len < N) { a.d[a.len++] = carry; }
     }
 
-    // Умножение модулей (школьный O(n²))
-    static constexpr void mul_abs(const BigInt& a, const BigInt& b, BigInt& out) {
-        out = BigInt();
+    // Умножение модулей (школьный O(n²)).
+    // Возвращает Status::Overflow при переполнении: прежде перенос в старшее
+    // слово не распространялся, и произведение молча становилось неверным.
+    static constexpr Status mul_abs(const BigInt& a, const BigInt& b, BigInt& out) {
+        BigInt tmp{};
         for (size_t i = 0; i < a.len; ++i) {
-            uint32_t carry = 0;
+            uint64_t carry = 0;
             for (size_t j = 0; j < b.len; ++j) {
-                size_t k = i + j;
-                if (k >= N) break;
-                uint64_t p = (uint64_t)a.d[i] * b.d[j] + out.d[k] + carry;
-                out.d[k] = (uint32_t)p;
-                carry    = (uint32_t)(p >> 32);
+                const size_t k = i + j;
+                if (k >= N) return Status::Overflow;
+                const uint64_t p = static_cast<uint64_t>(a.d[i]) * b.d[j]
+                                 + tmp.d[k] + carry;
+                tmp.d[k] = static_cast<uint32_t>(p);
+                carry    = p >> 32;
             }
-            size_t k = i + b.len;
-            if (k < N && carry) out.d[k] += carry;
+            // Распространение переноса ЦИКЛОМ, а не однократным сложением.
+            for (size_t k = i + b.len; carry != 0u; ++k) {
+                if (k >= N) return Status::Overflow;
+                const uint64_t sum = static_cast<uint64_t>(tmp.d[k]) + carry;
+                tmp.d[k] = static_cast<uint32_t>(sum);
+                carry    = sum >> 32;
+            }
         }
-        out.len = a.len + b.len;
-        if (out.len > N) out.len = N;
-        out.normalize();
+        size_t len = a.len + b.len;
+        if (len > N) len = N;
+        tmp.len = len;
+        tmp.normalize();
+        out = tmp;
+        return Status::Ok;
     }
 
     // Деление модулей (побитовый алгоритм): |a| = q·|b| + r
@@ -155,7 +190,7 @@ struct BigInt {
             r.normalize();
 
             if (cmp_abs(r, b) >= 0) {
-                sub_abs(r, b, r);
+                if (sub_abs(r, b, r) != Status::Ok) return Status::Fault;
                 size_t qw = (i - 1) / 32;
                 size_t qb = (i - 1) % 32;
                 if (qw < N) {
@@ -170,17 +205,23 @@ struct BigInt {
 
     //  Арифметические операторы
 
+    /// Результат последней операции, которая может переполниться.
+    /// (Для криптографии: молчаливое переполнение недопустимо.)
+    constexpr Status last_status() const { return status_; }
+
     constexpr BigInt operator+(const BigInt& b) const {
         BigInt r;
+        status_ = Status::Ok;
         if (neg == b.neg) {
-            add_abs(*this, b, r);
+            status_ = add_abs(*this, b, r);
             r.neg = neg;
         } else {
-            int c = cmp_abs(*this, b);
-            if (c >= 0) { sub_abs(*this, b, r); r.neg = neg; }
-            else        { sub_abs(b, *this, r); r.neg = b.neg; }
+            const int c = cmp_abs(*this, b);
+            if (c >= 0) { status_ = sub_abs(*this, b, r); r.neg = neg; }
+            else        { status_ = sub_abs(b, *this, r); r.neg = b.neg; }
         }
         r.normalize();
+        if (r.is_zero()) r.neg = false;
         return r;
     }
 
@@ -192,21 +233,21 @@ struct BigInt {
 
     constexpr BigInt operator*(const BigInt& b) const {
         BigInt r;
-        mul_abs(*this, b, r);
+        status_ = mul_abs(*this, b, r);
         r.neg = (neg != b.neg) && !r.is_zero();
         return r;
     }
 
     constexpr BigInt operator/(const BigInt& b) const {
         BigInt q, r;
-        divmod_abs(*this, b, q, r);
+        status_ = divmod_abs(*this, b, q, r);
         q.neg = (neg != b.neg) && !q.is_zero();
         return q;
     }
 
     constexpr BigInt operator%(const BigInt& b) const {
         BigInt q, r;
-        divmod_abs(*this, b, q, r);
+        status_ = divmod_abs(*this, b, q, r);
         r.neg = neg && !r.is_zero();
         return r;
     }

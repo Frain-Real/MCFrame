@@ -1,36 +1,93 @@
-# Собираем все исходники ядра
-file(GLOB_RECURSE OS_CORE_SOURCES 
-    "os/core/memory/*.cpp" 
-    "os/core/task/*.cpp" 
-    "os/core/primitives/*.cpp" 
-    "os/crypto/*.cpp"
-    "os/interfaces/*.cpp"
-)
+# src/CMakeLists.txt
+# ---------------------------------------------------------------------------
+# Явный список источников вместо file(GLOB ...): GLOB не отслеживает
+# появление новых файлов, и добавленный модуль молча не попадает в сборку.
+# ---------------------------------------------------------------------------
 
-# Собираем исходники выбранной платформы
-file(GLOB OS_PLATFORM_SOURCES 
-    "platforms/${MCU_TARGET}/*.cpp"
-    "platforms/${MCU_TARGET}/*.c"
-    "platforms/${MCU_TARGET}/*.s"
-    "platforms/${MCU_TARGET}/*.S"
-    )
+# ─────────── Ядро ОС (не зависит от платформы) ───────────
+set(OS_CORE_SOURCES
+    os/random.cpp
+    os/core/memory/memory_manager.cpp
+    os/core/memory/global_allocator.cpp
+    os/core/task/sheduler.cpp
+    os/interfaces/dma_manager.cpp)
 
-# Создаем статическую библиотеку (на выходе получим libmyos.a)
-add_library(MCFrame STATIC 
-    ${OS_CORE_SOURCES} 
-    ${OS_PLATFORM_SOURCES}
-)
+# ─────────── Платформенный слой ───────────
+# platform_ops.cpp реализует контракт embed::platform::Ops — обязателен для
+# ЛЮБОЙ платформы. platform.cpp содержит периферию (DMA/ADC) и присутствует
+# только там, где она реально нужна.
+set(OS_PLATFORM_SOURCES
+    platforms/${MCU_TARGET}/platform_ops.cpp)
 
-# Указываем компилятору, где искать заголовочные файлы.
-# PUBLIC означает, что эти пути унаследуют все, кто подключит нашу библиотеку.
-target_include_directories(MCFrame PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/os
-    ${CMAKE_CURRENT_SOURCE_DIR}/core/memory
-    ${CMAKE_CURRENT_SOURCE_DIR}/core/primitives
-    ${CMAKE_CURRENT_SOURCE_DIR}/core/task
-    ${CMAKE_CURRENT_SOURCE_DIR}/crypto
-    ${CMAKE_CURRENT_SOURCE_DIR}/interfaces
-    ${CMAKE_CURRENT_SOURCE_DIR}/platforms/${MCU_TARGET}
-)
+foreach(_extra platform.cpp platform_adc.cpp)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/platforms/${MCU_TARGET}/${_extra}")
+        list(APPEND OS_PLATFORM_SOURCES platforms/${MCU_TARGET}/${_extra})
+    endif()
+endforeach()
 
+# Тестовый интерфейс нужен только mock-сборке: он демонстрирует работу
+# CRTP-интерфейсов и используется примером.
+if(MCU_TARGET STREQUAL "mock")
+    list(APPEND OS_PLATFORM_SOURCES
+        platforms/mock/mock_interface.cpp
+        platforms/mock/platform_adc.cpp)
+endif()
+
+# Startup-код и clock-инициализация нужны только для реального МКУ.
+if(MCU_TARGET STREQUAL "stm32")
+    list(APPEND OS_PLATFORM_SOURCES
+        platforms/stm32/startup_stm32f10x_ld.s
+        platforms/stm32/system_stm32f10x.c
+        platforms/stm32/core_cm3.c)
+endif()
+
+foreach(_f ${OS_PLATFORM_SOURCES})
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_f}")
+        message(FATAL_ERROR "Нет источника платформы: ${_f}")
+    endif()
+endforeach()
+
+# Опциональный глобальный аллокатор: переопределение malloc/free/new
+# целиком — решение приложения, а не библиотеки. Иначе на mock-сборке
+# libstdc++ (std::cout и т.п.) уходит в кучу ОС и падает.
+option(MCFRAME_OVERRIDE_GLOBAL_ALLOCATOR
+       "Перехватывать malloc/free/operator new кучей MCFrame" OFF)
+
+set(_core ${OS_CORE_SOURCES})
+if(NOT MCFRAME_OVERRIDE_GLOBAL_ALLOCATOR)
+    list(REMOVE_ITEM _core os/core/memory/global_allocator.cpp)
+endif()
+
+add_library(MCFrame STATIC ${_core} ${OS_PLATFORM_SOURCES})
+add_library(MCFrame::MCFrame ALIAS MCFrame)
+
+# Приложение видит ТОЛЬКО ядро (os/...). Платформенные заголовки — PRIVATE:
+# так приложение физически не может подключить, например,
+# <mock_interface.hpp> из другого каталога платформы.
+target_include_directories(MCFrame
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/platforms/${MCU_TARGET})
+
+# Публичные требования: флаги через INTERFACE-таргет (устойчивы к внешним
+# CMAKE_*_FLAGS) плюс include-путь к CMSIS у STM32.
+target_link_libraries(MCFrame PUBLIC mcu_flags)
+
+if(MCU_TARGET STREQUAL "stm32")
+    # CMSIS-заголовки нужны только исходникам самой библиотеки и её
+    # платформенному коду — но не публичному API приложения.
+    target_include_directories(MCFrame PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/platforms/stm32)
+endif()
+
+# ─────────── Установка для внешних проектов ───────────
+include(GNUInstallDirs)
+install(TARGETS MCFrame mcu_flags EXPORT MCFrameTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(DIRECTORY os/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/os
+        FILES_MATCHING PATTERN "*.hpp")
+install(EXPORT MCFrameTargets
+        NAMESPACE MCFrame::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/MCFrame)

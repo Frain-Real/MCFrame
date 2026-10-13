@@ -1,196 +1,101 @@
+// memory_manager.cpp
 #include "memory_manager.hpp"
 
-inline embed::memory_manager::task_mem_info* embed::memory_manager::find_tracked(TaskHandler t) noexcept {
-    for (Size i = 0; i < tracked_count_; ++i) {
-        if (tracked_tasks_[i].task == t) return &tracked_tasks_[i];
+embed::memory_manager::task_slot*
+embed::memory_manager::find_slot(TaskHandler t) noexcept {
+    if (t == nullptr) return nullptr;
+    for (Size i = 0; i < kMaxTrackedTasks; ++i) {
+        if (slots_[i].task == t) return &slots_[i];
     }
     return nullptr;
 }
 
-inline embed::memory_manager::stack_slot* embed::memory_manager::find_stack_slot(uint32_t* base) noexcept {
-    for (Size i = 0; i < stack_slot_count_; ++i) {
-        if (stack_slots_[i].base == base) return &stack_slots_[i];
+embed::memory_manager::task_slot*
+embed::memory_manager::find_slot_by_stack(uint32_t* base) noexcept {
+    if (base == nullptr) return nullptr;
+    for (Size i = 0; i < kMaxTrackedTasks; ++i) {
+        if (slots_[i].task != nullptr && slots_[i].stack_base == base) return &slots_[i];
     }
     return nullptr;
 }
 
-inline void embed::memory_manager::heap_merge_free() noexcept {
-    if (!heap_free_list_) return;
-
-    bool swapped;
-    do {
-        swapped = false;
-        heap_block* prev = nullptr;
-        heap_block* cur  = heap_free_list_;
-        while (cur && cur->next) {
-            if (cur > cur->next) {
-                heap_block* a = cur;
-                heap_block* b = cur->next;
-                a->next = b->next;
-                b->next = a;
-                if (prev) prev->next = b;
-                else      heap_free_list_ = b;
-                cur = b;
-                swapped = true;
-            }
-            prev = cur;
-            cur  = cur->next;
-        }
-    } while (swapped);
-
-    heap_block* cur = heap_free_list_;
-    while (cur && cur->next) {
-        uint8_t* cur_end = reinterpret_cast<uint8_t*>(cur) +
-            (cur->size == 0 ? kHeapMinBlock : cur->size);
-        uint8_t* next_ptr = reinterpret_cast<uint8_t*>(cur->next);
-
-        if (cur_end == next_ptr) {
-            cur->size = 0;
-            cur->next = cur->next->next;
-        } else {
-            cur = cur->next;
-        }
+embed::Size embed::memory_manager::tracked_count() const noexcept {
+    Size n = 0u;
+    for (Size i = 0; i < kMaxTrackedTasks; ++i) {
+        if (slots_[i].task != nullptr) ++n;
     }
+    return n;
 }
 
-bool embed::memory_manager::ext_rom_active() const noexcept { return ext_rom_active_; }
+// Слияние блока b со следующим по адресу, если тот свободен.
+void embed::memory_manager::heap_coalesce(heap_block* b) noexcept {
+    if (!b || !b->is_free()) return;
 
-bool embed::memory_manager::ext_rom_read(uint32_t offset, uint8_t* buf, uint32_t len) noexcept {
-    if (!ext_rom_active_) return false;
-    if (offset + len > ext_rom_size_) return false;
-    return platform_ext_rom_read(offset, buf, len);
+    const auto addr = [](const heap_block* x) noexcept {
+        return reinterpret_cast<uintptr_t>(x);
+    };
+
+    // Следующий по адресу блок — только если он внутри кучи.
+    uint8_t* end = heap_start_ + heap_size_;
+    uintptr_t b_next = addr(b) + b->real_size();
+    if (b_next >= reinterpret_cast<uintptr_t>(end)) return;
+
+    auto* nb = reinterpret_cast<heap_block*>(b_next);
+    if (nb->magic != kHeapMagic || !nb->is_free()) return;
+
+    // Забираем соседа: удаляем его из free-list, растим текущий.
+    heap_block** pp = &heap_free_list_;
+    while (*pp && *pp != nb) pp = &(*pp)->next;
+    if (*pp == nb) *pp = nb->next;
+
+    b->set_size(b->real_size() + nb->real_size(), true);
 }
 
-bool embed::memory_manager::ext_rom_write(uint32_t offset, const uint8_t* buf, uint32_t len) noexcept {
-    if (!ext_rom_active_) return false;
-    if (offset + len > ext_rom_size_) return false;
-    return platform_ext_rom_write(offset, buf, len);
-}
-
-bool embed::memory_manager::ext_rom_erase(uint32_t offset, uint32_t len) noexcept {
-    if (!ext_rom_active_) return false;
-    if (offset + len > ext_rom_size_) return false;
-    return platform_ext_rom_erase(offset, len);
-}
-
-void embed::memory_manager::heap_defrag() noexcept {
-    heap_merge_free();
-}
-
-void embed::memory_manager::stack_pool_defrag() noexcept {
-    Size write_pos = 0;
-    for (Size i = 0; i < stack_slot_count_; ++i) {
-        stack_slot& slot = stack_slots_[i];
-        if (slot.words == 0) continue;
-        if (slot.task) {
-            task_state st = slot.task->state();
-            if (st == task_state::suspended ||
-                st == task_state::idle ||
-                st == task_state::done) {
-                if (slot.base != stack_pool_base_ + write_pos) {
-                    uint32_t* dst = stack_pool_base_ + write_pos;
-                    for (Size w = 0; w < slot.words; ++w) {
-                        dst[w] = slot.base[w];
-                    }
-                    slot.base = dst;
-                }
-                write_pos += slot.words;
-            } else {
-                write_pos = static_cast<Size>(
-                    slot.base - stack_pool_base_ + slot.words);
-            }
-        }
-    }
-
-    stack_pool_used_ = write_pos;
-
-    Size j = 0;
-    for (Size i = 0; i < stack_slot_count_; ++i) {
-        if (stack_slots_[i].words > 0) {
-            if (i != j) stack_slots_[j] = stack_slots_[i];
-            ++j;
-        }
-    }
-    stack_slot_count_ = j;
-}
-void embed::memory_manager::defrag() noexcept {
-    heap_defrag();
-    stack_pool_defrag();
-}
-
-
-embed::Size embed::memory_manager::task_stack_free(TaskHandler t) noexcept {
-    task_mem_info* info = find_tracked(t);
-    if (!info) return 0;
-
-    Size free_mem = 0;
-    for (Size i = 0; i < info->stack_words; ++i) {
-        if (info->stack_base[i] != kStackFill) break;
-        ++free_mem;
-    }
-    return free_mem;
-}
-embed::Size embed::memory_manager::task_stack_high_water(TaskHandler t) noexcept {
-    task_mem_info* info = find_tracked(t);
-    return info ? info->high_water : 0;
-}
-bool embed::memory_manager::task_stack_overflow(TaskHandler t) noexcept {
-    task_mem_info* info = find_tracked(t);
-    if (!info) return false;
-    return info->stack_base[0] != kStackMagic;
-}
-void embed::memory_manager::task_update_high_water(TaskHandler t) noexcept {
-    task_mem_info* info = find_tracked(t);
-    if (!info) return;
-    Size free_mem = task_stack_free(t);
-    if (free_mem < info->high_water) {
-        info->high_water = free_mem;
-    }
-}
-void embed::memory_manager::update_all_high_water() noexcept {
-    for (Size i = 0; i < tracked_count_; ++i) {
-        task_update_high_water(tracked_tasks_[i].task);
-    }
-}
-
-// ──────────── Heap ────────────
-/// Выделить из кучи (внутренняя + внешняя RAM). nullptr если не хватает.
 void* embed::memory_manager::heap_alloc(Size bytes) noexcept {
-    if (bytes == 0 || heap_free_list_ == nullptr) return nullptr;
+    if (!initialized_ || bytes == 0u) return nullptr;
 
-    Size needed = align_up(bytes + kHeapMinBlock, kHeapAlign);
+    // Заголовок + выравнивание, с защитой от переполнения.
+    if (bytes > 0xFFFFFFFFu - kHeapMinBlock - kHeapAlign) return nullptr;
+
+    const Size needed = align_up(bytes + kHeapMinBlock, kHeapAlign);
 
     heap_block* prev = nullptr;
     heap_block* cur  = heap_free_list_;
 
     while (cur) {
-        Size avail = cur->size;
-        if (avail == 0) {
-            uint8_t* block_end = heap_start_ + heap_size_;
-            uint8_t* cur_ptr   = reinterpret_cast<uint8_t*>(cur);
-
-            if (ext_ram_active_ && cur_ptr >= reinterpret_cast<uint8_t*>(ext_ram_base_)) {
-                block_end = reinterpret_cast<uint8_t*>(ext_ram_base_ + ext_ram_size_);
-            }
-            avail = static_cast<Size>(block_end - cur_ptr);
-        }
+        const Size avail = cur->real_size();
 
         if (avail >= needed) {
-            if (avail >= needed + kHeapMinBlock + kHeapAlign) {
-                auto* new_block = reinterpret_cast<heap_block*>(
-                    reinterpret_cast<uint8_t*>(cur) + needed);
-                new_block->size = 0;
-                new_block->next = cur->next;
-                cur->size  = needed;
-                cur->next  = nullptr;
+            const Size rest = avail - needed;
 
-                if (prev) prev->next = new_block;
-                else      heap_free_list_ = new_block;
+            if (rest >= kHeapMinBlock + kHeapAlign) {
+                // Расщепляем: [выделенный needed][новый свободный rest].
+                // Свободного стало меньше ровно на needed: остаток rest
+                // остаётся в куче как отдельный блок.
+                auto* nb = reinterpret_cast<heap_block*>(
+                    reinterpret_cast<uint8_t*>(cur) + needed);
+                nb->set_size(rest, true);
+                nb->magic = kHeapMagic;
+                nb->next  = cur->next;
+
+                cur->set_size(needed, false);
+                cur->next = nullptr;
+
+                if (prev) prev->next = nb;
+                else      heap_free_list_ = nb;
+
+                heap_free_ -= needed;
             } else {
-                cur->size = needed;
+                // Отдаём блок целиком: остаток слишком мал для заголовка,
+                // поэтому он уходит пользователю вместе с блоком.
+                cur->set_size(avail, false);
                 if (prev) prev->next = cur->next;
                 else      heap_free_list_ = cur->next;
+                cur->next = nullptr;
+
+                heap_free_ -= avail;
             }
+
             return reinterpret_cast<uint8_t*>(cur) + kHeapMinBlock;
         }
 
@@ -201,110 +106,293 @@ void* embed::memory_manager::heap_alloc(Size bytes) noexcept {
     return nullptr;
 }
 
-/// Вернуть в кучу.
 void embed::memory_manager::heap_free(void* ptr) noexcept {
-    if (!ptr) return;
+    if (!ptr || !initialized_) return;
 
-    auto* block = reinterpret_cast<heap_block*>(
-        static_cast<uint8_t*>(ptr) - kHeapMinBlock);
-    block->size = 0;
-    block->next = heap_free_list_;
-    heap_free_list_ = block;
-}
-
-uint32_t* embed::memory_manager::task_stack_init(TaskHandler t, uint32_t* stack, Size words) noexcept {
-    if (!t || !stack || words == 0) return nullptr;
-
-    platform_stack_paint(stack, words);
-
-    stack_slot* slot = find_stack_slot(stack);
-    if (slot) slot->task = t;
-
-    if (tracked_count_ < kMaxTrackedTasks) {
-        tracked_tasks_[tracked_count_].task        = t;
-        tracked_tasks_[tracked_count_].stack_base  = stack;
-        tracked_tasks_[tracked_count_].stack_words = words;
-        tracked_tasks_[tracked_count_].high_water  = words;
-        ++tracked_count_;
+    // Проверяем, что указатель вообще принадлежит нашей куче.
+    auto* raw = static_cast<uint8_t*>(ptr);
+    if (raw < heap_start_ + kHeapMinBlock ||
+        raw >= heap_start_ + heap_size_) {
+        ++heap_faults_;
+        return;
     }
 
+    auto* b = reinterpret_cast<heap_block*>(raw - kHeapMinBlock);
+    if (b->magic != kHeapMagic) {          // чужой указатель или порча
+        ++heap_faults_;
+        return;
+    }
+    if (b->is_free()) {                    // двойное освобождение
+        ++heap_faults_;
+        return;
+    }
+
+    const Size n = b->real_size();
+    b->set_size(n, true);
+    heap_free_ += n;
+
+    // Вставляем в free-list в порядке адресов, затем сливаем с соседями.
+    heap_block** pp = &heap_free_list_;
+    while (*pp && *pp < b) pp = &(*pp)->next;
+    b->next = *pp;
+    *pp = b;
+
+    heap_coalesce(b);
+}
+
+embed::Size embed::memory_manager::heap_largest_free() const noexcept {
+    Size best = 0;
+    for (const heap_block* cur = heap_free_list_; cur; cur = cur->next) {
+        if (cur->real_size() > best) best = cur->real_size();
+    }
+    return best;
+}
+
+bool embed::memory_manager::heap_check() const noexcept {
+    if (!initialized_) return false;
+
+    const uint8_t* begin = heap_start_;
+    const uint8_t* end   = heap_start_ + heap_size_;
+
+    Size counted_free = 0;
+    const uint8_t* p = begin;
+    while (p < end) {
+        const auto* b = reinterpret_cast<const heap_block*>(p);
+        if (b->magic != kHeapMagic) return false;
+        const Size sz = b->real_size();
+        if (sz < kHeapMinBlock || sz % kHeapAlign != 0u) return false;
+        if (p + sz > end) return false;
+        if (b->is_free()) counted_free += sz;
+        p += sz;
+    }
+    if (p != end) return false;
+    return counted_free == heap_free_;
+}
+
+embed::Size embed::memory_manager::task_stack_free(TaskHandler t) noexcept {
+    task_slot* info = find_slot(t);
+    if (!info) return 0;
+
+    // Стек растёт ВНИЗ: идём от вершины к дну и считаем нетронутые слова.
+    constexpr uint32_t kFill = 0xA5A5A5A5u;
+    Size i = info->stack_words;
+    while (i > 0u && info->stack_base[i - 1u] == kFill) --i;
+    return i;
+}
+
+embed::Size embed::memory_manager::task_stack_high_water(TaskHandler t) noexcept {
+    task_slot* info = find_slot(t);
+    return info ? info->high_water : 0u;
+}
+
+bool embed::memory_manager::task_stack_overflow(TaskHandler t) noexcept {
+    task_slot* info = find_slot(t);
+    if (!info || info->stack_base == nullptr) return false;
+    // Дно стека (младший адрес) хранит магическое значение; если оно затёрто —
+    // стек дорос до самого низа.
+    return info->stack_base[0] != 0xDEADBEEFu;
+}
+
+void embed::memory_manager::task_update_high_water(TaskHandler t) noexcept {
+    task_slot* info = find_slot(t);
+    if (!info || info->stack_base == nullptr || info->stack_words == 0u) return;
+    const Size free_words = task_stack_free(t);
+    if (free_words < info->high_water) info->high_water = free_words;
+}
+
+void embed::memory_manager::task_reset_high_water(TaskHandler t) noexcept {
+    task_slot* info = find_slot(t);
+    if (info == nullptr) return;
+    info->high_water = info->stack_words;
+}
+
+void embed::memory_manager::reset_all_high_water() noexcept {
+    for (Size i = 0; i < kMaxTrackedTasks; ++i) {
+        slots_[i].high_water = slots_[i].stack_words;
+    }
+}
+
+void embed::memory_manager::update_all_high_water() noexcept {
+    for (Size i = 0; i < kMaxTrackedTasks; ++i) {
+        if (slots_[i].task != nullptr) task_update_high_water(slots_[i].task);
+    }
+}
+
+// ──────────── External ROM ────────────
+
+bool embed::memory_manager::ext_rom_read(uint32_t offset, uint8_t* buf, uint32_t len) noexcept {
+    if (!ext_rom_active_ || !buf) return false;
+    if (offset > ext_rom_size_ || len > ext_rom_size_ - offset) return false;
+    return platform::ops().ext_rom_read(offset, buf, len);
+}
+
+bool embed::memory_manager::ext_rom_write(uint32_t offset, const uint8_t* buf, uint32_t len) noexcept {
+    if (!ext_rom_active_ || !buf) return false;
+    if (offset > ext_rom_size_ || len > ext_rom_size_ - offset) return false;
+    return platform::ops().ext_rom_write(offset, buf, len);
+}
+
+bool embed::memory_manager::ext_rom_erase(uint32_t offset, uint32_t len) noexcept {
+    if (!ext_rom_active_) return false;
+    if (offset > ext_rom_size_ || len > ext_rom_size_ - offset) return false;
+    return platform::ops().ext_rom_erase(offset, len);
+}
+
+// ──────────── Stack pool ────────────
+
+/// Настроить стек задачи: покрасить, зарегистрировать владельца слота,
+/// поставить на учёт и собрать стартовый фрейм для первой загрузки контекста.
+uint32_t* embed::memory_manager::task_stack_init(TaskHandler t, uint32_t* stack, Size words) noexcept {
+    if (!t || !stack || words == 0u) return nullptr;
+
+    const platform::Ops& p = platform::ops();
+    if (p.stack_paint) p.stack_paint(stack, static_cast<uint32_t>(words));
+
+    // Переиспользуем запись, если задача уже учтена; иначе ищем свободный слот.
+    task_slot* info = find_slot(t);
+    if (info == nullptr) {
+        for (Size i = 0; i < kMaxTrackedTasks; ++i) {
+            if (slots_[i].task == nullptr) { info = &slots_[i]; break; }
+        }
+    }
+    if (info == nullptr) return nullptr;      // таблица заполнена
+
+    info->task        = t;
+    info->stack_base  = stack;
+    info->stack_words = words;
+    info->high_water  = words;
+
     uint32_t* sp = stack + words;
-    sp = platform_stack_init_frame(sp, t->fn(), t->ctx());
+    if (p.stack_init_frame) sp = p.stack_init_frame(sp, t->fn(), t->ctx());
+    if (sp == nullptr) return nullptr;
+
     t->save_sp(sp);
     return sp;
 }
-
-/// Снять задачу с учёта.
 void embed::memory_manager::task_unregister(TaskHandler t) noexcept {
-    task_mem_info* info = find_tracked(t);
-    if (!info) return;
-
-    Size idx = static_cast<Size>(info - tracked_tasks_);
-    for (Size i = idx; i + 1 < tracked_count_; ++i) {
-        tracked_tasks_[i] = tracked_tasks_[i + 1];
-    }
-    --tracked_count_;
+    task_slot* slot = find_slot(t);
+    if (slot == nullptr) return;
+    // Слот освобождается, но занимаемое им место в пуле НЕ возвращается:
+    // стек выделял вызывающий (обычно статический массив).
+    *slot = task_slot{};
 }
 
 uint32_t* embed::memory_manager::stack_alloc(Size words) noexcept {
-    if (stack_pool_used_ + words > stack_pool_size_) return nullptr;
-    if (stack_slot_count_ >= kMaxTrackedTasks) return nullptr;
+    if (!initialized_ || words == 0u || stack_pool_size_ == 0u) return nullptr;
 
+    // 1. Переиспользуем освобождённый слот ТОГО ЖЕ размера: иначе пул
+    //    исчерпывался после нескольких циклов выделить/освободить.
+    for (Size i = 0; i < kMaxTrackedTasks; ++i) {
+        if (slots_[i].task == nullptr &&
+            slots_[i].stack_base != nullptr &&
+            slots_[i].stack_words == words) {
+            slots_[i].high_water = words;
+            return slots_[i].stack_base;
+        }
+    }
+
+    if (stack_pool_used_ + words > stack_pool_size_) return nullptr;
+
+    // 2. Новый участок пула.
     uint32_t* base = stack_pool_base_ + stack_pool_used_;
     stack_pool_used_ += words;
 
-    stack_slots_[stack_slot_count_].base  = base;
-    stack_slots_[stack_slot_count_].words = words;
-    stack_slots_[stack_slot_count_].task  = nullptr;
-    ++stack_slot_count_;
-
-    return base;
-}
-
-// Вернуть стек в пул.
-void embed::memory_manager::stack_free(uint32_t* stack) noexcept {
-    stack_slot* slot = find_stack_slot(stack);
-    if (!slot) return;
-    slot->task  = nullptr;
-    slot->words = 0;
-}
-
-void embed::memory_manager::init(Size heap_bytes, Size stack_pool_words, Size ext_ram_words, Size ext_rom_bytes) noexcept {
-    Size max_heap = platform_max_heap_size();
-    if (max_heap > 0 && heap_bytes > 0) {
-        if (heap_bytes > max_heap) heap_bytes = max_heap;
-        heap_size_  = heap_bytes;
-        heap_start_ = reinterpret_cast<uint8_t*>(0x20000000);
-        auto* block = reinterpret_cast<heap_block*>(heap_start_);
-        block->size = 0;
-        block->next = nullptr;
-        heap_free_list_ = block;
-    }
-    Size max_pool = platform_max_stack_pool_size();
-    if (max_pool > 0 && stack_pool_words > 0) {
-        if (stack_pool_words > max_pool) stack_pool_words = max_pool;
-        stack_pool_size_ = stack_pool_words;
-        stack_pool_base_ = reinterpret_cast<uint32_t*>(0x20000000 + heap_bytes);
-        stack_slot_count_ = 0;
-        stack_pool_used_  = 0;
-    }
-    if (platform_has_ext_ram() && ext_ram_words > 0) {
-        Size max_ext = platform_max_ext_ram_size();
-        if (ext_ram_words > max_ext) ext_ram_words = max_ext;
-        ext_ram_base_ = platform_ext_ram_base();
-        if (ext_ram_base_) {
-            ext_ram_size_   = ext_ram_words;
-            ext_ram_active_ = true;
-            auto* block = reinterpret_cast<heap_block*>(ext_ram_base_);
-            block->size = 0;
-            block->next = heap_free_list_;
-            heap_free_list_ = block;
+    for (Size i = 0; i < kMaxTrackedTasks; ++i) {
+        if (slots_[i].task == nullptr && slots_[i].stack_base == nullptr) {
+            slots_[i].stack_base  = base;
+            slots_[i].stack_words = words;
+            slots_[i].high_water  = words;
+            return base;
         }
     }
-    if (platform_has_ext_rom() && ext_rom_bytes > 0) {
-        Size max_rom = platform_max_ext_rom_size();
-        if (ext_rom_bytes > max_rom) ext_rom_bytes = max_rom;
-        ext_rom_size_   = ext_rom_bytes;
-        ext_rom_active_ = true;
+
+    // Свободных записей нет — откатываем выделение из пула.
+    stack_pool_used_ -= words;
+    return nullptr;
+}
+
+void embed::memory_manager::stack_free(uint32_t* stack) noexcept {
+    task_slot* slot = find_slot_by_stack(stack);
+    if (slot == nullptr) return;
+
+    // Возвращаем слова пулу и сохраняем участок для переиспользования:
+    // stack_base остаётся, task обнуляется (см. stack_alloc, шаг 1).
+    if (slot->task != nullptr) {
+        if (stack_pool_used_ >= slot->stack_words) {
+            stack_pool_used_ -= slot->stack_words;
+        }
     }
+    slot->task       = nullptr;
+    slot->high_water = slot->stack_words;
+}
+
+// ──────────── Init ────────────
+
+embed::Status embed::memory_manager::init(Size heap_bytes, Size stack_pool_words,
+                                          Size ext_ram_words, Size ext_rom_bytes) noexcept {
+    if (initialized_) return Status::AlreadyExists;
+
+    for (Size i = 0; i < kMaxTrackedTasks; ++i) slots_[i] = task_slot{};
+
+    const platform::Ops& p = platform::ops();
+
+    // ── Heap ──
+    uint8_t* heap_base = p.heap_base ? p.heap_base() : nullptr;
+    Size heap_cap       = p.heap_capacity ? p.heap_capacity() : 0u;
+
+    if (heap_base != nullptr && heap_cap > 0u && heap_bytes > 0u) {
+        if (heap_bytes > heap_cap) heap_bytes = heap_cap;
+        heap_bytes = align_up(heap_bytes, kHeapAlign);
+        if (heap_bytes > heap_cap) heap_bytes = heap_cap & ~(kHeapAlign - 1u);
+
+        if (heap_bytes >= kHeapMinBlock * 2u) {
+            heap_start_ = heap_base;
+            heap_size_  = heap_bytes;
+
+            auto* first = reinterpret_cast<heap_block*>(heap_start_);
+            first->set_size(heap_bytes, true);
+            first->magic = kHeapMagic;
+            first->next  = nullptr;
+
+            heap_first_     = first;
+            heap_free_list_ = first;
+            heap_free_      = heap_bytes;
+        }
+    }
+
+    // ── Stack pool ──
+    uint32_t* pool_base = p.stack_pool_base ? p.stack_pool_base() : nullptr;
+    Size pool_cap       = p.stack_pool_capacity ? p.stack_pool_capacity() : 0u;
+
+    if (pool_base != nullptr && pool_cap > 0u && stack_pool_words > 0u) {
+        if (stack_pool_words > pool_cap) stack_pool_words = pool_cap;
+        stack_pool_base_ = pool_base;
+        stack_pool_size_ = stack_pool_words;
+        stack_pool_used_ = 0u;
+    }
+
+    // ── External RAM ──
+    if (p.has_ext_ram && p.has_ext_ram() && ext_ram_words > 0u) {
+        Size cap = p.ext_ram_capacity ? p.ext_ram_capacity() : 0u;
+        if (ext_ram_words > cap) ext_ram_words = cap;
+        uint32_t* base = p.ext_ram_base ? p.ext_ram_base() : nullptr;
+        if (base != nullptr && ext_ram_words > 0u) {
+            ext_ram_base_   = base;
+            ext_ram_size_   = ext_ram_words;
+            ext_ram_active_ = true;
+        }
+    }
+
+    // ── External ROM ──
+    if (p.has_ext_rom && p.has_ext_rom() && ext_rom_bytes > 0u) {
+        Size cap = p.ext_rom_capacity ? p.ext_rom_capacity() : 0u;
+        if (ext_rom_bytes > cap) ext_rom_bytes = cap;
+        if (ext_rom_bytes > 0u) {
+            ext_rom_size_   = ext_rom_bytes;
+            ext_rom_active_ = true;
+        }
+    }
+
+    initialized_ = true;
+    return Status::Ok;
 }

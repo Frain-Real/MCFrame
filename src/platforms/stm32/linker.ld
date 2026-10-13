@@ -1,70 +1,51 @@
 /*
-*****************************************************************************
-**
+ * Linker script для STM32F103RBTx (128 КБ Flash, 20 КБ SRAM).
+ *
+ * Раскладка SRAM задаётся ЗДЕСЬ и передаётся ядру символами
+ * _os_heap_start/_os_heap_end/_os_stack_pool_start/_os_stack_pool_end.
+ * Раньше адреса (0x20000000) были вшиты в memory_manager.cpp, из-за чего
+ * куча накладывалась на .data/.bss и стек MSP, а на mock-сборке
+ * приводила к записи по несуществующему адресу.
+ *
+ * Если регионы не влезают в RAM — линкер сообщит об ошибке, а не
+ * «тихо испортит память» в рантайме.
+ */
 
-**  File        : LinkerScript.ld
-**
-**  Abstract    : Linker script for STM32F103RBTx Device with
-**                128KByte FLASH, 20KByte RAM
-**
-**                Set heap size, stack size and stack location according
-**                to application requirements.
-**
-**                Set memory bank area and size if external memory is used.
-**
-**  Target      : STMicroelectronics STM32
-**
-**
-**  Distribution: The file is distributed as is, without any warranty
-**                of any kind.
-**
-*****************************************************************************
-** @attention
-**
-** <h2><center>&copy; COPYRIGHT(c) 2014 Ac6</center></h2>
-**
-** Redistribution and use in source and binary forms, with or without modification,
-** are permitted provided that the following conditions are met:
-**   1. Redistributions of source code must retain the above copyright notice,
-**      this list of conditions and the following disclaimer.
-**   2. Redistributions in binary form must reproduce the above copyright notice,
-**      this list of conditions and the following disclaimer in the documentation
-**      and/or other materials provided with the distribution.
-**   3. Neither the name of Ac6 nor the names of its contributors
-**      may be used to endorse or promote products derived from this software
-**      without specific prior written permission.
-**
-** THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-** AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-** IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-** DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-** FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-** DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-** SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-** CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-** OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-** OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-**
-*****************************************************************************
-*/
-
-/* Entry Point */
 ENTRY(Reset_Handler)
 
-/* Highest address of the user mode stack */
-_estack = ORIGIN(RAM) + LENGTH(RAM);    /* end of RAM */
-/* Generate a link error if heap and stack don't fit into RAM */
-_Min_Heap_Size = 0x200;      /* required amount of heap  */
-_Min_Stack_Size = 0x400; /* required amount of stack */
+/* ─────────────────────────────────────────────────────────────────────────
+   Размеры регионов ОС.
+
+   ЗАЧЕМ ЗДЕСЬ DEFINED(): прежде значения были жёсткими (8 КБ куча + 4 КБ
+   пул при 20 КБ RAM), и даже когда куча не использовалась, память
+   считалась занятой. Теперь размеры задаются из CMake
+   (-DMCU_OS_HEAP_BYTES / -DMCU_OS_STACK_POOL_WORDS / -DMCU_MSP_STACK_BYTES),
+   а 0 означает «регион не нужен»: символы _os_heap_start/_os_heap_end
+   совпадут, ядро увидит нулевую ёмкость и не поднимет кучу.
+
+   Приложение со статическими TCB и стеками может поставить 0 и вернуть
+   эту RAM себе.
+   ───────────────────────────────────────────────────────────────────────── */
+_OS_Heap_Size      = DEFINED(_OS_Heap_Size_override)      ? _OS_Heap_Size_override      : 0;
+_OS_StackPool_Size = DEFINED(_OS_StackPool_Size_override) ? _OS_StackPool_Size_override : 0;
+_Min_Stack_Size    = DEFINED(_Min_Stack_Size_override)    ? _Min_Stack_Size_override    : 1K;
+
+/* Highest address of the user mode stack.
+   MSP растёт вниз от конца RAM. Регионы кучи и пула расположены НИЖЕ
+   стека, поэтому они не могут пересечься. */
+_estack = ORIGIN(RAM) + LENGTH(RAM);
+
+/* Отдельный резерв под malloc newlib не нужен: динамическая память идёт
+   из кучи ОС. Ненулевое значение здесь просто съедало RAM. */
+_Min_Heap_Size = 0;
 
 /* Specify the memory areas */
 MEMORY
 {
-RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 20K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 128K
+  RAM (xrw)  : ORIGIN = 0x20000000, LENGTH = 20K
+  FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 128K
 }
 
-/* Define output sections */
 SECTIONS
 {
   /* The startup code goes first into FLASH */
@@ -161,8 +142,25 @@ SECTIONS
     __bss_end__ = _ebss;
   } >RAM
 
-  /* User_heap_stack section, used to check that there is enough RAM left */
-  ._user_heap_stack :
+  /* ─── Регионы памяти ОС ───
+     Отдаются ядру через platform::ops().heap_base()/stack_pool_base(),
+     поэтому никаких магических адресов в C++ больше нет. */
+  ._os_memory (NOLOAD) :
+  {
+    . = ALIGN(8);
+    _os_heap_start = .;
+    . = . + _OS_Heap_Size;
+    _os_heap_end = .;
+
+    . = ALIGN(8);
+    _os_stack_pool_start = .;
+    . = . + _OS_StackPool_Size;
+    _os_stack_pool_end = .;
+    . = ALIGN(8);
+  } >RAM
+
+  /* Проверка, что после регионов ОС осталось место под MSP. */
+  ._user_heap_stack (NOLOAD) :
   {
     . = ALIGN(8);
     PROVIDE ( end = . );
@@ -170,17 +168,13 @@ SECTIONS
     . = . + _Min_Heap_Size;
     . = . + _Min_Stack_Size;
     . = ALIGN(8);
+    _os_ram_used = .;
   } >RAM
 
-
-
-  /* Remove information from the standard libraries */
-  /DISCARD/ :
-  {
-    libc.a ( * )
-    libm.a ( * )
-    libgcc.a ( * )
-  }
+  /* libc/libm/libgcc НЕ выбрасываются через /DISCARD/: это ломает
+     __aeabi_uldivmod, __aeabi_ddiv и прочие помощники, которые
+     генерирует сам компилятор (64-битные деления в таймере и big_math).
+     Неиспользуемые секции удаляет -Wl,--gc-sections. */
 
   .ARM.attributes 0 : { *(.ARM.attributes) }
 }

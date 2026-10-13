@@ -92,6 +92,10 @@ LoopFillZerobss:
 	bcc	FillZerobss
 /* Call the clock system intitialization function.*/
   bl  SystemInit  
+/* Initialize the C runtime: static constructors and init_array.
+   Без этого вызова статические конструкторы C++ молча не выполняются
+   (глобальные объекты ОС, singleton-ы, RAII-глобалы остаются нулевыми). */
+  bl  __libc_init_array
 /* Call the application's entry point.*/
 	bl	main
 	bx	lr    
