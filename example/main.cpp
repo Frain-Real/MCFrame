@@ -1,7 +1,7 @@
 #include <mock_interface.hpp>
 #include <iostream>
 
-int main(void)
+int setup()
 {
   MockInterface inf;
   char str[6] = {};

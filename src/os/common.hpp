@@ -2,6 +2,19 @@
 #include <cstdint>
 
 namespace embed {
+
+    void platform_critical_enter() noexcept;
+    void platform_critical_exit() noexcept;
+
+    struct Lock
+    {
+        Lock() noexcept { platform_critical_enter(); }
+        ~Lock() noexcept { platform_critical_exit(); }
+
+        Lock(const Lock&) = delete;
+        Lock& operator=(const Lock&) = delete;
+    };
+
     enum class Status : int
     {
         Ok = 0,
@@ -16,7 +29,8 @@ namespace embed {
         HardwareError,
         Unavailable,
         Fault,
-        Aborted
+        Aborted,
+        TimeNotSynced
     };
 
     using Size          = unsigned int;

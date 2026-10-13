@@ -19,20 +19,20 @@ void embed::scheduler::init() noexcept {
 // Работа с задачами
 bool embed::scheduler::add_task(TaskHandler t, uint32_t core_id) noexcept {
     if (!t || all_tasks_.contains(t)) return false;
-    platform_critical_enter();
+    Lock lock;
     if (core_id >= core_count_) core_id = find_least_loaded_core();
     all_tasks_.push_back(t);
     if (t->is_ready()) ready_push(cores_[core_id], t);
-    platform_critical_exit();
+
     return true;
 }
 void embed::scheduler::remove_task(TaskHandler t) noexcept {
     if (!t) return;
-    platform_critical_enter();
+    Lock lock;
     for (uint32_t i = 0; i < core_count_; ++i) ready_remove(cores_[i], t);
     if (sleep_list_.contains(t)) sleep_list_.remove(t);
     if (all_tasks_.contains(t)) all_tasks_.remove(t);
-    platform_critical_exit();
+
 }
 
 // Lifecycle
@@ -57,16 +57,16 @@ void embed::scheduler::yield() noexcept { platform_trigger_context_switch(); }
 
 // Task API
 void embed::scheduler::sleep() noexcept {
-    platform_critical_enter();
+    Lock lock;
     uint32_t core = platform_current_core();
     TaskHandler cur = cores_[core].current;
     if (cur) { cur->suspend(); cores_[core].current = nullptr; }
-    platform_critical_exit();
+
     yield();
 }
 void embed::scheduler::sleep_for(uint32_t ticks) noexcept {
     if (ticks == 0) return;
-    platform_critical_enter();
+    Lock lock;
     uint32_t core = platform_current_core();
     TaskHandler cur = cores_[core].current;
     if (cur) {
@@ -74,33 +74,35 @@ void embed::scheduler::sleep_for(uint32_t ticks) noexcept {
         sleep_list_.push_back(cur);
         cores_[core].current = nullptr;
     }
-    platform_critical_exit();
+
     yield();
 }
 void embed::scheduler::wakeup(TaskHandler t, uint32_t core_id) noexcept {
     if (!t) return;
-    platform_critical_enter();
+    Lock lock;
+
     if (t->state() == task_state::suspended) {
         t->resume();
         if (core_id >= core_count_) core_id = find_least_loaded_core();
         ready_push(cores_[core_id], t);
         check_preempt(cores_[core_id]);
     }
-    platform_critical_exit();
+
 }
 void embed::scheduler::exit() noexcept {
-    platform_critical_enter();
+    Lock lock;
     uint32_t core = platform_current_core();
     TaskHandler cur = cores_[core].current;
     if (cur) { cur->set_done(); cores_[core].current = nullptr; }
-    platform_critical_exit();
+
     yield();
 }
 
 // Тик (SysTick_Handler)
 void embed::scheduler::tick() noexcept {
     if (!started_) return;
-    platform_critical_enter();
+    Lock lock;
+
     process_sleep_list();
     uint32_t core = platform_current_core();
     TaskHandler cur = cores_[core].current;
@@ -114,7 +116,6 @@ void embed::scheduler::tick() noexcept {
             cores_[core].current = next;
         }
     }
-    platform_critical_exit();
 }
 
 // Смена контекста (PendSV_Handler)

@@ -10,8 +10,6 @@ namespace embed {
     uint32_t platform_current_core() noexcept;
     void platform_start_first_task(uint32_t* sp) noexcept;
     void platform_trigger_context_switch() noexcept;
-    void platform_critical_enter() noexcept;
-    void platform_critical_exit() noexcept;
     uint32_t* platform_save_context() noexcept;
     void platform_load_context(uint32_t* sp) noexcept;
 
