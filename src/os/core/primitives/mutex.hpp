@@ -20,6 +20,10 @@ namespace sched_api {
     Status block_on(void* obj, uint32_t ticks) noexcept;
     /// Разбудить одну задачу, ждущую на obj.
     bool unblock_one(void* obj) noexcept;
+    /// Разбудить конкретную задачу (для асинхронных операций).
+    bool wake(TaskHandler t) noexcept;
+    /// Уступить процессор, не блокируясь.
+    void yield() noexcept;
 } // namespace sched_api
 
 /// Мьютекс.

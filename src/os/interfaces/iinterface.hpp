@@ -1,6 +1,7 @@
 // iinterface.hpp
 #pragma once
 #include "../common.hpp"
+#include "../async/async_kernel.hpp"   // время и уступка для линейных методов
 
 namespace embed {
 
@@ -75,6 +76,13 @@ namespace embed {
 
     protected:
       IHwInterface() = default;
+
+      // ── Помощники для линейных методов интерфейсов ──
+      // Вынесены в базу, чтобы каждый драйвер не дублировал их.
+
+      static uint64_t timerNow() noexcept { return async::kernel::time_ms(); }
+      static bool     timerAvailable() noexcept { return async::kernel::has_time(); }
+      static void     yieldCpu() noexcept { async::kernel::yield(); }
 
       Impl&       self()       noexcept { return *static_cast<Impl*>(this); }
       const Impl& self() const noexcept { return *static_cast<const Impl*>(this); }

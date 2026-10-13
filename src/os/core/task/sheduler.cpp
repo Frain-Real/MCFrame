@@ -148,13 +148,21 @@ TaskHandler scheduler::pick_next(core_state& core) const noexcept {
 }
 
 uint32_t scheduler::find_least_loaded_core() const noexcept {
-    uint32_t best = 0u;
-    uint32_t min_load = cores_[0].ready_count + (cores_[0].current ? 1u : 0u);
-    for (uint32_t i = 1u; i < core_count_; ++i) {
-        const uint32_t load = cores_[i].ready_count + (cores_[i].current ? 1u : 0u);
-        if (load < min_load) { min_load = load; best = i; }
+    // kMaxCores == 1 — самый частый случай для МКУ: ядро одно, искать нечего.
+    // Проверка обязана быть на этапе КОМПИЛЯЦИИ: иначе GCC видит цикл,
+    // который может обратиться к cores_[1] при объявленном размере 1,
+    // и справедливо выдаёт -Warray-bounds.
+    if constexpr (kMaxCores == 1u) {
+        return 0u;
+    } else {
+        uint32_t best = 0u;
+        uint32_t min_load = cores_[0].ready_count + (cores_[0].current ? 1u : 0u);
+        for (uint32_t i = 1u; i < core_count_ && i < kMaxCores; ++i) {
+            const uint32_t load = cores_[i].ready_count + (cores_[i].current ? 1u : 0u);
+            if (load < min_load) { min_load = load; best = i; }
+        }
+        return best;
     }
-    return best;
 }
 
 /// Единственная точка смены текущей задачи и запроса переключения.
@@ -432,6 +440,16 @@ Status block_on(void* obj, uint32_t ticks) noexcept {
 
 bool unblock_one(void* obj) noexcept {
     return scheduler::instance().unblock_one(obj);
+}
+
+bool wake(TaskHandler t) noexcept {
+    // Принимаем и sleeping, и blocked, и suspended — задача могла уйти
+    // в любой из этих состояний к моменту завершения операции.
+    return scheduler::instance().wakeup(t) == Status::Ok;
+}
+
+void yield() noexcept {
+    scheduler::instance().yield();
 }
 
 } // namespace embed::sched_api

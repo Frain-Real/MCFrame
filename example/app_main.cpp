@@ -105,6 +105,11 @@ int main() {
         return 1;
     }
 
+    if (user_app_async_demo() != Status::Ok) {
+        platform_log_line("MCFrame: async io demo failed");
+        return 1;
+    }
+
     platform_log_line("MCFrame: tasks registered, starting");
     user_app_report_ram();
 

@@ -18,6 +18,9 @@ embed::Status user_app_selftest() noexcept;
 /// Демонстрация работы драйвера АЦП.
 embed::Status user_app_adc_demo() noexcept;
 
+/// Демонстрация асинхронного ввода-вывода с линейным кодом.
+embed::Status user_app_async_demo() noexcept;
+
 /// Отчёт о потреблении RAM: статические ёмкости ядра, куча, пул стеков
 /// и водяные знаки стеков задач.
 ///

@@ -12,7 +12,19 @@
 #include "user_app.hpp"
 
 #include "os/adc/adc.hpp"
+#include "os/async/async_hal.hpp"
+#include "os/async/async_port.hpp"
 #include "os/config/time_config.hpp"
+
+// Драйверы UART/I2C для текущей платформы. На STM32 это регистровые
+// драйверы, на mock — эмуляция; прикладной код ниже ОДИНАКОВ для обеих.
+#ifdef MCFRAME_TARGET_MCU
+  #include "uart_stm32.hpp"
+  #include "i2c_stm32.hpp"
+#else
+  #include "uart_mock.hpp"
+  #include "i2c_mock.hpp"
+#endif
 #include "os/core/memory/memory_manager.hpp"
 
 #include <atomic>
@@ -148,6 +160,96 @@ embed::Status user_app_adc_demo() noexcept {
 
     (void)g_adc.stop();
     return (st == Status::Ok) ? Status::Ok : st;
+}
+
+// ────────────────── UART и I2C: линейный код приложения ─────────────────────
+//
+// Главное, что здесь видно: прикладной код ПОСЛЕДОВАТЕЛЬНЫЙ и ОДИНАКОВЫЙ
+// для STM32 и mock. Ни одного колбэка. Стратегия (Polling/Async/Dma)
+// определяется драйвером, а не этим кодом.
+
+namespace {
+
+// Выбор драйверов по платформе: на STM32 — USART1 с DMA,
+// на mock — эмулятор, прогоняющий тот же код без платы.
+#ifdef MCFRAME_TARGET_MCU
+using UartDriver = embed::stm32::UartDriver1;
+using I2cDriver  = embed::stm32::I2cDriver1;
+#else
+using UartDriver = embed::mock::UartMockDma;
+using I2cDriver  = embed::mock::I2cMockPolling;
+#endif
+
+embed::async::UartPort<UartDriver> g_uart;
+embed::async::I2cPort<I2cDriver>   g_i2c;
+
+/// Датчик на шине I2C: регистр 0x00 — температура, 0x01 — конфигурация.
+constexpr uint8_t kSensorAddr = 0x48u;
+constexpr uint8_t kRegTemp    = 0x00u;
+constexpr uint8_t kRegConfig  = 0x01u;
+
+} // namespace
+
+embed::Status user_app_async_demo() noexcept {
+    using namespace embed;
+
+    // ── Настройка интерфейсов ──
+    UartDriver::Config ucfg{};
+    ucfg.baudRate = 115200u;
+    if (UartDriver::instance().configure(ucfg) != Status::Ok) return Status::HardwareError;
+    if (UartDriver::instance().open() != Status::Ok) return Status::HardwareError;
+
+    I2cDriver::Config icfg{};
+    icfg.speed = I2cDriver::Speed::Fast400k;
+    icfg.peripheralClockHz = 36000000u;          // APB1 при SYSCLK 72 МГц
+    if (I2cDriver::instance().configure(icfg) != Status::Ok) return Status::HardwareError;
+    if (I2cDriver::instance().open() != Status::Ok) return Status::HardwareError;
+
+    // ── UART: три передачи подряд, линейно ──
+    if (g_uart.writeLine("MCFrame: async io demo") != Status::Ok) return Status::HardwareError;
+    if (g_uart.write("uart: line mode ok") != Status::Ok)          return Status::HardwareError;
+
+    // ── I2C: читаем датчик ──
+    // На mock устройство нужно зарегистрировать; на STM32 отвечает железо.
+#ifndef MCFRAME_TARGET_MCU
+    (void)embed::mock::g_i2c_bus.register_device(kSensorAddr);
+    embed::mock::g_i2c_bus.regs[kRegTemp] = 25u;      // +25 °C
+#endif
+
+    uint8_t temperature = 0u;
+    const Status st = g_i2c.readRegister(I2cAddress{kSensorAddr}, kRegTemp, temperature, 50u);
+    if (st != Status::Ok) {
+        // Датчика нет — для демонстрации это не ошибка.
+        (void)g_uart.writeLine("i2c: sensor not found");
+        return Status::Ok;
+    }
+
+    // ── Пишем конфигурацию датчика ──
+    if (g_i2c.writeRegister(I2cAddress{kSensorAddr}, kRegConfig, 0x60u, 50u) != Status::Ok) {
+        return Status::HardwareError;
+    }
+
+    // ── Сообщаем результат по UART ──
+    if (g_uart.writeLine("i2c: sensor ok") != Status::Ok) return Status::HardwareError;
+
+    // ── Проверка на mock-платформе ──
+    // На железе данные уходят в линию, здесь их можно проверить:
+    // все передачи и обмен по I2C действительно состоялись.
+#ifndef MCFRAME_TARGET_MCU
+    {
+        using namespace embed;
+        // bus() живёт у драйвера, а не у порта: порт — прикладной фасад.
+        if (UartDriver::instance().bus().tx_len == 0u) return Status::Fault;
+        if (temperature != 25u)                        return Status::Corruption;
+        if (I2cDriver::instance().bus().regs[kRegConfig] != 0x60u) {
+            return Status::Corruption;
+        }
+    }
+#endif
+
+    // В реальном приложении temperature ушло бы в протокол или лог.
+    (void)temperature;
+    return Status::Ok;
 }
 
 // ─────────────────────────────── Отчёт о RAM ────────────────────────────────

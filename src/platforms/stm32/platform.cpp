@@ -13,6 +13,8 @@
 // ---------------------------------------------------------------------------
 #include "../../os/interfaces/dma_manager.hpp"
 #include "../../os/config/dma_config.hpp"
+#include "uart_stm32.hpp"
+#include "i2c_stm32.hpp"
 
 #include "stm32f10x.h"
 #include "core_cm3.h"
@@ -398,6 +400,26 @@ void platform_dma_irq_handler(uint8_t global_id) noexcept {
 }
 
 } // namespace embed
+
+// ─────────────── Обработчики прерываний USART и I2C ─────────────────────────
+//
+// Драйверы находятся в uart_stm32.hpp / i2c_stm32.hpp и не знают друг о
+// друге. Обработчики — только маршрутизация: вся логика в автоматах
+// драйверов (handleIrq / pump).
+
+extern "C" void USART1_IRQHandler(void) {
+    embed::stm32::UartDriver1::instance().onRxIrq();
+}
+
+extern "C" void I2C1_EV_IRQHandler(void) {
+    embed::stm32::I2cDriver1::instance().onCompleteIrq();
+}
+
+extern "C" void I2C1_ER_IRQHandler(void) {
+    // В ER-обработчике важен сам факт ошибки: конкретный код (AF/BERR/ARLO)
+    // драйвер разбирает сам по SR1, поэтому здесь передаём общий статус.
+    embed::stm32::I2cDriver1::instance().onErrorIrq(embed::Status::HardwareError);
+}
 
 // ─────────────── Обработчики прерываний каналов DMA1 ────────────────────────
 // В startup-файле они объявлены слабыми (Default_Handler), поэтому

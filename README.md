@@ -114,6 +114,116 @@ target_link_libraries(my_app PRIVATE MCFrame::MCFrame)
 | Логи | `embed::platform_log_line("...")` — на STM32 уходит в ITM/SWO |
 | Регионы памяти | Меняются в `src/platforms/stm32/linker.ld` (`_OS_Heap_Size`, `_OS_StackPool_Size`) |
 
+## Асинхронный ввод-вывод с линейным кодом
+
+`os/async/` позволяет писать последовательный код, а внутри работает
+асинхронный механизм — **без пользовательских колбэков**:
+
+```cpp
+#include "os/async/async_port.hpp"
+
+async::AsyncPort<MyUart> port;
+
+port.writeLine("AT");                    // выглядит блокирующим
+// следующая строка — только после передачи
+uint8_t buf[32]; Size n;
+port.read(buf, sizeof buf, n, 100u);     // ждёт данные, не крутя CPU
+port.readUntil(buf, sizeof buf, n, '\n', 500u);
+```
+
+Внутри задача **усыпляется**, а будит её обработчик завершения
+(прерывание или DMA). Стратегия (Polling / Async / Dma) задаётся
+интерфейсом, а не прикладным кодом:
+
+| Стратегия | Кто завершает операцию | Когда выбирать |
+|---|---|---|
+| `Polling` | сам HAL из `poll_on_irq()`, вызываемого в цикле ожидания | нет прерываний/DMA, простой код |
+| `Async` | `onRxComplete()` / `onTxComplete()` из обработчика | есть прерывания UART/SPI |
+| `Dma` | `onDmaComplete()` из обработчика DMA | большие объёмы, минимум нагрузки на CPU |
+
+Как реализовать HAL — см. `tests/test_async.cpp` (три готовые
+trait-структуры) и `example/user_app.cpp` (`LogUart`).
+
+Объект завершения (`async::completion`) доступен и отдельно, если нужен
+свой протокол: `reset()` → `begin()` → `wait()`, а завершение — через
+`post_ok()` / `post_error()` из прерывания. `post()` идемпотентен:
+повторное завершение (типичный случай HT+TC у DMA) отбрасывается.
+
+## UART и I2C
+
+Оба интерфейса работают по одному принципу: **приложение пишет линейный код,
+стратегия выбирается драйвером**. Доступны три стратегии — Polling, Async
+(прерывания) и Dma.
+
+```cpp
+#include "os/async/async_hal.hpp"
+#ifdef MCFRAME_TARGET_MCU
+  #include "uart_stm32.hpp"      // USART1
+  #include "i2c_stm32.hpp"       // I2C1
+#else
+  #include "uart_mock.hpp"       // эмуляция для ПК
+  #include "i2c_mock.hpp"
+#endif
+
+using UartDriver = embed::stm32::UartDriver1;
+embed::async::UartPort<UartDriver> uart;
+
+UartDriver::Config cfg{};
+cfg.baudRate = 115200u;
+UartDriver::instance().configure(cfg);
+UartDriver::instance().open();
+
+uart.writeLine("AT");                        // линейно
+uart.write("payload", 7u);
+uint8_t buf[32]; Size n;
+uart.readExact(buf, 4u, 100u);               // ровно 4 байта или Timeout
+uart.readLine(buf, sizeof buf, n);           // до '\n', CR отбрасывается
+
+// I2C: адрес — часть операции
+embed::async::I2cPort<embed::stm32::I2cDriver1> i2c;
+uint8_t t = 0u;
+i2c.readRegister(embed::I2cAddress{0x48u}, 0x00u, t, 50u);
+i2c.writeRegister(embed::I2cAddress{0x48u}, 0x01u, 0x60u, 50u);
+
+bool found[128];
+i2c.scan(found);                             // поиск устройств на шине
+```
+
+### Что делает каждая стратегия
+
+| Стратегия | Кто завершает операцию | Где реализовано |
+|---|---|---|
+| `Polling` | драйвер в `pollOnIrq()`, который порт вызывает в цикле ожидания | `UartMock<Polling>`, `I2cDriver1` |
+| `Async` | `USART1_IRQHandler` → `onRxIrq()/onTxIrq()`, `I2C1_EV/ER_IRQHandler` | `UartMock<Async>`, `I2cDriver1` (события) |
+| `Dma` | обработчик DMA → `onDmaComplete()` | `UartDriver1`, `UartMock<Dma>` |
+
+Приложение от этого не зависит: `AsyncPort::write()`/`read()` работают
+одинаково. Это проверено тестами — один и тот же набор проверок
+прогоняется по всем трём стратегиям.
+
+### Как написать свой драйвер
+
+Драйвер наследует `IUart<СвойДрайвер>` или `II2c<СвойДрайвер>` и реализует:
+
+```cpp
+static constexpr async::Strategy kStrategy;   // Polling/Async/Dma
+static constexpr bool           kHasDma;
+static constexpr Size           kMaxChunk;    // предел одного обмена
+static СвойДрайвер& instance() noexcept;      // единственный экземпляр
+
+Status configure(const Config&) noexcept;
+Status open()/close()/ioctl(...) noexcept;
+
+Status setCompletion(async::completion&) noexcept;   // владелец — порт
+Status startWrite(...)/startRead(...) noexcept;      // вернуть управление сразу
+Status abort() noexcept;
+void   pollOnIrq() noexcept;                         // опрос (для Polling)
+```
+
+Ключевое правило: **`startWrite`/`startRead` не ждут завершения**. Они
+запускают передачу и возвращают `Status::Ok`, а завершение приходит позже
+через `completion`, который привязан вызовом `setCompletion()`.
+
 ## Потребление RAM и его настройка
 
 Ядро настраивается под конкретный МКУ, а не «с запасом»:

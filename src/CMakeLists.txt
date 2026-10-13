@@ -64,22 +64,23 @@ add_library(MCFrame::MCFrame ALIAS MCFrame)
 # Приложение видит ТОЛЬКО ядро (os/...). Платформенные заголовки — PRIVATE:
 # так приложение физически не может подключить, например,
 # <mock_interface.hpp> из другого каталога платформы.
+# platforms/<target> публикуется: приложению НУЖНЫ драйверы интерфейсов
+# (uart_*.hpp, i2c_*.hpp), они header-only и содержат автоматы обмена.
+# Заголовки ДРУГИХ платформ при этом недоступны — путь один.
 target_include_directories(MCFrame
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
-        $<INSTALL_INTERFACE:include>
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/platforms/${MCU_TARGET})
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/platforms/${MCU_TARGET}>
+        $<INSTALL_INTERFACE:include>)
 
 # Публичные требования: флаги через INTERFACE-таргет (устойчивы к внешним
 # CMAKE_*_FLAGS) плюс include-путь к CMSIS у STM32.
 target_link_libraries(MCFrame PUBLIC mcu_flags)
 
+# CMSIS нужен и приложению: драйверы STM32 включают stm32f10x.h.
 if(MCU_TARGET STREQUAL "stm32")
-    # CMSIS-заголовки нужны только исходникам самой библиотеки и её
-    # платформенному коду — но не публичному API приложения.
-    target_include_directories(MCFrame PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/platforms/stm32)
+    target_include_directories(MCFrame PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/platforms/stm32>)
 endif()
 
 # ─────────── Установка для внешних проектов ───────────
