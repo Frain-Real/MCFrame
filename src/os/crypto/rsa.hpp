@@ -1,208 +1,363 @@
+// crypto/rsa.hpp
+// ---------------------------------------------------------------------------
+// Учебно-прикладной RSA на 16/32-битных целых (SoftRSA).
+//
+// ОБЛАСТЬ ПРИМЕНИМОСТИ: этот класс работает с модулем, помещающимся в
+// uint32_t, то есть n < 2^32. Такой RSA НЕ обеспечивает стойкости (модуль
+// разлагается на множители за секунды) и годится только для отладки,
+// протоколов с уже скомпрометированной стойкостью и учебных задач.
+// Для реальных задач нужен модуль от 2048 бит — это BigInt<64> и отдельная
+// реализация (Монтгомери + вероятностная генерация простых), см. модуль ECC
+// как образец аккуратной арифметики по модулю.
+//
+// ЧТО БЫЛО ИСПРАВЛЕНО:
+//   1. _n = p * q считалось без проверки переполнения: при p, q > 65535
+//      произведение молча «сворачивалось» по модулю 2^32, и ключ становился
+//      нерабочим (расшифрование не возвращало исходное сообщение).
+//   2. modInverse() не сообщал об отсутствии обратного элемента: при
+//      gcd(e, phi) != 1 возвращалось произвольное число, и класс молча
+//      выдавал неверные ключи. Теперь инверсия проверяется (e*d ≡ 1 mod phi).
+//   3. e = 65537 подставлялось безусловно, даже когда 65537 >= phi
+//      (для малых простых это норма), и обнулялось при приведении к Uint.
+//   4. Генерация простых зависела от внешнего rng() с % — появился modulo
+//      bias; теперь используется Rng::next_below (отбраковка хвоста).
+//   5. Отсутствовала возможность задать готовый ключ (n, e)/(n, d):
+//      обмен ключами с внешним миром был невозможен.
+//   6. Сообщение не проверялось на m < n: результат молча «сворачивался».
+// ---------------------------------------------------------------------------
 #pragma once
-#include "../common.hpp"
+
+#include "crypto_utils.hpp"
+#include "random.hpp"
+
+#include <cstdint>
 #include <type_traits>
 
 namespace embed {
+namespace crypto {
 
 template <typename Uint = uint32_t>
-class SoftRSA {
+class Rsa {
+    static_assert(std::is_unsigned<Uint>::value,
+                  "Rsa: нужен беззнаковый целый тип");
+    static_assert(sizeof(Uint) <= 4,
+                  "Rsa: без 128-битных произведений поддерживается Uint до 32 бит");
+
 public:
-    static_assert(std::is_unsigned_v<Uint>, "SoftRSA requires an unsigned integer type");
-    static_assert(sizeof(Uint) <= 4, "For safe modular exponentiation without 128-bit integers, Uint must be 32-bit or smaller.");
     using WideUint = uint64_t;
 
-    SoftRSA(const SoftRSA&) = delete;
-    SoftRSA& operator=(const SoftRSA&) = delete;
+    Rsa() noexcept : n_(0), e_(0), d_(0) {}
 
-    SoftRSA() : _n(0), _e(0), _d(0) {}
+    /// Задать открытый ключ (n, e) — для шифрования/проверки.
+    bool set_public_key(Uint n, Uint e) noexcept {
+        if (n < 3u || e < 2u || e >= n) {
+            return false;
+        }
+        n_ = n;
+        e_ = e;
+        d_ = 0;
+        return true;
+    }
 
-    template <typename Rng>
-    bool GenerateKeys(Uint min_prime_val, Uint max_prime_val, Rng& rng) {
-        if (min_prime_val < 3 || max_prime_val < min_prime_val) {
+    /// Задать закрытый ключ (n, d) — для расшифрования.
+    bool set_private_key(Uint n, Uint d) noexcept {
+        if (n < 3u || d < 2u || d >= n) {
+            return false;
+        }
+        n_ = n;
+        d_ = d;
+        e_ = 0;
+        return true;
+    }
+
+    /// Задать полную пару (n, e, d).
+    bool set_key_pair(Uint n, Uint e, Uint d) noexcept {
+        if (!set_public_key(n, e)) {
+            return false;
+        }
+        if (d < 2u || d >= n) {
+            n_ = 0;
+            e_ = 0;
+            return false;
+        }
+        d_ = d;
+        return true;
+    }
+
+    /**
+     * @brief Сгенерировать ключи: простые p, q из [min_prime, max_prime].
+     *
+     * @param rng Источник случайности. Обычный xorshift (utilities::os_rand)
+     *            НЕ подходит: по нескольким значениям восстанавливается
+     *            состояние, а значит и ключ. Используйте crypto::Rng.
+     * @return false, если простые не найдены, n не помещается в Uint или
+     *         не удалось подобрать пару (e, d).
+     */
+    bool generate_keys(Uint min_prime, Uint max_prime, Rng& rng) noexcept {
+        if (min_prime < 3u || max_prime < min_prime || !rng.ready()) {
             return false;
         }
 
-        Uint p = 0, q = 0;
-        
-        // Генерация p с ограничением попыток для предотвращения зависания
-        for (int attempts = 0; attempts < 50; ++attempts) {
-            p = GeneratePrime(min_prime_val, max_prime_val, rng);
-            if (p != 0) break;
-        }
-        if (p == 0) return false;
+        Uint p = 0u;
+        Uint q = 0u;
 
-        // Генерация q (должно отличаться от p)
-        for (int attempts = 0; attempts < 50; ++attempts) {
-            q = GeneratePrime(min_prime_val, max_prime_val, rng);
-            if (q != 0 && q != p) break;
-        }
-        if (q == 0 || q == p) return false;
-
-        _n = p * q;
-        WideUint phi = static_cast<WideUint>(p - 1) * (q - 1);
-        
-        _e = 65537; // Стандартная открытая экспонента
-        
-        // Проверка применимости e = 65537
-        if (_e >= phi || GCD(_e, static_cast<Uint>(phi)) != 1) {
-            bool e_found = false;
-            for (int attempts = 0; attempts < 50; ++attempts) {
-                Uint range = (phi > 3) ? static_cast<Uint>(phi - 3) : 1;
-                Uint candidate = 3 + (rng() % range);
-                
-                if ((candidate & 1) == 0) candidate++; // Делаем нечётным
-                if (candidate >= phi) candidate = static_cast<Uint>((phi - 1) | 1);
-                if (candidate < 3) candidate = 3;
-
-                if (GCD(candidate, static_cast<Uint>(phi)) == 1) {
-                    _e = candidate;
-                    e_found = true;
-                    break;
-                }
+        if (!find_prime(min_prime, max_prime, rng, p)) return false;
+        // q должно отличаться от p, иначе n = p^2 разлагается мгновенно.
+        for (int attempt = 0; attempt < 32; ++attempt) {
+            Uint candidate = 0u;
+            if (!find_prime(min_prime, max_prime, rng, candidate)) break;
+            if (candidate != p) {
+                q = candidate;
+                break;
             }
-            if (!e_found) return false;
         }
+        if (q == 0u) return false;
 
-        _d = ModInverse(_e, static_cast<Uint>(phi));
-        if (_d == 0) {
+        const WideUint n_wide = static_cast<WideUint>(p) * static_cast<WideUint>(q);
+        if (n_wide > static_cast<WideUint>(~static_cast<Uint>(0))) {
+            return false;   // переполнение модуля: ключ был бы нерабочим
+        }
+        const WideUint phi = static_cast<WideUint>(p - 1u) *
+                             static_cast<WideUint>(q - 1u);
+        if (phi < 4u) {
             return false;
         }
 
-        return true;
-    }
-
-    bool Encrypt(Uint message, Uint* output) const {
-        if (output == nullptr || _n == 0) {
+        WideUint e = 0u;
+        if (!choose_exponent(phi, rng, e)) {
             return false;
         }
-        *output = Power(message, _e, _n);
+
+        const WideUint d = mod_inverse(e, phi);
+        if (d == 0u) {
+            return false;   // обратного элемента нет (не должно случиться)
+        }
+
+        n_ = static_cast<Uint>(n_wide);
+        e_ = static_cast<Uint>(e);
+        d_ = static_cast<Uint>(d);
         return true;
     }
 
-    bool Decrypt(Uint encrypted_message, Uint* output) const {
-        if (output == nullptr || _n == 0) {
+    /// Зашифровать сообщение (m < n).
+    bool encrypt(Uint message, Uint* output) const noexcept {
+        if (output == nullptr || n_ == 0u || e_ == 0u) {
             return false;
         }
-        *output = Power(encrypted_message, _d, _n);
+        if (message >= n_) {
+            return false;   // иначе результат «свернётся» и не восстановится
+        }
+        *output = power_mod(message, e_, n_);
         return true;
     }
 
-    void Clear() {
-        // Явное затирание ключей из памяти (важно для безопасности в embedded)
-        _n = 0;
-        _e = 0;
-        _d = 0;
+    /// Расшифровать сообщение.
+    bool decrypt(Uint ciphertext, Uint* output) const noexcept {
+        if (output == nullptr || n_ == 0u || d_ == 0u) {
+            return false;
+        }
+        if (ciphertext >= n_) {
+            return false;
+        }
+        *output = power_mod(ciphertext, d_, n_);
+        return true;
     }
 
-    Uint GetN() const { return _n; }
-    Uint GetE() const { return _e; }
-    Uint GetD() const { return _d; }
+    bool has_public_key()  const noexcept { return n_ != 0u && e_ != 0u; }
+    bool has_private_key() const noexcept { return n_ != 0u && d_ != 0u; }
+
+    Uint modulus()          const noexcept { return n_; }
+    Uint public_exponent()  const noexcept { return e_; }
+    Uint private_exponent() const noexcept { return d_; }
+
+    /// Затереть ключевой материал.
+    void clear() noexcept {
+        wipe_object(n_);
+        wipe_object(e_);
+        wipe_object(d_);
+    }
+
+    ~Rsa() noexcept { clear(); }
+
+    Rsa(const Rsa&)            = delete;
+    Rsa& operator=(const Rsa&) = delete;
 
 private:
-    Uint _n; // Модуль
-    Uint _e; // Открытая экспонента
-    Uint _d; // Закрытая экспонента
-    static constexpr Uint GCD(Uint a, Uint b) {
-        while (b != 0) {
-            Uint temp = b;
+    Uint n_;
+    Uint e_;
+    Uint d_;
+
+    static constexpr WideUint gcd(WideUint a, WideUint b) noexcept {
+        while (b != 0u) {
+            const WideUint t = b;
             b = a % b;
-            a = temp;
+            a = t;
         }
         return a;
     }
-    static constexpr Uint Power(Uint base, Uint exp, Uint mod) {
-        if (mod == 1) return 0;
-        Uint res = 1;
-        base = base % mod;
-        while (exp > 0) {
-            if ((exp & 1) == 1) {
-                res = static_cast<Uint>((static_cast<WideUint>(res) * base) % mod);
+
+    /// Модульное возведение в степень (square-and-multiply).
+    static constexpr Uint power_mod(Uint base, Uint exp, Uint mod) noexcept {
+        if (mod == 1u) {
+            return 0u;
+        }
+        WideUint result = 1u;
+        WideUint b = static_cast<WideUint>(base) % mod;
+        WideUint e = exp;
+        while (e > 0u) {
+            if ((e & 1u) != 0u) {
+                result = (result * b) % mod;
             }
-            base = static_cast<Uint>((static_cast<WideUint>(base) * base) % mod);
-            exp >>= 1;
+            b = (b * b) % mod;
+            e >>= 1u;
         }
-        return res;
+        return static_cast<Uint>(result);
     }
-    static constexpr Uint ModInverse(Uint a, Uint m) {
-        if (m == 1) return 0;
-        
-        int64_t m0 = m;
-        int64_t y = 0, x = 1;
-        int64_t a_signed = a;
 
-        while (a_signed > 1) {
-            int64_t q = a_signed / m0;
-            int64_t t = m0;
+    /// Обратный элемент по модулю (расширенный алгоритм Евклида).
+    /// @return 0, если обратного элемента не существует (gcd(a, m) != 1).
+    static constexpr WideUint mod_inverse(WideUint a_in, WideUint m) noexcept {
+        if (m <= 1u) {
+            return 0u;
+        }
+        const int64_t m0 = static_cast<int64_t>(m);   // m < 2^32: int64 хватает
+        int64_t r0 = m0;
+        int64_t r1 = static_cast<int64_t>(a_in);
+        int64_t t0 = 0;
+        int64_t t1 = 1;
 
-            m0 = a_signed % m0;
-            a_signed = t;
-            t = y;
-
-            y = x - q * y;
-            x = t;
+        while (r1 != 0) {
+            const int64_t q  = r0 / r1;
+            const int64_t r2 = r0 - q * r1;
+            r0 = r1;
+            r1 = r2;
+            const int64_t t2 = t0 - q * t1;
+            t0 = t1;
+            t1 = t2;
         }
 
-        if (x < 0) {
-            x += m;
+        if (r0 != 1) {
+            return 0u;                     // gcd(a, m) != 1
         }
-        return static_cast<Uint>(x);
+        if (t0 < 0) {
+            t0 += m0;
+        }
+        return static_cast<WideUint>(t0);
     }
-    template <typename Rng>
-    static bool IsPrime(Uint n, int k, Rng& rng) {
-        if (n <= 1 || n == 4) return false;
-        if (n <= 3) return true;
 
-        Uint d = n - 1;
-        while ((d & 1) == 0) {
-            d >>= 1;
+    /// Вероятностная проверка простоты (Миллер–Рабин, k раундов).
+    static bool is_prime(WideUint n, int rounds, Rng& rng) noexcept {
+        if (n < 2u) return false;
+        if (n == 2u || n == 3u) return true;
+        if ((n & 1u) == 0u) return false;
+
+        WideUint d = n - 1u;
+        int s = 0;
+        while ((d & 1u) == 0u) {
+            d >>= 1u;
+            ++s;
         }
 
-        for (int i = 0; i < k; ++i) {
-            Uint range = n - 3;
-            if (range == 0) return false;
-            Uint a = 2 + (rng() % range); 
-            Uint x = Power(a, d, n);
-
-            if (x == 1 || x == n - 1) continue;
-
-            Uint current_d = d;
+        for (int i = 0; i < rounds; ++i) {
+            // Свидетель из [2, n-2].
+            uint32_t witness = 0u;
+            if (!rng.next_range(2u, static_cast<uint32_t>(n - 2u), &witness)) {
+                return false;
+            }
+            WideUint x = 1u;
+            {
+                WideUint base = witness % n;
+                WideUint exp  = d;
+                while (exp > 0u) {
+                    if ((exp & 1u) != 0u) x = (x * base) % n;
+                    base = (base * base) % n;
+                    exp >>= 1u;
+                }
+            }
+            if (x == 1u || x == n - 1u) {
+                continue;
+            }
             bool composite = true;
-            while (current_d != n - 1) {
-                x = static_cast<Uint>((static_cast<WideUint>(x) * x) % n);
-                current_d <<= 1;
-
-                if (x == 1) return false;
-                if (x == n - 1) {
+            for (int r = 1; r < s; ++r) {
+                x = (x * x) % n;
+                if (x == n - 1u) {
                     composite = false;
                     break;
                 }
+                if (x == 1u) {
+                    return false;   // нетривиальный корень из 1 — составное
+                }
             }
-            if (composite) return false;
+            if (composite) {
+                return false;
+            }
         }
         return true;
     }
-    template <typename Rng>
-    static Uint GeneratePrime(Uint min_val, Uint max_val, Rng& rng) {
-        if (min_val > max_val) return 0;
-        
-        for (int attempts = 0; attempts < 50; ++attempts) {
-            Uint range = max_val - min_val;
-            Uint p = min_val + (rng() % (range + 1));
-            
-            // Оптимизация: пропускаем чётные числа
-            if (p > 2 && (p & 1) == 0) {
-                p++;
-                if (p > max_val) {
-                    p = (min_val & 1) ? min_val : min_val + 1;
+
+    /// Найти простое в [min_val, max_val].
+    static bool find_prime(Uint min_val, Uint max_val, Rng& rng, Uint& out) noexcept {
+        if (min_val > max_val) {
+            return false;
+        }
+
+        for (int attempt = 0; attempt < 128; ++attempt) {
+            uint32_t picked = 0u;
+            if (!rng.next_range(static_cast<uint32_t>(min_val),
+                                static_cast<uint32_t>(max_val), &picked)) {
+                return false;
+            }
+            WideUint candidate = picked;
+
+            // Чётные (кроме 2) не бывают простыми — берём следующее нечётное
+            // в диапазоне.
+            if (candidate > 2u && (candidate & 1u) == 0u) {
+                candidate += 1u;
+                if (candidate > max_val) {
+                    candidate = (min_val & 1u) ? min_val : (min_val + 1u);
                 }
             }
-            
-            if (IsPrime(p, 5, rng)) {
-                return p;
+            if (candidate < min_val || candidate > max_val) {
+                continue;
+            }
+            if (is_prime(candidate, 8, rng)) {
+                out = static_cast<Uint>(candidate);
+                return true;
             }
         }
-        return 0; 
+        return false;
+    }
+
+    /// Подобрать открытую экспоненту: 65537, если она применима, иначе
+    /// случайную нечётную, взаимно простую с phi.
+    static bool choose_exponent(WideUint phi, Rng& rng, WideUint& out) noexcept {
+        constexpr WideUint preferred = 65537u;
+        if (preferred < phi && gcd(preferred, phi) == 1u) {
+            out = preferred;
+            return true;
+        }
+        if (phi < 4u) {
+            return false;
+        }
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            uint32_t candidate = 0u;
+            if (!rng.next_range(3u, static_cast<uint32_t>(phi - 1u), &candidate)) {
+                return false;
+            }
+            if ((candidate & 1u) == 0u) {
+                ++candidate;
+            }
+            if (static_cast<WideUint>(candidate) >= phi) {
+                candidate = static_cast<uint32_t>((phi - 1u) | 1u);
+            }
+            if (candidate >= 3u && gcd(candidate, phi) == 1u) {
+                out = candidate;
+                return true;
+            }
+        }
+        return false;
     }
 };
 
-}
+} // namespace crypto
+} // namespace embed

@@ -1,6 +1,6 @@
 # MCFrame
 
-Декларативный фреймворк для микроконтроллеров (ARM Cortex-M3, STM32F103).
+Декларативный фреймворк для микроконтроллеров (поддерживаемые архитектуры: ARM Cortex-M3, STM32F103).
 
 ## Сборка
 
@@ -29,12 +29,13 @@ src/os/
   iplatform.hpp          контракт ядра с платформой (embed::platform::Ops)
   common.hpp             Status, Lock, общие типы
   config/                конфигурация таймеров и DMA
-  core/primitives/       списки, очереди, кольцевой буфер, mutex, semaphore
+  core/primitives/       atomic_t, списки, очереди, кольцевой буфер, mutex, semaphore
   core/task/             задача и планировщик
   core/memory/           менеджер памяти, аллокатор
   time/                  модуль времени, таймеры, будильники
   interfaces/            CRTP-интерфейсы (UART, I2C, DMA)
   adc/                   драйвер АЦП
+  crypto/                криптография: CRC, SHA-2/3, HMAC, AES, 3DES, RSA, ECDH
 src/platforms/
   mock/                  реализация для ПК (тесты и отладка)
   stm32/                 реализация для STM32F103
@@ -107,12 +108,41 @@ target_link_libraries(my_app PRIVATE MCFrame::MCFrame)
 | Тема | Правило |
 |---|---|
 | Стек задачи | Передавайте **статический** массив: `add_task(t, stack, words)` |
+| Пул стеков | `stack_alloc()` / `stack_free()` — строго **LIFO**: вернуть можно только регион с вершины пула, иначе `Status::NotSupported` |
+| Завершение задачи | `scheduler::exit()` из самой задачи или `remove_task(t)` снаружи: в обоих случаях ядро сразу получает новую задачу |
 | Сон | `scheduler::sleep_for(ticks)` — сам инициирует переключение |
 | Критическая секция | `embed::Lock` (сохраняет/восстанавливает PRIMASK) |
 | Ожидание события | `semaphore::wait()` / `mutex::lock()` — блокируют задачу, а не крутят CPU |
 | Из прерывания | `semaphore::signal_from_isr()`, `task::*_from_isr`-пути, без `Lock` |
+| Атомарный доступ | `embed::atomic_t<T>`: `load`/`store`/`exchange`/`compare_exchange_strong`/`fetch_add` — не `std::atomic` и не «голые» `__atomic_*` |
 | Логи | `embed::platform_log_line("...")` — на STM32 уходит в ITM/SWO |
 | Регионы памяти | Меняются в `src/platforms/stm32/linker.ld` (`_OS_Heap_Size`, `_OS_StackPool_Size`) |
+
+## Атомарные переменные
+
+Единственный способ атомарного доступа в ядре — `embed::atomic_t<T>`
+(`os/core/primitives/types.hpp`):
+
+```cpp
+#include "os/core/primitives/types.hpp"
+
+embed::atomic_t<uint32_t> g_events{0u};      // счётчик
+embed::atomic_bool        g_done{false};     // защёлка
+
+(void)g_events.fetch_add(1u, embed::MemoryOrderRelaxed);   // прежнее значение
+if (g_done.compare_exchange_strong(expected, true)) { /* выиграли защёлку */ }
+```
+
+| Вместо | Используйте | Почему |
+|---|---|---|
+| `std::atomic<T>` | `embed::atomic_t<T>` | `<atomic>` тянет libstdc++; для 64-битных типов на Cortex-M3 нужен libatomic, которого нет в линковке прошивки |
+| `__atomic_load_n(&x, ...)` | `x.load(...)` | встроенная функция не проверяет тип и одинаково компилируется для любого поля |
+| `volatile` как синхронизация | `atomic_t` | `volatile` не даёт ни атомарности, ни порядка доступа к памяти |
+
+Порядок по умолчанию — `MemoryOrderSeqCst`; ослабляйте его только там, где
+доступ уже взаимоисключён (`Lock`) или гонки нет по построению, и поясняйте
+это комментарием на месте. Типы шире машинного слова запрещены
+(`static_assert`) — для 64-битных счётчиков берите `Lock`.
 
 ## Асинхронный ввод-вывод с линейным кодом
 
@@ -259,6 +289,81 @@ Size free_words = g_memory_manager.task_stack_high_water(&my_tcb);
 Ориентир для STM32F103RB (20 КБ RAM): пример с двумя задачами, АЦП и
 самотестами занимает **3.7 КБ (18 %)**.
 
+## Криптография
+
+Модуль `os/crypto/` — статические алгоритмы без динамической памяти, без
+исключений и без виртуальных функций. Точка входа одна:
+
+```cpp
+#include "os/crypto/crypto.hpp"
+```
+
+| Файл | Что даёт |
+|---|---|
+| `crypto_utils.hpp` | порядок байт (big/little endian), сравнение за постоянное время, PKCS#7 |
+| `random.hpp` | CSPRNG на ChaCha20 (RFC 8439) — нужен для ключей |
+| `crc.hpp` | CRC-8/16/32: обычные и «отражённые» (zlib, MODBUS), плюс аппаратный CRC-32 у STM32 |
+| `sha2.hpp` | SHA-224/256/384/512, SHA-512/224, SHA-512/256 |
+| `sha3.hpp` | SHA3-224/256/384/512, SHAKE128/256 (XOF) |
+| `hmac.hpp` | HMAC-SHA256 (потоковый) |
+| `aes.hpp` | AES-128/192/256: ECB, CBC, CTR (+PKCS#7) |
+| `tdes.hpp` | DES и Triple-DES (EDE): ECB, CBC, CTR |
+| `rsa.hpp` | RSA на 16/32-битных целых — **только для отладки и учебных задач** |
+| `ecc.hpp` | ECDH: secp256k1, secp256r1 (P-256) |
+| `ecies.hpp` | гибридное шифрование: ECDH + KDF на SHA-256 + HMAC |
+
+Единые правила модуля (то, чего не было в первой версии):
+
+* **Ёмкость выходного буфера передаётся явно**, результат — `embed::Status`.
+  Признаком ошибки больше не служит возврат `0`.
+* **Секреты затираются** (`wipe`/`clear`), ключевой материал не остаётся ни
+  в буферах, ни на стеке.
+* **Проверяются входные данные**: ключи, IV, длины, точки на кривой.
+* **Порядок байт фиксирован стандартом** — результат одинаков на ПК и на МКУ.
+* **Ничего не «само» не безопасно**: генерация ключей принимает только CSPRNG
+  (`crypto::Rng`), засеянный энтропией платформы; CBC/CTR без MAC не дают
+  целостности — для этого есть `hmac_sha256` и `Ecies`.
+
+```cpp
+using namespace embed::crypto;
+
+uint8_t digest[Sha256::DigestSize];
+Sha256::hash("abc", 3u, digest);                 // 187 проверок в tests/test_crypto.cpp
+
+uint8_t key[16] = { /* ... */ };
+uint8_t iv[16]  = { /* ... */ };
+Aes128CbcPkcs7 aes(key, iv);
+uint8_t out[64]; Size out_len = 0u;
+if (aes.encrypt(plain, plain_len, out, sizeof(out), &out_len) != Status::Ok) { /* ... */ }
+
+// Обмен ключами
+using D = Ecdh<EccCurve::Secp256r1>;
+D::Scalar priv; D::Point pub;
+D::generate_key_pair(rng, priv, pub);            // rng — crypto::Rng с энтропией
+uint8_t secret[32];
+D::derive_shared_secret_bytes(priv, peer_pub, secret);
+```
+
+Занимаемый объём (замер `arm-none-eabi-size` для Cortex-M3, `-O2`,
+`-ffunction-sections -fdata-sections --gc-sections`): неиспользованный модуль
+в прошивку **не попадает вообще**, а по отдельности алгоритмы стоят примерно
+так — SHA-256 ≈ 0.8 КБ, AES-128-CBC+PKCS#7 ≈ 1.5 КБ, RSA (32-битный) ≈ 2 КБ,
+3DES ≈ 2.6 КБ, ECDH на P-256 ≈ 4 КБ. Все алгоритмы сразу — ≈ 24 КБ FLASH.
+
+### Ограничения, о которых нужно знать
+
+* `rsa.hpp` работает с модулем меньше 2³² — такой ключ **не стоек**;
+  модуль нужен для интерфейсов с уже скомпрометированной стойкостью и для
+  отладки. Стойкий RSA требует `BigInt<64>` и отдельной реализации.
+* ECC — программная реализация: скалярное умножение лестницей Монтгомери,
+  арифметика поля — умножение Монтгомери (CIOS, без деления). На ПК (`-O2`)
+  одно скалярное умножение занимает ≈0.5 мс, то есть на Cortex-M3 (72 МГц)
+  это десятки миллисекунд: для обмена ключами годится, для потока — нет.
+  Это также НЕ защита от атак по побочным каналам (время/потребление).
+* `Cbc`/`Ctr` без HMAC не защищают от подмены: правка шифротекста не
+  обнаруживается. Для «шифрование + целостность» используйте `Ecies` или
+  вручную `Aes`+`hmac_sha256`.
+
 ## Требования
 
 * CMake ≥ 3.20
@@ -270,14 +375,25 @@ Size free_words = g_memory_manager.task_stack_high_water(&my_tcb);
 ```bash
 ./build.sh mock
 ctest --test-dir .build/mock --output-on-failure
-# или напрямую, чтобы увидеть все 40 проверок:
-.build/mock/tests/mc_tests
+# или напрямую:
+.build/mock/tests/mc_tests          # ядро: 40 проверок
+.build/mock/tests/mc_tests_crypto   # криптография: 187 проверок
 ```
 
-Набор тестов (`tests/test_os.cpp`) фиксирует каждый исправленный дефект:
+`ctest` прогоняет четыре набора: `core_selftest`, `async_io`, `uart_i2c` и
+`crypto`.
+
+Набор тестов (`tests/test_os.cpp`) фиксирует каждый исправленный дефект ядра:
 арифметику `BigInt` (деление, переносы, алиасинг), бухгалтерию кучи
 (статистика, двойной `free`, фрагментация), работу `add_task`/`remove_task`
 и корректность утилит.
+
+Набор `tests/test_crypto.cpp` построен на **стандартных тестовых векторах**
+(FIPS 180-4/197/202, NIST SP 800-38A, RFC 4231, SEC 2/FIPS 186-4, каталог CRC)
+и на проверках каждого исправленного дефекта модуля: константы SHA-2, усечение
+дайджеста, расшифрование AES-CTR без таблицы обратных подстановок, размер
+блока TDES, переполнение модуля RSA, точки кривых ECC, обнаружение подмены в
+ECIES.
 
 mock-сборка компилируется с `-Wall -Wextra -Wconversion -Wshadow` и
 запускается под ASan/UBSan (`-DMCFRAME_SANITIZE=ON`, включено по умолчанию) —

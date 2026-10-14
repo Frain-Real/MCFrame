@@ -14,9 +14,32 @@ embed::memory_manager::task_slot*
 embed::memory_manager::find_slot_by_stack(uint32_t* base) noexcept {
     if (base == nullptr) return nullptr;
     for (Size i = 0; i < kMaxTrackedTasks; ++i) {
-        if (slots_[i].task != nullptr && slots_[i].stack_base == base) return &slots_[i];
+        // task МОЖЕТ быть nullptr: регион, выданный stack_alloc(), стоит на
+        // учёте ДО того, как его отдали задаче, и остаётся на учёте после
+        // task_unregister() — иначе возвращать его в пул будет не по чему.
+        // Прежняя проверка «task != nullptr» делала такие регионы
+        // невидимыми для stack_free(): слова пула утекали навсегда.
+        if (slots_[i].stack_base == base) return &slots_[i];
     }
     return nullptr;
+}
+
+embed::memory_manager::task_slot*
+embed::memory_manager::find_free_slot() noexcept {
+    for (Size i = 0; i < kMaxTrackedTasks; ++i) {
+        if (slots_[i].task == nullptr && slots_[i].stack_base == nullptr) {
+            return &slots_[i];
+        }
+    }
+    return nullptr;
+}
+
+bool embed::memory_manager::is_pool_region(const uint32_t* base, Size words) const noexcept {
+    if (stack_pool_size_ == 0u || base == nullptr || words == 0u) return false;
+    const uintptr_t lo = reinterpret_cast<uintptr_t>(stack_pool_base_);
+    const uintptr_t hi = lo + stack_pool_size_ * sizeof(uint32_t);
+    const uintptr_t b  = reinterpret_cast<uintptr_t>(base);
+    return b >= lo && (b + words * sizeof(uint32_t)) <= hi;
 }
 
 embed::Size embed::memory_manager::tracked_count() const noexcept {
@@ -27,7 +50,23 @@ embed::Size embed::memory_manager::tracked_count() const noexcept {
     return n;
 }
 
-// Слияние блока b со следующим по адресу, если тот свободен.
+// Слияние освобождённого блока с физическими соседями — в ОБЕ стороны.
+//
+// Прежде сливалось только ВПЕРЁД, и этого мало. Сценарий: A, B, C идут
+// подряд; освобождаем A, затем C, затем B. Блок B сливается вперёд — в списке
+// остаются ДВА СОСЕДНИХ свободных блока: A и (B+C). Они уже никогда не
+// сольются, потому что слияние запускается только при free() и только для
+// освобождаемого блока. heap_free_ при этом сходится (байты не теряются),
+// поэтому heap_check() проходил, но first-fit не видел сплошного куска, а
+// heap_largest_free() занижал отчёт: «свободный блок 96 Б» в пустой куче.
+//
+// Назад блок ищется по free-list, а не «по адресам»: единственная запись о
+// занятости блока — его собственный заголовок, а адреса начала блока у
+// занятого предшественника неизвестен. Список свободных отсортирован по
+// адресам (так его поддерживает heap_free), поэтому физический сосед слева —
+// это РОВНО предыдущий элемент списка; искать в другом месте нечего.
+//
+// Контракт: b УЖЕ вставлен в free-list (единственный вызов — из heap_free).
 void embed::memory_manager::heap_coalesce(heap_block* b) noexcept {
     if (!b || !b->is_free()) return;
 
@@ -35,20 +74,36 @@ void embed::memory_manager::heap_coalesce(heap_block* b) noexcept {
         return reinterpret_cast<uintptr_t>(x);
     };
 
+    // ── Шаг 1: слияние НАЗАД ──
+    heap_block* prev = nullptr;
+    for (heap_block* it = heap_free_list_; it != nullptr; it = it->next) {
+        if (addr(it) >= addr(b)) break;
+        prev = it;
+    }
+    if (prev != nullptr && addr(prev) + prev->real_size() == addr(b)) {
+        // Поглощаем b левым соседом: он уже стоит в списке ПЕРЕД b, поэтому
+        // достаточно выкинуть b из списка и увеличить левый блок.
+        prev->set_size(prev->real_size() + b->real_size(), true);
+        prev->next = b->next;
+        b = prev;                       // дальше сливаем уже объединённый блок
+    }
+
+    // ── Шаг 2: слияние ВПЕРЁД ──
     // Следующий по адресу блок — только если он внутри кучи.
     uint8_t* end = heap_start_ + heap_size_;
-    uintptr_t b_next = addr(b) + b->real_size();
+    const uintptr_t b_next = addr(b) + b->real_size();
     if (b_next >= reinterpret_cast<uintptr_t>(end)) return;
 
-    auto* nb = reinterpret_cast<heap_block*>(b_next);
-    if (nb->magic != kHeapMagic || !nb->is_free()) return;
+    // Первый свободный ВЫШЕ по адресу — это b->next (инвариант порядка
+    // списка). Если он примыкает вплотную — сливаем; если между ними занятый
+    // блок, то nb стоит дальше по адресу и слияния нет.
+    heap_block* nb = b->next;
+    if (nb == nullptr || addr(nb) != b_next) return;
+    if (nb->magic != kHeapMagic) return;   // список испорчен — вслепую не сливаем
 
-    // Забираем соседа: удаляем его из free-list, растим текущий.
-    heap_block** pp = &heap_free_list_;
-    while (*pp && *pp != nb) pp = &(*pp)->next;
-    if (*pp == nb) *pp = nb->next;
-
+    // Сосед внутри объединённого блока: из списка убираем, размер забираем.
     b->set_size(b->real_size() + nb->real_size(), true);
+    b->next = nb->next;
 }
 
 void* embed::memory_manager::heap_alloc(Size bytes) noexcept {
@@ -156,16 +211,30 @@ bool embed::memory_manager::heap_check() const noexcept {
 
     Size counted_free = 0;
     const uint8_t* p = begin;
+
+    // Обход по адресам идёт в возрастающем порядке, а free-list обязан быть
+    // отсортирован так же (см. heap_free). Сверяем список с обходом на ходу:
+    // на инварианте «предыдущий элемент списка = физический сосед слева»
+    // держится слияние НАЗАД в heap_coalesce(). Так ловятся и выпавший из
+    // списка блок, и дубликат, и потерянный порядок — то есть именно та
+    // порча, из-за которой куча позже «внезапно кончается».
+    const heap_block* fl = heap_free_list_;
+
     while (p < end) {
         const auto* b = reinterpret_cast<const heap_block*>(p);
         if (b->magic != kHeapMagic) return false;
         const Size sz = b->real_size();
         if (sz < kHeapMinBlock || sz % kHeapAlign != 0u) return false;
         if (p + sz > end) return false;
-        if (b->is_free()) counted_free += sz;
+        if (b->is_free()) {
+            counted_free += sz;
+            if (fl != b) return false;      // блок не в списке / порядок нарушен
+            fl = fl->next;
+        }
         p += sz;
     }
     if (p != end) return false;
+    if (fl != nullptr) return false;        // в списке остались блоки вне кучи
     return counted_free == heap_free_;
 }
 
@@ -245,17 +314,34 @@ bool embed::memory_manager::ext_rom_erase(uint32_t offset, uint32_t len) noexcep
 uint32_t* embed::memory_manager::task_stack_init(TaskHandler t, uint32_t* stack, Size words) noexcept {
     if (!t || !stack || words == 0u) return nullptr;
 
-    const platform::Ops& p = platform::ops();
-    if (p.stack_paint) p.stack_paint(stack, static_cast<uint32_t>(words));
-
-    // Переиспользуем запись, если задача уже учтена; иначе ищем свободный слот.
+    // Кому принадлежит запись учёта, в порядке приоритета:
+    //   1) эта задача уже учтена — повторный init;
+    //   2) по БАЗЕ стека — так регион от stack_alloc() привязывается именно к
+    //      своей записи. Прежде слот искался только по задаче, а иначе брался
+    //      первый свободный: регион регистрировался ВТОРОЙ записью, первая
+    //      оставалась «сиротой» с той же базой, и учёт разъезжался;
+    //   3) полностью свободная запись — для статического массива.
     task_slot* info = find_slot(t);
-    if (info == nullptr) {
-        for (Size i = 0; i < kMaxTrackedTasks; ++i) {
-            if (slots_[i].task == nullptr) { info = &slots_[i]; break; }
+    if (info != nullptr) {
+        // Регион пула нельзя потерять при перепривязке задачи к другому стеку:
+        // его сперва возвращают в пул через stack_free().
+        if (is_pool_region(info->stack_base, info->stack_words) &&
+            info->stack_base != stack) {
+            return nullptr;
+        }
+    } else {
+        info = find_slot_by_stack(stack);
+        if (info != nullptr) {
+            if (info->task != nullptr) return nullptr;       // база занята чужой задачей
+            if (info->stack_words != words) return nullptr;  // размер не тот, что у региона
+        } else {
+            info = find_free_slot();
+            if (info == nullptr) return nullptr;             // таблица учёта заполнена
         }
     }
-    if (info == nullptr) return nullptr;      // таблица заполнена
+
+    const platform::Ops& p = platform::ops();
+    if (p.stack_paint) p.stack_paint(stack, static_cast<uint32_t>(words));
 
     info->task        = t;
     info->stack_base  = stack;
@@ -264,66 +350,86 @@ uint32_t* embed::memory_manager::task_stack_init(TaskHandler t, uint32_t* stack,
 
     uint32_t* sp = stack + words;
     if (p.stack_init_frame) sp = p.stack_init_frame(sp, t->fn(), t->ctx());
-    if (sp == nullptr) return nullptr;
+    if (sp == nullptr) {
+        // Кадр не собрался: задача не сможет запуститься, поэтому привязку
+        // снимаем — «призрака» в учёте остаться не должно. База и размер
+        // региона пула при этом сохраняются: их вернёт stack_free().
+        info->task = nullptr;
+        return nullptr;
+    }
 
     t->save_sp(sp);
     return sp;
 }
+
 void embed::memory_manager::task_unregister(TaskHandler t) noexcept {
     task_slot* slot = find_slot(t);
     if (slot == nullptr) return;
-    // Слот освобождается, но занимаемое им место в пуле НЕ возвращается:
-    // стек выделял вызывающий (обычно статический массив).
+
+    // Регион пула остаётся на учёте: вернуть его в пул обязан вызывающий
+    // через stack_free(), и только с вершины (LIFO). Прежнее «*slot = {}»
+    // стирало и базу, и размер — после remove_task() регион становился
+    // невидимым, и его слова утекали.
+    if (is_pool_region(slot->stack_base, slot->stack_words)) {
+        slot->task       = nullptr;
+        slot->high_water = slot->stack_words;
+        return;
+    }
+
+    // Статический стек: учёт снимается целиком, место в таблице освобождается
+    // (в пуле освобождать нечего — стек выделял вызывающий).
     *slot = task_slot{};
 }
+
+// ──────────── Stack pool ────────────
+//
+// Пул — СТЕК: регионы выдаются от вершины (bump-указатель stack_pool_used_) и
+// возвращаются только с вершины.
 
 uint32_t* embed::memory_manager::stack_alloc(Size words) noexcept {
     if (!initialized_ || words == 0u || stack_pool_size_ == 0u) return nullptr;
 
-    // 1. Переиспользуем освобождённый слот ТОГО ЖЕ размера: иначе пул
-    //    исчерпывался после нескольких циклов выделить/освободить.
-    for (Size i = 0; i < kMaxTrackedTasks; ++i) {
-        if (slots_[i].task == nullptr &&
-            slots_[i].stack_base != nullptr &&
-            slots_[i].stack_words == words) {
-            slots_[i].high_water = words;
-            return slots_[i].stack_base;
-        }
-    }
+    // Запись учёта нужна ДО выдачи региона: иначе регион уходил бы наружу без
+    // учёта (прежний код сначала увеличивал учёт, а слот подбирал потом и «как
+    // повезёт» — отсюда и «сироты», и две записи на одну базу).
+    task_slot* info = find_free_slot();
+    if (info == nullptr) return nullptr;
 
-    if (stack_pool_used_ + words > stack_pool_size_) return nullptr;
+    if (words > stack_pool_size_ - stack_pool_used_) return nullptr;
 
-    // 2. Новый участок пула.
     uint32_t* base = stack_pool_base_ + stack_pool_used_;
     stack_pool_used_ += words;
 
-    for (Size i = 0; i < kMaxTrackedTasks; ++i) {
-        if (slots_[i].task == nullptr && slots_[i].stack_base == nullptr) {
-            slots_[i].stack_base  = base;
-            slots_[i].stack_words = words;
-            slots_[i].high_water  = words;
-            return base;
-        }
-    }
-
-    // Свободных записей нет — откатываем выделение из пула.
-    stack_pool_used_ -= words;
-    return nullptr;
+    // task == nullptr, но база задана — «регион выделен, задаче ещё не отдан».
+    // Отличить его от полностью свободной записи позволяет именно stack_base.
+    info->task        = nullptr;
+    info->stack_base  = base;
+    info->stack_words = words;
+    info->high_water  = words;
+    return base;
 }
 
-void embed::memory_manager::stack_free(uint32_t* stack) noexcept {
-    task_slot* slot = find_slot_by_stack(stack);
-    if (slot == nullptr) return;
+embed::Status embed::memory_manager::stack_free(uint32_t* stack) noexcept {
+    if (stack == nullptr) return Status::InvalidArg;
+    if (!initialized_ || stack_pool_size_ == 0u) return Status::Unavailable;
 
-    // Возвращаем слова пулу и сохраняем участок для переиспользования:
-    // stack_base остаётся, task обнуляется (см. stack_alloc, шаг 1).
-    if (slot->task != nullptr) {
-        if (stack_pool_used_ >= slot->stack_words) {
-            stack_pool_used_ -= slot->stack_words;
-        }
+    task_slot* slot = find_slot_by_stack(stack);
+    if (slot == nullptr) return Status::NotFound;                 // чужой / уже возвращён
+    if (!is_pool_region(slot->stack_base, slot->stack_words)) {
+        return Status::NotFound;                                  // статический массив
     }
-    slot->task       = nullptr;
-    slot->high_water = slot->stack_words;
+    if (slot->task != nullptr) return Status::Busy;                // стек ещё у задачи
+
+    // ГЛАВНАЯ проверка: возвращать можно только ВЕРШИНУ пула. Без неё учёт
+    // уменьшался бы на размер любого региона, вершина уезжала бы вниз, и
+    // следующий stack_alloc() выдал бы участок живого стека.
+    if (slot->stack_base + slot->stack_words != stack_pool_base_ + stack_pool_used_) {
+        return Status::NotSupported;
+    }
+
+    stack_pool_used_ -= slot->stack_words;
+    *slot = task_slot{};
+    return Status::Ok;
 }
 
 // ──────────── Init ────────────

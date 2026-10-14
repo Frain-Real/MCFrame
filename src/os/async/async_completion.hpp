@@ -26,6 +26,7 @@
 // ---------------------------------------------------------------------------
 
 #include "async_kernel.hpp"
+#include "../core/primitives/types.hpp"   // atomic_t / atomic_bool / MemoryOrder
 
 namespace embed::async {
 
@@ -84,11 +85,14 @@ public:
         timeout_ms_  = timeout_ms;
         start_ms_    = 0u;
         spin_budget_ = detail::kNoTimerYieldBudget;
-        waiting_     = nullptr;
+        // Снимаем «припаркованность» обычным store (Relaxed): строгий порядок
+        // задаёт следующий за ним store(done_, Release) — он не даст этим
+        // записям уехать после снятия защёлки.
+        waiting_.store(nullptr, MemoryOrderRelaxed);
 
         // Защёлку снимаем ПОСЛЕДНЕЙ: прерывание, пришедшее в этот момент,
         // увидит уже согласованное состояние.
-        __atomic_store_n(&done_, false, __ATOMIC_RELEASE);
+        done_.store(false, MemoryOrderRelease);
     }
 
     /// Начать отсчёт таймаута. Вызывается непосредственно перед стартом
@@ -107,9 +111,12 @@ public:
     /// повторные прерывания (HT+TC у DMA, «дребезг» флагов).
     bool post(const Completion& result) noexcept {
         bool expected = false;
-        if (!__atomic_compare_exchange_n(&done_, &expected, true,
-                                        false, __ATOMIC_ACQ_REL,
-                                        __ATOMIC_ACQUIRE)) {
+        // CAS false -> true: только первый вызов «выигрывает» защёлку.
+        // strong, а не weak: здесь НЕТ цикла, а слабая версия вправе вернуть
+        // false без реального несовпадения — операция была бы потеряна.
+        if (!done_.compare_exchange_strong(expected, true,
+                                          MemoryOrderAcqRel,
+                                          MemoryOrderAcquire)) {
             return false;
         }
 
@@ -124,7 +131,7 @@ public:
         // Если задача уже припаркована — будим её.
         // Обмен атомарный: либо задача увидит done_ == true и не уснёт,
         // либо она уже в ожидании и получит wake. Третьего варианта нет.
-        TaskHandler w = __atomic_exchange_n(&waiting_, nullptr, __ATOMIC_ACQ_REL);
+        TaskHandler w = waiting_.exchange(nullptr, MemoryOrderAcqRel);
         if (w != nullptr) (void)kernel::wake(w);
 
         return true;
@@ -141,7 +148,7 @@ public:
     // ─────────────────────────── Ожидание ───────────────────────────
 
     bool done() const noexcept {
-        return __atomic_load_n(&done_, __ATOMIC_ACQUIRE);
+        return done_.load(MemoryOrderAcquire);
     }
 
     /// Дождаться завершения. Возвращает true, если операция завершилась
@@ -202,7 +209,7 @@ public:
     }
 
     bool has_waiter() const noexcept {
-        return __atomic_load_n(&waiting_, __ATOMIC_ACQUIRE) != nullptr;
+        return waiting_.load(MemoryOrderAcquire) != nullptr;
     }
 
 private:
@@ -281,12 +288,16 @@ private:
     /// уснула — и не проснётся никогда.
     void park(TaskHandler self) noexcept {
         TaskHandler expected = nullptr;
-        (void)__atomic_compare_exchange_n(&waiting_, &expected, self,
-                                         false, __ATOMIC_ACQ_REL,
-                                         __ATOMIC_ACQUIRE);
+        (void)waiting_.compare_exchange_strong(expected, self,
+                                              MemoryOrderAcqRel,
+                                              MemoryOrderAcquire);
     }
 
-    volatile bool done_        = false;
+    /// Защёлка «операция завершена». atomic_t<bool>, а не volatile bool:
+    /// пишет её обработчик прерывания, читает задача — volatile не даёт
+    /// ни атомарности, ни порядка.
+    atomic_bool done_{false};
+
     Status        status_      = Status::Busy;
     Size          transferred_ = 0u;
 
@@ -300,7 +311,8 @@ private:
     uint64_t      start_ms_    = 0u;
     uint32_t      spin_budget_ = detail::kNoTimerYieldBudget;
 
-    TaskHandler   waiting_     = nullptr;
+    /// Задача, ожидающая завершения (nullptr — никто не ждёт).
+    atomic_t<TaskHandler> waiting_{nullptr};
 };
 
 } // namespace embed::async

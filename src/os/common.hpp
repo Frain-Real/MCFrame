@@ -13,7 +13,7 @@ namespace embed {
     // восстанавливать маску прерываний, поэтому Lock реентерабелен:
     // вложенный Lock не включает прерывания раньше внешнего.
     // ------------------------------------------------------------------------
-    inline uint32_t platform_critical_enter() noexcept {
+    [[nodiscard]] inline uint32_t platform_critical_enter() noexcept {
         return platform::ops().critical_enter();
     }
     inline void platform_critical_exit(uint32_t state) noexcept {

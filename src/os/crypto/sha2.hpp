@@ -1,543 +1,448 @@
+// crypto/sha2.hpp
+// ---------------------------------------------------------------------------
+// SHA-2: SHA-224/256/384/512 и SHA-512/224, SHA-512/256 (FIPS 180-4).
+//
+// ЧТО БЫЛО ИСПРАВЛЕНО:
+//   1. Таблицы констант. K256 совпадала с эталоном только до 45-го слова,
+//      K512 — до 19-го, дальше шёл мусор (в K512 вообще было 92 слова вместо
+//      80). SHA-256/512 считали неправильный хэш на любых данных, для
+//      которых нужно больше одного раунда сверх первых.
+//   2. Начальные значения SHA-512/224 были выдуманы целиком, у SHA-512/256
+//      неверны последние два слова. Оба варианта давали неверный дайджест.
+//   3. Усечение дайджеста не выполнялось вообще: SHA224::finalize() отдавала
+//      28-байтовый буфер, а SHA256_Family::get_digest_bytes() писала в него
+//      32 байта — переполнение буфера вызывающего (портил стек). То же для
+//      SHA-512/224 (28 из 64) и SHA-512/256 (32 из 64).
+//   4. Наследование с чисто виртуальными функциями в КОНСТРУКТОРЕ базового
+//      класса: SHA2_Base() вызывал init() → init_hash_values(), то есть
+//      виртуальный вызов в конструкторе базового класса, который для
+//      производного объекта попадает в базовую версию. Заменено на
+//      статический полиморфизм (шаблон по варианту) — виртуальных функций
+//      нет, размер объекта меньше, вызовы разворачиваются на этапе компиляции.
+//   5. Длина сообщения хранилась только в 64 битах, из-за чего у семейства
+//      SHA-512 старшие 8 байт поля длины были прибиты к нулю. Теперь длина —
+//      128-битная (две пары 64-битных счётчиков).
+//   6. Базовый класс не был защищён от повторного finalize()/update() после
+//      finalize(): состояние сбрасывалось в init(), и это было неявно.
+// ---------------------------------------------------------------------------
 #pragma once
-#include "../common.hpp"
-#include "../utilities.hpp"
+
+#include "crypto_utils.hpp"
+
+#include <cstddef>
+#include <cstdint>
+
 namespace embed {
-// Общие определения
-#define SHA256_BLOCK_SIZE  64  // 512 бит
-#define SHA512_BLOCK_SIZE 128 // 1024 бит
+namespace crypto {
 
-// Размеры дайджестов
-#define SHA224_DIGEST_SIZE 28
-#define SHA256_DIGEST_SIZE 32
-#define SHA384_DIGEST_SIZE 48
-#define SHA512_DIGEST_SIZE 64
-#define SHA512_224_DIGEST_SIZE 28
-#define SHA512_256_DIGEST_SIZE 32
+/// Варианты SHA-2 (различаются размером дайджеста и блоком).
+enum class Sha2Variant {
+    Sha224,
+    Sha256,
+    Sha384,
+    Sha512,
+    Sha512_224,
+    Sha512_256
+};
 
-// --- Базовый класс для общей логики SHA-2 ---
-class SHA2_Base {
+template <Sha2Variant V>
+struct Sha2Traits;
+
+template <>
+struct Sha2Traits<Sha2Variant::Sha224> {
+    using Word = uint32_t;
+    static constexpr Size BlockSize  = 64u;
+    static constexpr Size DigestSize = 28u;
+    static constexpr int  Rounds     = 64;
+    static constexpr bool Is64Bit    = false;
+    static constexpr uint32_t K[64] = {
+        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+        0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+        0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+        0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+        0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+        0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+        0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+        0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+        0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+        0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+        0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+        0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+        0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+        0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+        0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
+    };
+    static constexpr uint32_t H[8] = {
+        0xc1059ed8u, 0x367cd507u, 0x3070dd17u, 0xf70e5939u,
+        0xffc00b31u, 0x68581511u, 0x64f98fa7u, 0xbefa4fa4u
+    };
+};
+
+template <>
+struct Sha2Traits<Sha2Variant::Sha256> {
+    using Word = uint32_t;
+    static constexpr Size BlockSize  = 64u;
+    static constexpr Size DigestSize = 32u;
+    static constexpr int  Rounds     = 64;
+    static constexpr bool Is64Bit    = false;
+    static constexpr uint32_t K[64] = {
+        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+        0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+        0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+        0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+        0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+        0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+        0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+        0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+        0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+        0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+        0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+        0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+        0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+        0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+        0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
+    };
+    static constexpr uint32_t H[8] = {
+        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
+    };
+};
+
+template <>
+struct Sha2Traits<Sha2Variant::Sha384> {
+    using Word = uint64_t;
+    static constexpr Size BlockSize  = 128u;
+    static constexpr Size DigestSize = 48u;
+    static constexpr int  Rounds     = 80;
+    static constexpr bool Is64Bit    = true;
+    static constexpr uint64_t K[80] = {
+        0x428a2f98d728ae22ull, 0x7137449123ef65cdull, 0xb5c0fbcfec4d3b2full, 0xe9b5dba58189dbbcull,
+        0x3956c25bf348b538ull, 0x59f111f1b605d019ull, 0x923f82a4af194f9bull, 0xab1c5ed5da6d8118ull,
+        0xd807aa98a3030242ull, 0x12835b0145706fbeull, 0x243185be4ee4b28cull, 0x550c7dc3d5ffb4e2ull,
+        0x72be5d74f27b896full, 0x80deb1fe3b1696b1ull, 0x9bdc06a725c71235ull, 0xc19bf174cf692694ull,
+        0xe49b69c19ef14ad2ull, 0xefbe4786384f25e3ull, 0x0fc19dc68b8cd5b5ull, 0x240ca1cc77ac9c65ull,
+        0x2de92c6f592b0275ull, 0x4a7484aa6ea6e483ull, 0x5cb0a9dcbd41fbd4ull, 0x76f988da831153b5ull,
+        0x983e5152ee66dfabull, 0xa831c66d2db43210ull, 0xb00327c898fb213full, 0xbf597fc7beef0ee4ull,
+        0xc6e00bf33da88fc2ull, 0xd5a79147930aa725ull, 0x06ca6351e003826full, 0x142929670a0e6e70ull,
+        0x27b70a8546d22ffcull, 0x2e1b21385c26c926ull, 0x4d2c6dfc5ac42aedull, 0x53380d139d95b3dfull,
+        0x650a73548baf63deull, 0x766a0abb3c77b2a8ull, 0x81c2c92e47edaee6ull, 0x92722c851482353bull,
+        0xa2bfe8a14cf10364ull, 0xa81a664bbc423001ull, 0xc24b8b70d0f89791ull, 0xc76c51a30654be30ull,
+        0xd192e819d6ef5218ull, 0xd69906245565a910ull, 0xf40e35855771202aull, 0x106aa07032bbd1b8ull,
+        0x19a4c116b8d2d0c8ull, 0x1e376c085141ab53ull, 0x2748774cdf8eeb99ull, 0x34b0bcb5e19b48a8ull,
+        0x391c0cb3c5c95a63ull, 0x4ed8aa4ae3418acbull, 0x5b9cca4f7763e373ull, 0x682e6ff3d6b2b8a3ull,
+        0x748f82ee5defb2fcull, 0x78a5636f43172f60ull, 0x84c87814a1f0ab72ull, 0x8cc702081a6439ecull,
+        0x90befffa23631e28ull, 0xa4506cebde82bde9ull, 0xbef9a3f7b2c67915ull, 0xc67178f2e372532bull,
+        0xca273eceea26619cull, 0xd186b8c721c0c207ull, 0xeada7dd6cde0eb1eull, 0xf57d4f7fee6ed178ull,
+        0x06f067aa72176fbaull, 0x0a637dc5a2c898a6ull, 0x113f9804bef90daeull, 0x1b710b35131c471bull,
+        0x28db77f523047d84ull, 0x32caab7b40c72493ull, 0x3c9ebe0a15c9bebcull, 0x431d67c49c100d4cull,
+        0x4cc5d4becb3e42b6ull, 0x597f299cfc657e2aull, 0x5fcb6fab3ad6faecull, 0x6c44198c4a475817ull
+    };
+    static constexpr uint64_t H[8] = {
+        0xcbbb9d5dc1059ed8ull, 0x629a292a367cd507ull, 0x9159015a3070dd17ull, 0x152fecd8f70e5939ull,
+        0x67332667ffc00b31ull, 0x8eb44a8768581511ull, 0xdb0c2e0d64f98fa7ull, 0x47b5481dbefa4fa4ull
+    };
+};
+
+template <>
+struct Sha2Traits<Sha2Variant::Sha512> {
+    using Word = uint64_t;
+    static constexpr Size BlockSize  = 128u;
+    static constexpr Size DigestSize = 64u;
+    static constexpr int  Rounds     = 80;
+    static constexpr bool Is64Bit    = true;
+    static constexpr uint64_t K[80] = {
+        0x428a2f98d728ae22ull, 0x7137449123ef65cdull, 0xb5c0fbcfec4d3b2full, 0xe9b5dba58189dbbcull,
+        0x3956c25bf348b538ull, 0x59f111f1b605d019ull, 0x923f82a4af194f9bull, 0xab1c5ed5da6d8118ull,
+        0xd807aa98a3030242ull, 0x12835b0145706fbeull, 0x243185be4ee4b28cull, 0x550c7dc3d5ffb4e2ull,
+        0x72be5d74f27b896full, 0x80deb1fe3b1696b1ull, 0x9bdc06a725c71235ull, 0xc19bf174cf692694ull,
+        0xe49b69c19ef14ad2ull, 0xefbe4786384f25e3ull, 0x0fc19dc68b8cd5b5ull, 0x240ca1cc77ac9c65ull,
+        0x2de92c6f592b0275ull, 0x4a7484aa6ea6e483ull, 0x5cb0a9dcbd41fbd4ull, 0x76f988da831153b5ull,
+        0x983e5152ee66dfabull, 0xa831c66d2db43210ull, 0xb00327c898fb213full, 0xbf597fc7beef0ee4ull,
+        0xc6e00bf33da88fc2ull, 0xd5a79147930aa725ull, 0x06ca6351e003826full, 0x142929670a0e6e70ull,
+        0x27b70a8546d22ffcull, 0x2e1b21385c26c926ull, 0x4d2c6dfc5ac42aedull, 0x53380d139d95b3dfull,
+        0x650a73548baf63deull, 0x766a0abb3c77b2a8ull, 0x81c2c92e47edaee6ull, 0x92722c851482353bull,
+        0xa2bfe8a14cf10364ull, 0xa81a664bbc423001ull, 0xc24b8b70d0f89791ull, 0xc76c51a30654be30ull,
+        0xd192e819d6ef5218ull, 0xd69906245565a910ull, 0xf40e35855771202aull, 0x106aa07032bbd1b8ull,
+        0x19a4c116b8d2d0c8ull, 0x1e376c085141ab53ull, 0x2748774cdf8eeb99ull, 0x34b0bcb5e19b48a8ull,
+        0x391c0cb3c5c95a63ull, 0x4ed8aa4ae3418acbull, 0x5b9cca4f7763e373ull, 0x682e6ff3d6b2b8a3ull,
+        0x748f82ee5defb2fcull, 0x78a5636f43172f60ull, 0x84c87814a1f0ab72ull, 0x8cc702081a6439ecull,
+        0x90befffa23631e28ull, 0xa4506cebde82bde9ull, 0xbef9a3f7b2c67915ull, 0xc67178f2e372532bull,
+        0xca273eceea26619cull, 0xd186b8c721c0c207ull, 0xeada7dd6cde0eb1eull, 0xf57d4f7fee6ed178ull,
+        0x06f067aa72176fbaull, 0x0a637dc5a2c898a6ull, 0x113f9804bef90daeull, 0x1b710b35131c471bull,
+        0x28db77f523047d84ull, 0x32caab7b40c72493ull, 0x3c9ebe0a15c9bebcull, 0x431d67c49c100d4cull,
+        0x4cc5d4becb3e42b6ull, 0x597f299cfc657e2aull, 0x5fcb6fab3ad6faecull, 0x6c44198c4a475817ull
+    };
+    static constexpr uint64_t H[8] = {
+        0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull, 0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
+        0x510e527fade682d1ull, 0x9b05688c2b3e6c1full, 0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull
+    };
+};
+
+// SHA-512/224 и SHA-512/256 используют те же K, что SHA-512.
+template <>
+struct Sha2Traits<Sha2Variant::Sha512_224> : Sha2Traits<Sha2Variant::Sha512> {
+    static constexpr Size DigestSize = 28u;
+    static constexpr uint64_t H[8] = {
+        0x8c3d37c819544da2ull, 0x73e1996689dcd4d6ull, 0x1dfab7ae32ff9c82ull, 0x679dd514582f9fcfull,
+        0x0f6d2b697bd44da8ull, 0x77e36f7304c48942ull, 0x3f9d85a86a1d36c8ull, 0x1112e6ad91d692a1ull
+    };
+};
+
+template <>
+struct Sha2Traits<Sha2Variant::Sha512_256> : Sha2Traits<Sha2Variant::Sha512> {
+    static constexpr Size DigestSize = 32u;
+    static constexpr uint64_t H[8] = {
+        0x22312194fc2bf72cull, 0x9f555fa3c84c64c2ull, 0x2393b86b6f53b151ull, 0x963877195940eabdull,
+        0x96283ee2a88effe3ull, 0xbe5e1e2553863992ull, 0x2b0199fc2c85b8aaull, 0x0eb72ddc81c52ca2ull
+    };
+};
+
+/**
+ * @brief SHA-2 выбранного варианта.
+ *
+ * Использование:
+ * @code
+ *   embed::crypto::Sha256 h;
+ *   h.update(buf, len);
+ *   uint8_t digest[embed::crypto::Sha256::DigestSize];
+ *   h.finalize(digest);
+ * @endcode
+ *
+ * Дайджест пишется РОВНО DigestSize байт: буфер вызывающего не переполняется.
+ * После finalize() объект возвращается в исходное состояние и пригоден для
+ * следующего сообщения.
+ */
+template <Sha2Variant V>
+class Sha2 {
 public:
-    // Виртуальный деструктор для корректного удаления
-    virtual ~SHA2_Base() = default;
+    using Traits = Sha2Traits<V>;
+    using Word   = typename Traits::Word;
 
-    // Инициализация хеш-функции
-    void init();
+    static constexpr Size BlockSize  = Traits::BlockSize;
+    static constexpr Size DigestSize = Traits::DigestSize;
 
-    // Обновление хеша с новыми данными
-    void update(const uint8_t* data, size_t length);
+    Sha2() noexcept { reset(); }
 
-    // Завершение хеширования и получение результата
-    // size_t digest_size - фактический размер дайджеста для конкретной версии
-    void finalize(uint8_t* digest, size_t digest_size);
+    /// Начальное состояние (можно переиспользовать объект без пересоздания).
+    void reset() noexcept {
+        for (int i = 0; i < 8; ++i) {
+            h_[i] = Traits::H[i];
+        }
+        buffer_fill_ = 0u;
+        bytes_lo_    = 0u;
+        bytes_hi_    = 0u;
+    }
 
-protected:
-    // Конструктор -protected, так как класс базовый
-    SHA2_Base(uint8_t block_size_bytes);
+    /// Добавить данные. data == nullptr при len > 0 игнорируется.
+    void update(const void* data, Size len) noexcept {
+        if (data == nullptr || len == 0u) {
+            return;
+        }
+        const uint8_t* p = static_cast<const uint8_t*>(data);
 
-    uint8_t m_block_size_bytes; // Размер блока в байтах (64 или 128)
-    uint8_t m_buffer[SHA512_BLOCK_SIZE]; // Максимальный буфер для 128 байт
-    uint32_t m_buffer_idx;              // Индекс текущей позиции в буфере
-    uint64_t m_bit_count;               // Общее количество обработанных бит
-
-    // Чисто виртуальные функции, которые должны быть реализованы в производных классах
-    virtual void init_hash_values() = 0; // Инициализация начальных H значений
-    virtual void transform() = 0;        // Обработка одного блока
-    virtual void get_digest_bytes(uint8_t* digest) = 0; // Копирование H значений в байты
-
-    // Вспомогательная функция для дополнения (padding)
-    void pad_message_and_transform();
-};
-
-// --- Семейство SHA-256 (32-битные операции) ---
-class SHA256_Family : public SHA2_Base {
-protected:
-    SHA256_Family(); // Конструктор для наследования
-
-    uint32_t m_h[8]; // Промежуточные значения хеша (H0 - H7)
-
-    // Реализация чисто виртуальных функций из SHA2_Base
-    void transform() override;
-    void get_digest_bytes(uint8_t* digest) override;
-
-    // Вспомогательные функции для битовых операций (32-битные)
-    static uint32_t rotr32(uint32_t x, uint32_t n);
-    static uint32_t shr32(uint32_t x, uint32_t n);
-    static uint32_t ch32(uint32_t x, uint32_t y, uint32_t z);
-    static uint32_t maj32(uint32_t x, uint32_t y, uint32_t z);
-    static uint32_t sigma0_32(uint32_t x);
-    static uint32_t sigma1_32(uint32_t x);
-    static uint32_t e_sigma0_32(uint32_t x);
-    static uint32_t e_sigma1_32(uint32_t x);
-};
-
-// --- Семейство SHA-512 (64-битные операции) ---
-class SHA512_Family : public SHA2_Base {
-protected:
-    SHA512_Family(); // Конструктор для наследования
-
-    uint64_t m_h[8]; // Промежуточные значения хеша (H0 - H7)
-
-    // Реализация чисто виртуальных функций из SHA2_Base
-    void transform() override;
-    void get_digest_bytes(uint8_t* digest) override;
-
-    // Вспомогательные функции для битовых операций (64-битные)
-    static uint64_t rotr64(uint64_t x, uint64_t n);
-    static uint64_t shr64(uint64_t x, uint64_t n);
-    static uint64_t ch64(uint64_t x, uint64_t y, uint64_t z);
-    static uint64_t maj64(uint64_t x, uint64_t y, uint64_t z);
-    static uint64_t sigma0_64(uint64_t x);
-    static uint64_t sigma1_64(uint64_t x);
-    static uint64_t e_sigma0_64(uint64_t x);
-    static uint64_t e_sigma1_64(uint64_t x);
-};
-
-// --- Конкретные реализации SHA-224, SHA-256 ---
-class SHA224 : public SHA256_Family {
-public:
-    SHA224();
-    void finalize(uint8_t digest[SHA224_DIGEST_SIZE]);
-protected:
-    void init_hash_values() override;
-};
-
-class SHA256 : public SHA256_Family {
-public:
-    SHA256();
-    void finalize(uint8_t digest[SHA256_DIGEST_SIZE]);
-protected:
-    void init_hash_values() override;
-};
-
-// --- Конкретные реализации SHA-384, SHA-512, SHA-512/224, SHA-512/256 ---
-class SHA384 : public SHA512_Family {
-public:
-    SHA384();
-    void finalize(uint8_t digest[SHA384_DIGEST_SIZE]);
-protected:
-    void init_hash_values() override;
-};
-
-class SHA512 : public SHA512_Family {
-public:
-    SHA512();
-    void finalize(uint8_t digest[SHA512_DIGEST_SIZE]);
-protected:
-    void init_hash_values() override;
-};
-
-class SHA512_224 : public SHA512_Family {
-public:
-    SHA512_224();
-    void finalize(uint8_t digest[SHA512_224_DIGEST_SIZE]);
-protected:
-    void init_hash_values() override;
-};
-
-class SHA512_256 : public SHA512_Family {
-public:
-    SHA512_256();
-    void finalize(uint8_t digest[SHA512_256_DIGEST_SIZE]);
-protected:
-    void init_hash_values() override;
-};
-
-// --- Константы SHA-256 ---
-static const uint32_t K256[64] = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xe4dbfacc, 0xf00327ed,
-    0xf57c0faf, 0x6f07d2dc, 0x720a67ab, 0x81c4c92e, 0x9289297d, 0xa2c8c94e, 0xac42292a, 0xc55c7a1c,
-    0xe479b7a1, 0xebf201e1, 0xfa7270f3, 0xfdc488c0, 0x2117559b, 0x33b006a1, 0x4785264b, 0x4cb0a9dc
-};
-
-// Начальные значения хеша SHA-256
-static const uint32_t H256_INIT[8] = {
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-};
-
-// Начальные значения хеша SHA-224 (первые 8 простых чисел ^ 1/2, усеченные до 224 бит)
-static const uint32_t H224_INIT[8] = {
-    0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939,
-    0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4
-};
-
-// --- Константы SHA-512 ---
-static const uint64_t K512[92] = {
-    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL, 0xe9b5dba58189dbbcULL,
-    0x3956c25bf348b538ULL, 0x59f111f1b605d019ULL, 0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL,
-    0xd807aa98a3030242ULL, 0x12835b0145706fbeULL, 0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL,
-    0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL, 0x9bdc06a725c71235ULL, 0xc19bf174cf692694ULL,
-    0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL, 0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL,
-    0x2de92c6f4a337653ULL, 0x4a7484aa6ea6e483ULL, 0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL,
-    0x983e5152ee66dfabULL, 0xa831c66d2b6100c7ULL, 0xb00327c898fb213fULL, 0xbf597fc7beef0ee4ULL,
-    0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL, 0x06ca6351e003826fULL, 0x142929670a0e6e70ULL,
-    0x27b70a8546d22ffcULL, 0x2e1b21385c26c926ULL, 0x4d2c6dfc5ac42aedULL, 0x53380d139d95b3dfULL,
-    0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL, 0x81c2c92e47edaee6ULL, 0x92722c851482353bULL,
-    0xa2bfe8a14cf10364ULL, 0xa81a664bc9566fa1ULL, 0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL,
-    0xd192e819d6ef5218ULL, 0xd69906245565a910ULL, 0xe4dbfacc34ed1a4aULL, 0xf00327edb87dbfceULL,
-    0xf57c0fafedbb4f8eULL, 0x6f07d2dc24477610ULL, 0x720a67ab766e257aULL, 0x81c4c92e47edaee6ULL,
-    0x9289297d2871fbd4ULL, 0xa2c8c94e47d21384ULL, 0xac42292a434c449cULL, 0xc55c7a1c72a8c8e6ULL,
-    0xc67178f2e3725a66ULL, 0xd1b020703f514869ULL, 0xd4d80a13d712e52eULL, 0xdd623f7215163777ULL,
-    0xe0033286b245a498ULL, 0xe4b51c19b6ef72e1ULL, 0xeb07d2d3a3754b23ULL, 0xf769ea821cbfe980ULL,
-    0xfc6543216893693fULL, 0xfd8655ed59e984f4ULL, 0x01a33a921ed0f4b3ULL, 0x0c681283d6a2f392ULL,
-    0x147814a5118525b6ULL, 0x217088f1754f15d0ULL, 0x2748774c47d79b69ULL, 0x2d0c2e9b0b4b2397ULL,
-    0x34b0bcb5e1719b36ULL, 0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL, 0x5b9cca4f7763e373ULL,
-    0x682e6ff3d6b2b8a3ULL, 0x748f82ee5370d919ULL, 0x78a5636f43e5c709ULL, 0x84c87814a1c5d985ULL,
-    0x8cc702081a6439ecULL, 0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL, 0xa82b40b8a4f9bc08ULL,
-    0xbef9a3f7b2c67915ULL, 0xc67178f2e3725a66ULL, 0xcc785bc3e2b7e192ULL, 0xe4dbfacc34ed1a4aULL,
-    0xe53028198f2b2176ULL, 0xf769ea821cbfe980ULL, 0xfa7270f3ed02e077ULL, 0xfc6543216893693fULL
-};
-
-// Начальные значения хеша SHA-512
-static const uint64_t H512_INIT[8] = {
-    0x6a09e667f3bcc908ULL, 0xbb67ae8584caa73bULL, 0x3c6ef372fe94f82bULL, 0xa54ff53a5f1d36f1ULL,
-    0x510e527fade682d1ULL, 0x9b05688c2b3e6c1fULL, 0x1f83d9abfb41bd6bULL, 0x5be0cd19137e2179ULL
-};
-
-// Начальные значения хеша SHA-384
-static const uint64_t H384_INIT[8] = {
-    0xcbbb9d5dc1059ed8ULL, 0x629a292a367cd507ULL, 0x9159015a3070dd17ULL, 0x152fecd8f70e5939ULL,
-    0x67332667ffc00b31ULL, 0x8eb44a8768581511ULL, 0xdb0c2e0d64f98fa7ULL, 0x47b5481dbefa4fa4ULL
-};
-
-// Начальные значения хеша SHA-512/224
-static const uint64_t H512_224_INIT[8] = {
-    0x8c3d05260f898c6bULL, 0x741d402b8586cdd2ULL, 0x77037e37ed3c4606ULL, 0xee0a0d2e6097d9d0ULL,
-    0x2c64baf86b723703ULL, 0x23ee733792c903a1ULL, 0xd0e01763741a8753ULL, 0x2213264996d51c10ULL
-};
-
-// Начальные значения хеша SHA-512/256
-static const uint64_t H512_256_INIT[8] = {
-    0x22312194fc2bf72cULL, 0x9f555fa3c84c64c2ULL, 0x2393b86b6f53b151ULL, 0x963877195940eabdULL,
-    0x96283ee2a88effe3ULL, 0xbe5e1e2553863992ULL, 0x2b0199fc2c658461ULL, 0x0ab63df0a2c5f1cdULL
-};
-
-// --- Реализация SHA2_Base ---
-SHA2_Base::SHA2_Base(uint8_t block_size_bytes) :
-    m_block_size_bytes(block_size_bytes) {
-    init();
-}
-
-void SHA2_Base::init() {
-    init_hash_values(); // Вызывается виртуальная функция для инициализации H
-    m_buffer_idx = 0;
-    m_bit_count = 0;
-}
-
-void SHA2_Base::update(const uint8_t* data, size_t length) {
-    m_bit_count += (uint64_t)length * 8; // Обновляем общее количество бит
-
-    size_t data_idx = 0;
-    while (length > 0) {
-        size_t bytes_to_copy = m_block_size_bytes - m_buffer_idx;
-        if (bytes_to_copy > length) {
-            bytes_to_copy = length;
+        // 128-битный счётчик байт (младшая и старшая половины).
+        const uint64_t prev_lo = bytes_lo_;
+        bytes_lo_ += static_cast<uint64_t>(len);
+        if (bytes_lo_ < prev_lo) {
+            bytes_hi_ += 1u;
         }
 
-        utilities::fast_memcpy(m_buffer + m_buffer_idx, data + data_idx, bytes_to_copy);
-        m_buffer_idx += bytes_to_copy;
-        data_idx += bytes_to_copy;
-        length -= bytes_to_copy;
+        if (buffer_fill_ != 0u) {
+            const Size need = BlockSize - buffer_fill_;
+            const Size take = (len < need) ? len : need;
+            utilities::fast_memcpy(buffer_ + buffer_fill_, p, take);
+            buffer_fill_ += take;
+            p            += take;
+            len          -= take;
+            if (buffer_fill_ == BlockSize) {
+                transform(buffer_);
+                buffer_fill_ = 0u;
+            }
+        }
 
-        if (m_buffer_idx == m_block_size_bytes) {
-            transform(); // Вызывается виртуальная функция для обработки блока
-            m_buffer_idx = 0;
+        while (len >= BlockSize) {
+            transform(p);
+            p   += BlockSize;
+            len -= BlockSize;
+        }
+
+        if (len != 0u) {
+            utilities::fast_memcpy(buffer_, p, len);
+            buffer_fill_ = len;
         }
     }
-}
 
-void SHA2_Base::finalize(uint8_t* digest, size_t digest_size) {
-    pad_message_and_transform(); // Выполняем дополнение и обработку последних блоков
-    get_digest_bytes(digest);    // Копируем H значения в байты
+    /// Записать дайджест (DigestSize байт) и сбросить состояние.
+    void finalize(uint8_t* digest) noexcept {
+        if (digest == nullptr) {
+            return;
+        }
+        const uint64_t bits_lo = bytes_lo_ << 3;
+        const uint64_t bits_hi = (bytes_hi_ << 3) | (bytes_lo_ >> 61);
 
-    // Обрезаем хеш до нужного размера, если это необходимо
-    if (digest_size < SHA512_DIGEST_SIZE && m_block_size_bytes == SHA512_BLOCK_SIZE) {
-        // Для SHA-384, SHA-512/224, SHA-512/256
-        // digest уже имеет необходимый размер, но мы должны обрезать его
-        // (На самом деле, finalize будет принимать digest нужного размера,
-        // поэтому копирование только нужного количества байт уже будет достаточно)
-    } else if (digest_size < SHA256_DIGEST_SIZE && m_block_size_bytes == SHA256_BLOCK_SIZE) {
-        // Для SHA-224
-        // Аналогично, digest уже будет нужного размера
+        // 1. Бит '1' + нули; если места под длину не осталось — ещё блок.
+        buffer_[buffer_fill_++] = 0x80u;
+        const Size length_field = Traits::Is64Bit ? 16u : 8u;
+        if (buffer_fill_ > BlockSize - length_field) {
+            utilities::fast_memset(buffer_ + buffer_fill_, 0, BlockSize - buffer_fill_);
+            transform(buffer_);
+            buffer_fill_ = 0u;
+        }
+        utilities::fast_memset(buffer_ + buffer_fill_, 0,
+                               BlockSize - length_field - buffer_fill_);
+
+        // 2. Длина сообщения в битах, big-endian. У семейства SHA-512 поле
+        //    128-битное, поэтому пишутся обе половины.
+        if (Traits::Is64Bit) {
+            store_be64(bits_hi, buffer_ + BlockSize - 16u);
+        }
+        store_be64(bits_lo, buffer_ + BlockSize - 8u);
+
+        transform(buffer_);
+
+        // 3. Дайджест — старшие DigestSize байт состояния, big-endian.
+        uint8_t full[64];
+        for (int i = 0; i < 8; ++i) {
+            if constexpr (Traits::Is64Bit) {
+                store_be64(h_[i], full + i * 8);
+            } else {
+                store_be32(h_[i], full + i * 4);
+            }
+        }
+        utilities::fast_memcpy(digest, full, DigestSize);
+        wipe(full, sizeof(full));
+
+        reset();
     }
 
-    // Сбрасываем состояние для возможности повторного использования
-    init();
-}
-
-void SHA2_Base::pad_message_and_transform() {
-    // 1. Добавляем '1' бит (0x80)
-    m_buffer[m_buffer_idx++] = 0x80;
-
-    // 2. Если осталось недостаточно места для длины (8 байт для SHA256-семейства, 16 для SHA512-семейства),
-    //    дополняем нулями и обрабатываем блок
-    uint8_t length_field_size = (m_block_size_bytes == SHA256_BLOCK_SIZE) ? 8 : 16;
-    if (m_buffer_idx > m_block_size_bytes - length_field_size) {
-        utilities::fast_memset(m_buffer + m_buffer_idx, 0, m_block_size_bytes - m_buffer_idx);
-        transform();
-        m_buffer_idx = 0;
+    /// Однократный расчёт: hash(data, len, digest).
+    static void hash(const void* data, Size len, uint8_t* digest) noexcept {
+        Sha2<V> h;
+        h.update(data, len);
+        h.finalize(digest);
     }
 
-    // 3. Дополняем нулями до последних 'length_field_size' байтов блока
-    utilities::fast_memset(m_buffer + m_buffer_idx, 0, m_block_size_bytes - length_field_size - m_buffer_idx);
+private:
+    using StateWord = typename Traits::Word;
 
-    // 4. Добавляем длину сообщения в битах (Big-endian)
-    if (m_block_size_bytes == SHA256_BLOCK_SIZE) { // Для SHA-256/224 (8 байт длины)
-        m_buffer[m_block_size_bytes - 8] = (uint8_t)((m_bit_count >> 56) & 0xFF);
-        m_buffer[m_block_size_bytes - 7] = (uint8_t)((m_bit_count >> 48) & 0xFF);
-        m_buffer[m_block_size_bytes - 6] = (uint8_t)((m_bit_count >> 40) & 0xFF);
-        m_buffer[m_block_size_bytes - 5] = (uint8_t)((m_bit_count >> 32) & 0xFF);
-        m_buffer[m_block_size_bytes - 4] = (uint8_t)((m_bit_count >> 24) & 0xFF);
-        m_buffer[m_block_size_bytes - 3] = (uint8_t)((m_bit_count >> 16) & 0xFF);
-        m_buffer[m_block_size_bytes - 2] = (uint8_t)((m_bit_count >> 8) & 0xFF);
-        m_buffer[m_block_size_bytes - 1] = (uint8_t)(m_bit_count & 0xFF);
-    } else { // Для SHA-512/384/512/224/512/256 (16 байт длины)
-        // Общая длина сообщения в битах - это m_bit_count (uint64_t).
-        // SHA-512 использует 128-битное представление длины, но с учетом того,
-        // что m_bit_count - это uint64_t, старшие 64 бита (которые должны быть нулями) не используются.
-        // Это обычно не проблема, так как длина сообщения редко превышает 2^64 бита.
-        utilities::fast_memset(m_buffer + m_block_size_bytes - 16, 0, 8); // Старшие 8 байт для длины (обычно 0)
-        m_buffer[m_block_size_bytes - 8]  = (uint8_t)((m_bit_count >> 56) & 0xFF);
-        m_buffer[m_block_size_bytes - 7]  = (uint8_t)((m_bit_count >> 48) & 0xFF);
-        m_buffer[m_block_size_bytes - 6]  = (uint8_t)((m_bit_count >> 40) & 0xFF);
-        m_buffer[m_block_size_bytes - 5]  = (uint8_t)((m_bit_count >> 32) & 0xFF);
-        m_buffer[m_block_size_bytes - 4]  = (uint8_t)((m_bit_count >> 24) & 0xFF);
-        m_buffer[m_block_size_bytes - 3]  = (uint8_t)((m_bit_count >> 16) & 0xFF);
-        m_buffer[m_block_size_bytes - 2]  = (uint8_t)((m_bit_count >> 8) & 0xFF);
-        m_buffer[m_block_size_bytes - 1]  = (uint8_t)(m_bit_count & 0xFF);
+    StateWord h_[8];
+    uint8_t   buffer_[Traits::BlockSize];
+    Size      buffer_fill_;
+    uint64_t  bytes_lo_;
+    uint64_t  bytes_hi_;
+
+    static constexpr StateWord rotr(StateWord x, uint32_t n) noexcept {
+        return (x >> n) | (x << ((sizeof(StateWord) * 8u) - n));
     }
 
-    // 5. Обрабатываем последний блок
-    transform();
-}
-
-// --- Реализация SHA256_Family (32-битные операции) ---
-SHA256_Family::SHA256_Family() : SHA2_Base(SHA256_BLOCK_SIZE) {}
-
-// Вспомогательные функции (32-битные)
-uint32_t SHA256_Family::rotr32(uint32_t x, uint32_t n) {
-    return (x >> n) | (x << (32 - n));
-}
-uint32_t SHA256_Family::shr32(uint32_t x, uint32_t n) {
-    return x >> n;
-}
-uint32_t SHA256_Family::ch32(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (~x & z);
-}
-uint32_t SHA256_Family::maj32(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (x & z) ^ (y & z);
-}
-uint32_t SHA256_Family::sigma0_32(uint32_t x) {
-    return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
-}
-uint32_t SHA256_Family::sigma1_32(uint32_t x) {
-    return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
-}
-uint32_t SHA256_Family::e_sigma0_32(uint32_t x) {
-    return rotr32(x, 7) ^ rotr32(x, 18) ^ shr32(x, 3);
-}
-uint32_t SHA256_Family::e_sigma1_32(uint32_t x) {
-    return rotr32(x, 17) ^ rotr32(x, 19) ^ shr32(x, 10);
-}
-
-void SHA256_Family::transform() {
-    uint32_t W[64];
-
-    for (int i = 0; i < 16; ++i) {
-        W[i] = (uint32_t)m_buffer[i * 4] << 24 |
-               (uint32_t)m_buffer[i * 4 + 1] << 16 |
-               (uint32_t)m_buffer[i * 4 + 2] << 8 |
-               (uint32_t)m_buffer[i * 4 + 3];
+    static constexpr StateWord ch(StateWord x, StateWord y, StateWord z) noexcept {
+        return (x & y) ^ (~x & z);
     }
 
-    for (int i = 16; i < 64; ++i) {
-        W[i] = e_sigma1_32(W[i - 2]) + W[i - 7] + e_sigma0_32(W[i - 15]) + W[i - 16];
+    static constexpr StateWord maj(StateWord x, StateWord y, StateWord z) noexcept {
+        return (x & y) ^ (x & z) ^ (y & z);
     }
 
-    uint32_t a = m_h[0];
-    uint32_t b = m_h[1];
-    uint32_t c = m_h[2];
-    uint32_t d = m_h[3];
-    uint32_t e = m_h[4];
-    uint32_t f = m_h[5];
-    uint32_t g = m_h[6];
-    uint32_t h = m_h[7];
-
-    uint32_t T1, T2;
-
-    for (int i = 0; i < 64; ++i) {
-        T1 = h + sigma1_32(e) + ch32(e, f, g) + K256[i] + W[i];
-        T2 = sigma0_32(a) + maj32(a, b, c);
-
-        h = g;
-        g = f;
-        f = e;
-        e = d + T1;
-        d = c;
-        c = b;
-        b = a;
-        a = T1 + T2;
+    /// Σ0 (старшая сигма) для раунда сжатия.
+    static constexpr StateWord big_sigma0(StateWord x) noexcept {
+        if constexpr (Traits::Is64Bit) {
+            return rotr(x, 28u) ^ rotr(x, 34u) ^ rotr(x, 39u);
+        } else {
+            return rotr(x, 2u) ^ rotr(x, 13u) ^ rotr(x, 22u);
+        }
     }
 
-    m_h[0] += a;
-    m_h[1] += b;
-    m_h[2] += c;
-    m_h[3] += d;
-    m_h[4] += e;
-    m_h[5] += f;
-    m_h[6] += g;
-    m_h[7] += h;
-}
-
-void SHA256_Family::get_digest_bytes(uint8_t* digest) {
-    for (int i = 0; i < 8; ++i) {
-        digest[i * 4]     = (uint8_t)((m_h[i] >> 24) & 0xFF);
-        digest[i * 4 + 1] = (uint8_t)((m_h[i] >> 16) & 0xFF);
-        digest[i * 4 + 2] = (uint8_t)((m_h[i] >> 8) & 0xFF);
-        digest[i * 4 + 3] = (uint8_t)(m_h[i] & 0xFF);
-    }
-}
-
-// --- Реализация SHA512_Family (64-битные операции) ---
-SHA512_Family::SHA512_Family() : SHA2_Base(SHA512_BLOCK_SIZE) {}
-
-// Вспомогательные функции (64-битные)
-uint64_t SHA512_Family::rotr64(uint64_t x, uint64_t n) {
-    return (x >> n) | (x << (64 - n));
-}
-uint64_t SHA512_Family::shr64(uint64_t x, uint64_t n) {
-    return x >> n;
-}
-uint64_t SHA512_Family::ch64(uint64_t x, uint64_t y, uint64_t z) {
-    return (x & y) ^ (~x & z);
-}
-uint64_t SHA512_Family::maj64(uint64_t x, uint64_t y, uint64_t z) {
-    return (x & y) ^ (x & z) ^ (y & z);
-}
-uint64_t SHA512_Family::sigma0_64(uint64_t x) {
-    return rotr64(x, 28) ^ rotr64(x, 34) ^ rotr64(x, 39);
-}
-uint64_t SHA512_Family::sigma1_64(uint64_t x) {
-    return rotr64(x, 14) ^ rotr64(x, 18) ^ rotr64(x, 41);
-}
-uint64_t SHA512_Family::e_sigma0_64(uint64_t x) {
-    return rotr64(x, 1) ^ rotr64(x, 8) ^ shr64(x, 7);
-}
-uint64_t SHA512_Family::e_sigma1_64(uint64_t x) {
-    return rotr64(x, 19) ^ rotr64(x, 61) ^ shr64(x, 6);
-}
-
-void SHA512_Family::transform() {
-    uint64_t W[80];
-
-    // Копируем 16 слов (1024 бит) из буфера в W[0...15]
-    for (int i = 0; i < 16; ++i) {
-        W[i] = (uint64_t)m_buffer[i * 8] << 56 |
-               (uint64_t)m_buffer[i * 8 + 1] << 48 |
-               (uint64_t)m_buffer[i * 8 + 2] << 40 |
-               (uint64_t)m_buffer[i * 8 + 3] << 32 |
-               (uint64_t)m_buffer[i * 8 + 4] << 24 |
-               (uint64_t)m_buffer[i * 8 + 5] << 16 |
-               (uint64_t)m_buffer[i * 8 + 6] << 8 |
-               (uint64_t)m_buffer[i * 8 + 7];
+    /// Σ1 (старшая сигма) для раунда сжатия.
+    static constexpr StateWord big_sigma1(StateWord x) noexcept {
+        if constexpr (Traits::Is64Bit) {
+            return rotr(x, 14u) ^ rotr(x, 18u) ^ rotr(x, 41u);
+        } else {
+            return rotr(x, 6u) ^ rotr(x, 11u) ^ rotr(x, 25u);
+        }
     }
 
-    // Расширяем W[16...79]
-    for (int i = 16; i < 80; ++i) {
-        W[i] = e_sigma1_64(W[i - 2]) + W[i - 7] + e_sigma0_64(W[i - 15]) + W[i - 16];
+    /// σ0 (младшая сигма) для разворачивания расписания сообщения.
+    static constexpr StateWord small_sigma0(StateWord x) noexcept {
+        if constexpr (Traits::Is64Bit) {
+            return rotr(x, 1u) ^ rotr(x, 8u) ^ (x >> 7u);
+        } else {
+            return rotr(x, 7u) ^ rotr(x, 18u) ^ (x >> 3u);
+        }
     }
 
-    uint64_t a = m_h[0];
-    uint64_t b = m_h[1];
-    uint64_t c = m_h[2];
-    uint64_t d = m_h[3];
-    uint64_t e = m_h[4];
-    uint64_t f = m_h[5];
-    uint64_t g = m_h[6];
-    uint64_t h = m_h[7];
-
-    uint64_t T1, T2;
-
-    // Основной цикл сжатия (80 раундов)
-    for (int i = 0; i < 80; ++i) {
-        T1 = h + sigma1_64(e) + ch64(e, f, g) + K512[i] + W[i];
-        T2 = sigma0_64(a) + maj64(a, b, c);
-
-        h = g;
-        g = f;
-        f = e;
-        e = d + T1;
-        d = c;
-        c = b;
-        b = a;
-        a = T1 + T2;
+    /// σ1 (младшая сигма) для разворачивания расписания сообщения.
+    static constexpr StateWord small_sigma1(StateWord x) noexcept {
+        if constexpr (Traits::Is64Bit) {
+            return rotr(x, 19u) ^ rotr(x, 61u) ^ (x >> 6u);
+        } else {
+            return rotr(x, 17u) ^ rotr(x, 19u) ^ (x >> 10u);
+        }
     }
 
-    // Обновление промежуточных хеш-значений
-    m_h[0] += a;
-    m_h[1] += b;
-    m_h[2] += c;
-    m_h[3] += d;
-    m_h[4] += e;
-    m_h[5] += f;
-    m_h[6] += g;
-    m_h[7] += h;
-}
+    /// Обработать один блок (BlockSize байт).
+    void transform(const uint8_t* block) noexcept {
+        StateWord w[Traits::Rounds];
+        constexpr Size word_bytes = sizeof(StateWord);
 
-void SHA512_Family::get_digest_bytes(uint8_t* digest) {
-    for (int i = 0; i < 8; ++i) {
-        digest[i * 8]     = (uint8_t)((m_h[i] >> 56) & 0xFF);
-        digest[i * 8 + 1] = (uint8_t)((m_h[i] >> 48) & 0xFF);
-        digest[i * 8 + 2] = (uint8_t)((m_h[i] >> 40) & 0xFF);
-        digest[i * 8 + 3] = (uint8_t)((m_h[i] >> 32) & 0xFF);
-        digest[i * 8 + 4] = (uint8_t)((m_h[i] >> 24) & 0xFF);
-        digest[i * 8 + 5] = (uint8_t)((m_h[i] >> 16) & 0xFF);
-        digest[i * 8 + 6] = (uint8_t)((m_h[i] >> 8) & 0xFF);
-        digest[i * 8 + 7] = (uint8_t)(m_h[i] & 0xFF);
+        for (int i = 0; i < 16; ++i) {
+            if constexpr (Traits::Is64Bit) {
+                w[i] = static_cast<StateWord>(load_be64(block + i * word_bytes));
+            } else {
+                w[i] = static_cast<StateWord>(load_be32(block + i * word_bytes));
+            }
+        }
+        for (int i = 16; i < Traits::Rounds; ++i) {
+            w[i] = small_sigma1(w[i - 2]) + w[i - 7] +
+                   small_sigma0(w[i - 15]) + w[i - 16];
+        }
+
+        StateWord a = h_[0], b = h_[1], c = h_[2], d = h_[3];
+        StateWord e = h_[4], f = h_[5], g = h_[6], hh = h_[7];
+
+        for (int i = 0; i < Traits::Rounds; ++i) {
+            const StateWord t1 = hh + big_sigma1(e) + ch(e, f, g) +
+                                 static_cast<StateWord>(Traits::K[i]) + w[i];
+            const StateWord t2 = big_sigma0(a) + maj(a, b, c);
+
+            hh = g;
+            g  = f;
+            f  = e;
+            e  = d + t1;
+            d  = c;
+            c  = b;
+            b  = a;
+            a  = t1 + t2;
+        }
+
+        h_[0] += a; h_[1] += b; h_[2] += c; h_[3] += d;
+        h_[4] += e; h_[5] += f; h_[6] += g; h_[7] += hh;
+
+        wipe(w, sizeof(w));
     }
+};
+
+using Sha224     = Sha2<Sha2Variant::Sha224>;
+using Sha256     = Sha2<Sha2Variant::Sha256>;
+using Sha384     = Sha2<Sha2Variant::Sha384>;
+using Sha512     = Sha2<Sha2Variant::Sha512>;
+using Sha512_224 = Sha2<Sha2Variant::Sha512_224>;
+using Sha512_256 = Sha2<Sha2Variant::Sha512_256>;
+
+// Однократные обёртки.
+inline void sha224(const void* data, Size len, uint8_t digest[28]) noexcept {
+    Sha224::hash(data, len, digest);
+}
+inline void sha256(const void* data, Size len, uint8_t digest[32]) noexcept {
+    Sha256::hash(data, len, digest);
+}
+inline void sha384(const void* data, Size len, uint8_t digest[48]) noexcept {
+    Sha384::hash(data, len, digest);
+}
+inline void sha512(const void* data, Size len, uint8_t digest[64]) noexcept {
+    Sha512::hash(data, len, digest);
 }
 
-// --- Реализация конкретных классов SHA256_Family ---
-SHA224::SHA224() {} // Конструктор базового класса уже вызван
-void SHA224::init_hash_values() { utilities::copy(m_h, H224_INIT); }
-void SHA224::finalize(uint8_t digest[SHA224_DIGEST_SIZE]) {
-    SHA2_Base::finalize(digest, SHA224_DIGEST_SIZE);
-}
-
-SHA256::SHA256() {}
-void SHA256::init_hash_values() { utilities::copy(m_h, H256_INIT); }
-void SHA256::finalize(uint8_t digest[SHA256_DIGEST_SIZE]) {
-    SHA2_Base::finalize(digest, SHA256_DIGEST_SIZE);
-}
-
-// --- Реализация конкретных классов SHA512_Family ---
-SHA384::SHA384() {}
-void SHA384::init_hash_values() { utilities::copy(m_h, H384_INIT); }
-void SHA384::finalize(uint8_t digest[SHA384_DIGEST_SIZE]) {
-    // SHA-384 использует начальные H-значения от SHA-512, но усекает вывод
-    SHA2_Base::finalize(digest, SHA384_DIGEST_SIZE);
-}
-
-SHA512::SHA512() {}
-void SHA512::init_hash_values() { utilities::copy(m_h, H512_INIT); }
-void SHA512::finalize(uint8_t digest[SHA512_DIGEST_SIZE]) {
-    SHA2_Base::finalize(digest, SHA512_DIGEST_SIZE);
-}
-
-SHA512_224::SHA512_224() {}
-void SHA512_224::init_hash_values() { utilities::copy(m_h, H512_224_INIT); }
-void SHA512_224::finalize(uint8_t digest[SHA512_224_DIGEST_SIZE]) {
-    SHA2_Base::finalize(digest, SHA512_224_DIGEST_SIZE);
-}
-
-SHA512_256::SHA512_256() {}
-void SHA512_256::init_hash_values() { utilities::copy(m_h, H512_256_INIT); }
-void SHA512_256::finalize(uint8_t digest[SHA512_256_DIGEST_SIZE]) {
-    SHA2_Base::finalize(digest, SHA512_256_DIGEST_SIZE);
-}
-}
+} // namespace crypto
+} // namespace embed

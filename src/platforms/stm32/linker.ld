@@ -171,10 +171,5 @@ SECTIONS
     _os_ram_used = .;
   } >RAM
 
-  /* libc/libm/libgcc НЕ выбрасываются через /DISCARD/: это ломает
-     __aeabi_uldivmod, __aeabi_ddiv и прочие помощники, которые
-     генерирует сам компилятор (64-битные деления в таймере и big_math).
-     Неиспользуемые секции удаляет -Wl,--gc-sections. */
-
   .ARM.attributes 0 : { *(.ARM.attributes) }
 }

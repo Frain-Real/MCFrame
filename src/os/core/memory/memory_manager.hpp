@@ -71,7 +71,10 @@ namespace embed {
         uint8_t*    heap_start_     = nullptr;
         Size        heap_size_      = 0;
         heap_block* heap_first_     = nullptr;   // первый блок (по адресу)
-        heap_block* heap_free_list_ = nullptr;   // свободные, в порядке адресов
+        /// Свободные блоки, строго в порядке адресов. Инвариант обязателен:
+        /// на нём держится слияние НАЗАД в heap_coalesce() (сосед слева =
+        /// предыдущий элемент списка) и проверка целостности heap_check().
+        heap_block* heap_free_list_ = nullptr;
         Size        heap_free_      = 0;         // ВЕДЁТСЯ, а не вычисляется обходом
         Size        heap_faults_    = 0;         // испорченные / двойные free
         bool        initialized_    = false;
@@ -79,7 +82,10 @@ namespace embed {
         // ──── Stack pool ────
         uint32_t*   stack_pool_base_ = nullptr;
         Size        stack_pool_size_ = 0;   // всего слов
-        Size        stack_pool_used_ = 0;   // занято слов
+        /// Вершина пула: сколько слов занято ОТ НАЧАЛА. Регионы выдаются как
+        /// stack_pool_base_ + stack_pool_used_, поэтому уменьшать это значение
+        /// можно только для последнего (самого верхнего) региона.
+        Size        stack_pool_used_ = 0;
 
         // ──── Учёт задач ────
         task_slot   slots_[kMaxTrackedTasks]{};
@@ -93,6 +99,11 @@ namespace embed {
 
         task_slot* find_slot(TaskHandler t) noexcept;
         task_slot* find_slot_by_stack(uint32_t* base) noexcept;
+        /// Полностью свободная запись (ни задачи, ни региона).
+        task_slot* find_free_slot() noexcept;
+        /// Лежит ли участок [base, base+words) внутри пула стеков.
+        /// По этому признаку регион пула отличается от статического массива.
+        bool       is_pool_region(const uint32_t* base, Size words) const noexcept;
         void       heap_coalesce(heap_block* b) noexcept;
 
         static Size align_up(Size n, Size align) noexcept {
@@ -117,13 +128,39 @@ namespace embed {
         bool   is_initialized() const noexcept { return initialized_; }
 
         // ──────────── Stack pool ────────────
+        //
+        // Пул стеков — СТЕК (LIFO), а не куча: регионы выдаются от вершины и
+        // возвращаются ТОЛЬКО с вершины.
+        //
+        // Прежняя версия уменьшала учёт при любом освобождении, поэтому
+        // «return A» при живом регионе B, выделенном позже, сдвигало вершину
+        // назад — и следующий stack_alloc() выдавал участок, который уже занят
+        // живым стеком (два стека на одну память). Теперь освобождение
+        // «из середины» отклоняется громко: Status::NotSupported.
+        //
+        // Философия проекта — статические стеки (add_task принимает массив),
+        // поэтому пул остаётся простым bump-аллокатором: полноценный
+        // аллокатор произвольного порядка — отдельная задача.
         uint32_t* stack_alloc(Size words) noexcept;
-        void      stack_free(uint32_t* stack) noexcept;
+        /// Вернуть регион пула в вершину стека. Возможные исходы:
+        ///  * Ok           — регион был вершиной и возвращён;
+        ///  * NotSupported — регион НЕ вершина (освобождение «из середины»);
+        ///  * Busy         — регион ещё закреплён за задачей
+        ///                   (сначала scheduler::remove_task());
+        ///  * NotFound     — указатель не из пула (например статический
+        ///                   массив) либо регион уже возвращён;
+        ///  * InvalidArg   — nullptr;
+        ///  * Unavailable  — пул не сконфигурирован (stack_pool_words == 0).
+        Status stack_free(uint32_t* stack) noexcept;
 
         /// Зарегистрировать задачу, покрасить стек и собрать стартовый фрейм.
         /// Возвращает SP для первой загрузки либо nullptr.
+        /// Для стека из stack_alloc() привязывается ИМЕННО его запись учёта
+        /// (поиск по базе), а не первый свободный слот.
         uint32_t* task_stack_init(TaskHandler t, uint32_t* stack, Size words) noexcept;
         /// Снять задачу с учёта (вызывается из scheduler::remove_task).
+        /// Регион пула при этом ОСТАЁТСЯ на учёте: его возвращает вызывающий
+        /// через stack_free().
         void task_unregister(TaskHandler t) noexcept;
 
         // ──────────── Heap ────────────

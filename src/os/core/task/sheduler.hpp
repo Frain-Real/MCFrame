@@ -54,6 +54,10 @@ public:
                   uint32_t core_id = kAnyCore) noexcept;
 
     /// Удалить задачу: снять со всех очередей и освободить ресурсы.
+    /// Если удаляется ТЕКУЩАЯ задача, ядро тут же получает новую: иначе
+    /// удалённая задача продолжала бы исполняться до первого блокирующего
+    /// вызова (её уже нет ни в ready, ни в sleep_list — вытеснить некому).
+    /// Возврат: Ok | NotFound | InvalidArg | PermissionDenied (idle).
     Status remove_task(TaskHandler t) noexcept;
 
     /// Запустить планировщик. Не возвращается.
@@ -65,6 +69,14 @@ public:
     Status sleep() noexcept;
     Status sleep_for(uint32_t ticks) noexcept;
     Status wakeup(TaskHandler t, uint32_t core_id = kAnyCore) noexcept;
+
+    /// Завершить ТЕКУЩУЮ задачу: снять со всех очередей и ОТДАТЬ ЯДРО.
+    /// Возврат: Ok | NotFound (текущей задачи нет) | PermissionDenied (idle).
+    ///
+    /// ВНИМАНИЕ: после возврата задача выполняет ещё несколько инструкций —
+    /// до входа в PendSV она остаётся на своём стеке. Поэтому освобождать её
+    /// стек (stack_free) обязан ВНЕШНИЙ код и только после того, как задача
+    /// действительно покинула ядро.
     Status exit() noexcept;
 
     /// Заблокировать текущую задачу на объекте (семафор/мьютекс).
@@ -91,6 +103,13 @@ public:
     }
     Size sleep_count() const noexcept { return sleep_list_.size(); }
     uint64_t tick_count() const noexcept { return tick_count_; }
+
+    /// Сколько раз ядро просили переключить контекст (диагностика).
+    ///
+    /// Нужно там, где платформенный trigger_context_switch() — заглушка
+    /// (mock-сборка): по счётчику видно, что задача действительно УСТУПИЛА
+    /// ядро, а не просто снялась со всех очередей и продолжила исполняться.
+    Size switch_requests() const noexcept { return switch_requests_; }
 
     /// Статическое потребление RAM планировщиком (для отчётов о памяти).
     /// Растёт как kMaxCores * kMaxPriority * sizeof(очередь) — поэтому
@@ -120,6 +139,7 @@ private:
     bool                 started_    = false;
     bool                 initialized_ = false;
     uint64_t             tick_count_ = 0;
+    Size                 switch_requests_ = 0;   // диагностика (см. switch_requests)
 
     uint32_t find_least_loaded_core() const noexcept;
     TaskHandler pick_next(core_state& core) const noexcept;
@@ -128,6 +148,10 @@ private:
     void check_preempt(core_state& core) noexcept;
     void process_sleep_list() noexcept;
     void switch_to(core_state& core, TaskHandler next) noexcept;
+    /// Единственная точка запроса переключения: считает запросы и дёргает
+    /// платформу. Прямые вызовы P().trigger_context_switch() мимо неё
+    /// потеряли бы диагностику.
+    void request_context_switch() noexcept;
 };
 
 }

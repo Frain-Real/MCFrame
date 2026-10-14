@@ -26,8 +26,7 @@
   #include "i2c_mock.hpp"
 #endif
 #include "os/core/memory/memory_manager.hpp"
-
-#include <atomic>
+#include "os/core/primitives/types.hpp"   // embed::atomic_t — аналог std::atomic
 
 namespace {
 
@@ -47,13 +46,16 @@ uint32_t        g_blink_stack[kBlinkStackWords];
 embed::task     g_worker_tcb;
 uint32_t        g_worker_stack[kWorkerStackWords];
 
-std::atomic<uint32_t> g_blink_count{0};
-std::atomic<uint32_t> g_worker_count{0};
+// Счётчики задач — embed::atomic_t, а не std::atomic: <atomic> тянет
+// libstdc++ и не собирается для «голого» Cortex-M3. Инкремент идёт из задачи,
+// читает счётчик отчёт о RAM — то есть из другого контекста.
+embed::atomic_t<uint32_t> g_blink_count{0u};
+embed::atomic_t<uint32_t> g_worker_count{0u};
 
 void blink_task(void* /*ctx*/) noexcept {
     embed::scheduler& sched = embed::scheduler::instance();
     for (;;) {
-        g_blink_count.fetch_add(1u, std::memory_order_relaxed);
+        (void)g_blink_count.fetch_add(1u, embed::MemoryOrderRelaxed);
         // sleep_for сам инициирует переключение контекста.
         (void)sched.sleep_for(500);
     }
@@ -62,7 +64,7 @@ void blink_task(void* /*ctx*/) noexcept {
 void worker_task(void* /*ctx*/) noexcept {
     embed::scheduler& sched = embed::scheduler::instance();
     for (;;) {
-        g_worker_count.fetch_add(1u, std::memory_order_relaxed);
+        (void)g_worker_count.fetch_add(1u, embed::MemoryOrderRelaxed);
         (void)sched.sleep_for(1000);
     }
 }
@@ -307,6 +309,11 @@ void user_app_report_ram() noexcept {
             g_memory_manager.task_stack_overflow(&g_blink_tcb) ? 1u : 0u);
     log_u32("worker stack overflowed:",
             g_memory_manager.task_stack_overflow(&g_worker_tcb) ? 1u : 0u);
+
+    // Счётчики задач: читаются из контекста отчёта, пишутся задачами —
+    // поэтому только через atomic_t (load, не прямое чтение поля).
+    log_u32("blink iterations:",  g_blink_count.load(embed::MemoryOrderRelaxed));
+    log_u32("worker iterations:", g_worker_count.load(embed::MemoryOrderRelaxed));
 
     platform_log_line("-----------");
 }

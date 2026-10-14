@@ -35,6 +35,33 @@ struct BigInt {
         if (v) { d[0] = v; len = 1; }
     }
 
+    /// Целое ЛЮБОГО другого целочисленного типа.
+    ///
+    /// Зачем: на 32-битном ARM `uint32_t` — это `unsigned long`, поэтому
+    /// литерал `BigInt<8>(7u)` (`unsigned int`) оказывался неоднозначен между
+    /// конструкторами int32_t и uint32_t и не компилировался. На x86-64 таких
+    /// проблем нет (`uint32_t` == `unsigned int`), поэтому дефект проявлялся
+    /// только при сборке прошивки.
+    template <typename T,
+              typename std::enable_if_t<
+                  std::is_integral_v<T> &&
+                  !std::is_same_v<T, int32_t> &&
+                  !std::is_same_v<T, uint32_t> &&
+                  !std::is_same_v<T, bool>, int> = 0>
+    constexpr BigInt(T v) : d{}, len(0), neg(false) {
+        if constexpr (std::is_signed_v<T>) {
+            if (v < T(0)) {
+                neg = true;
+                // -(v + 1) + 1 — безопасно и для минимального значения типа.
+                const uint64_t magnitude =
+                    static_cast<uint64_t>(-(static_cast<int64_t>(v) + 1)) + 1u;
+                assign_u64(magnitude);
+                return;
+            }
+        }
+        assign_u64(static_cast<uint64_t>(v));
+    }
+
     template    <typename... Args,
                 typename = std::enable_if_t<
                 (std::is_convertible_v<Args, uint32_t> && ...) && 
@@ -60,6 +87,19 @@ struct BigInt {
 
     constexpr void normalize() {
         while (len > 0 && d[len - 1] == 0) --len;
+        if (len == 0) neg = false;
+    }
+
+    /// Записать неотрицательное 64-битное значение (вспомогательное для
+    /// конструктора из произвольного целого типа).
+    constexpr void assign_u64(uint64_t v) {
+        size_t i = 0;
+        while (v != 0u && i < N) {
+            d[i++] = static_cast<uint32_t>(v & 0xFFFFFFFFu);
+            v >>= 32;
+        }
+        len = i;
+        normalize();
         if (len == 0) neg = false;
     }
 
@@ -205,8 +245,6 @@ struct BigInt {
 
     //  Арифметические операторы
 
-    /// Результат последней операции, которая может переполниться.
-    /// (Для криптографии: молчаливое переполнение недопустимо.)
     constexpr Status last_status() const { return status_; }
 
     constexpr BigInt operator+(const BigInt& b) const {

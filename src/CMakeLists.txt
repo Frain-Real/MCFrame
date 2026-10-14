@@ -12,6 +12,31 @@ set(OS_CORE_SOURCES
     os/core/task/sheduler.cpp
     os/interfaces/dma_manager.cpp)
 
+# ─────────── Криптография (не зависит от платформы) ───────────
+# Модуль целиком статический, без динамической памяти. Единицы трансляции
+# нужны даже для шаблонных алгоритмов (AES/RSA/ECC/CRC): в них собраны явные
+# инстанцирования, поэтому ошибки в константах и разрядности видны на этапе
+# сборки библиотеки, а не при первом использовании в приложении.
+# На размер прошивки это не влияет: статический архив линкуется по объектам,
+# и неиспользованный алгоритм в неё просто не попадает.
+set(OS_CRYPTO_SOURCES
+    os/crypto/random.cpp
+    os/crypto/crc.cpp
+    os/crypto/sha2.cpp
+    os/crypto/sha3.cpp
+    os/crypto/hmac.cpp
+    os/crypto/aes.cpp
+    os/crypto/tdes.cpp
+    os/crypto/rsa.cpp
+    os/crypto/ecc.cpp
+    os/crypto/ecies.cpp)
+
+foreach(_f ${OS_CORE_SOURCES} ${OS_CRYPTO_SOURCES})
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_f}")
+        message(FATAL_ERROR "Нет источника ядра/криптографии: ${_f}")
+    endif()
+endforeach()
+
 # ─────────── Платформенный слой ───────────
 # platform_ops.cpp реализует контракт embed::platform::Ops — обязателен для
 # ЛЮБОЙ платформы. platform.cpp содержит периферию (DMA/ADC) и присутствует
@@ -58,7 +83,7 @@ if(NOT MCFRAME_OVERRIDE_GLOBAL_ALLOCATOR)
     list(REMOVE_ITEM _core os/core/memory/global_allocator.cpp)
 endif()
 
-add_library(MCFrame STATIC ${_core} ${OS_PLATFORM_SOURCES})
+add_library(MCFrame STATIC ${_core} ${OS_CRYPTO_SOURCES} ${OS_PLATFORM_SOURCES})
 add_library(MCFrame::MCFrame ALIAS MCFrame)
 
 # Приложение видит ТОЛЬКО ядро (os/...). Платформенные заголовки — PRIVATE:

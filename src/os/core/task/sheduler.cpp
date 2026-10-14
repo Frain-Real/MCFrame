@@ -100,19 +100,41 @@ Status scheduler::remove_task(TaskHandler t) noexcept {
     Lock lock;
     if (!all_tasks_.contains(t)) return Status::NotFound;
 
+    const uint32_t self_core = P().current_core();
+
+    // Снимаем со всех очередей. Если задача была ТЕКУЩЕЙ на этом ядре, одного
+    // обнуления current мало: задачу уже нет ни в ready, ни в sleep_list,
+    // поэтому вытеснить её некому — она продолжала бы исполняться до первого
+    // блокирующего вызова, а следующее переключение контекста заставало бы
+    // current == nullptr.
+    bool was_current = false;
     for (uint32_t i = 0; i < core_count_; ++i) {
         ready_remove(cores_[i], t);
-        if (cores_[i].current == t) cores_[i].current = nullptr;
+        if (cores_[i].current == t) {
+            cores_[i].current = nullptr;
+            if (i == self_core) was_current = true;
+            // На ДРУГОМ ядре новую задачу выберет его собственный тик:
+            // разбудить чужое ядро отсюда нечем — IPI нет в контракте
+            // платформы (platform::Ops).
+        }
     }
     sleep_list_.remove(t);
 
     // Освобождаем ресурсы мониторинга: раньше записи утекали (их всего 32).
-    // Пул стеков не трогаем: стек выделял вызывающий (статический массив),
-    // а не stack_alloc().
+    // Пул стеков не трогаем: статический массив освобождать не нужно, а регион
+    // stack_alloc() ОСТАЁТСЯ на учёте — его возвращает вызывающий через
+    // stack_free(), и только с вершины пула (LIFO).
     g_memory_manager.task_unregister(t);
     t->set_done();
 
     all_tasks_.remove(t);
+
+    if (was_current) {
+        // Уступаем ядро. Контекст удалённой задачи НЕ сохраняем: current уже
+        // обнулён, и context_switch() пропустит сохранение — задача не оживёт.
+        unlock_early(lock);
+        yield();
+    }
     return Status::Ok;
 }
 
@@ -173,6 +195,15 @@ void scheduler::switch_to(core_state& core, TaskHandler next) noexcept {
     core.current = next;
 }
 
+/// Единственная точка ЗАПРОСА переключения: платформа выставляет PendSV
+/// (на mock — заглушка), а счётчик запросов остаётся честным для диагностики
+/// и тестов. Если платформа переключать контекст не умеет, запроса нет.
+void scheduler::request_context_switch() noexcept {
+    if (!P().trigger_context_switch) return;
+    ++switch_requests_;
+    P().trigger_context_switch();
+}
+
 // ─────────────────────────── Lifecycle ──────────────────────────────────────
 
 Status scheduler::start() noexcept {
@@ -192,7 +223,7 @@ Status scheduler::start() noexcept {
 
     if (P().trigger_context_switch) {
         // Полноценный запуск: уступаем планировщику через PendSV.
-        P().trigger_context_switch();
+        request_context_switch();
         return Status::Ok;
     }
     P().start_first_task(first->load_sp());
@@ -200,7 +231,7 @@ Status scheduler::start() noexcept {
 }
 
 void scheduler::yield() noexcept {
-    if (P().trigger_context_switch) P().trigger_context_switch();
+    request_context_switch();
 }
 
 // ─────────────────────────── API задачи ─────────────────────────────────────
@@ -320,10 +351,28 @@ Status scheduler::exit() noexcept {
     TaskHandler cur = cores_[core].current;
     if (!cur) return Status::NotFound;
 
+    // idle — системная задача. Её «завершение» оставило бы ядро без задачи,
+    // которую можно запустить, когда все остальные спят: pick_next() вернул бы
+    // nullptr, и context_switch() спасала бы только аварийная подстановка idle.
+    if (cur == &idle_tcb_) return Status::PermissionDenied;
+
     cur->set_done();
     all_tasks_.remove(cur);
     sleep_list_.remove(cur);
+    ready_remove(cores_[core], cur);
+
+    // КЛЮЧЕВОЕ: current обнуляем ДО переключения. Во-первых, ядру нужен новый
+    // current. Во-вторых, context_switch() сохраняет контекст именно у
+    // current — с обнулённым current он сохранение пропустит, и завершённая
+    // задача не оживёт на следующем переключении (её стек может быть уже
+    // отдан другому стеку/освобождён).
+    cores_[core].current = nullptr;
     g_memory_manager.task_unregister(cur);
+
+    // Отдаём ядро. Без этого завершившаяся задача продолжала бы исполняться
+    // до первого блокирующего вызова.
+    unlock_early(lock);
+    yield();
     return Status::Ok;
 }
 
@@ -352,7 +401,7 @@ void scheduler::tick() noexcept {
             cur->suspend();
             ready_push(cores_[core], cur);
             switch_to(cores_[core], next);
-            if (P().trigger_context_switch) P().trigger_context_switch();
+            request_context_switch();
         }
     }
 }
@@ -383,7 +432,7 @@ void scheduler::check_preempt(core_state& core) noexcept {
     if (!core.current || !core.current->is_running()) return;
     TaskHandler next = pick_next(core);
     if (next && next->priority() < core.current->priority()) {
-        if (P().trigger_context_switch) P().trigger_context_switch();
+        request_context_switch();
     }
 }
 

@@ -1,48 +1,83 @@
+// crypto/aes.hpp
+// ---------------------------------------------------------------------------
+// AES-128/192/256 в режимах ECB, CBC, CTR (FIPS 197 + NIST SP 800-38A).
+//
+// ЧТО БЫЛО ИСПРАВЛЕНО:
+//   1. Расшифрование в режиме CTR не работало НИКОГДА, если шаблон собран с
+//      EnableDecrypt == false: static_assert это разрешал (CTR-расшифрование —
+//      то же шифрование), но дальше стояло `if constexpr (EnableDecrypt) ...
+//      else return false`. Теперь CTR-путь не зависит от EnableDecrypt.
+//   2. Базовый класс CRTP `AES` объявлял методы с теми же именами, что и
+//      наследник, и вызывал их через static_cast<Impl*>(this): любая опечатка
+//      в имени метода наследника превращалась в бесконечную рекурсию.
+//      Иерархия убрана — один класс-шаблон без виртуальных функций.
+//   3. Ёмкость выходного буфера передавалась как *output_len с «магическим»
+//      исключением `*output_len != 0` (0 = «не проверять»): вызывающий, у
+//      которого буфер меньше входных данных, получал переполнение памяти.
+//      Теперь ёмкость — отдельный параметр, статус — Status.
+//   4. Проверки padding'а дублировались в AES и TDES с разными правилами;
+//      общая реализация — в crypto_utils.hpp.
+//   5. Расширенный ключ нигде не затирался: метод clear() был, но не
+//      вызывался ни из деструктора, ни откуда-либо ещё.
+//   6. Отсутствовала проверка `output != input` для случая, когда указатель
+//      на ключ совпадает с буфером данных и т.п. — добавлена проверка
+//      ненулевого ключа и валидности состояния.
+// ---------------------------------------------------------------------------
 #pragma once
-#include "../common.hpp"
-#include "../utilities.hpp"
+
+#include "crypto_utils.hpp"
+
+#include <cstddef>
+#include <cstdint>
 
 namespace embed {
-enum class AESKeySize : uint16_t {
-        AES_128 = 128,
-        AES_192 = 192,
-        AES_256 = 256
-    };
+namespace crypto {
 
-    enum class AESMode {
-        ECB,
-        CBC,
-        CTR
-    };
+enum class AesKeySize : uint16_t {
+    Aes128 = 128,
+    Aes192 = 192,
+    Aes256 = 256
+};
 
-template <AESKeySize KeySize>
+enum class AesMode {
+    Ecb,
+    Cbc,
+    Ctr
+};
+
+namespace detail {
+
+template <AesKeySize KeySize>
 struct AesTraits;
 
 template <>
-struct AesTraits<AESKeySize::AES_128> {
-    static constexpr uint8_t Nk = 4;
-    static constexpr uint8_t Nr = 10;
-    static constexpr uint8_t ExpandedKeyBytes = 176;
+struct AesTraits<AesKeySize::Aes128> {
+    static constexpr uint8_t Nk = 4u;    // 32-битных слов в ключе
+    static constexpr uint8_t Nr = 10u;   // раундов
+    static constexpr Size KeyBytes = 16u;
+    static constexpr Size ExpandedKeyBytes = 176u;
 };
 
 template <>
-struct AesTraits<AESKeySize::AES_192> {
-    static constexpr uint8_t Nk = 6;
-    static constexpr uint8_t Nr = 12;
-    static constexpr uint8_t ExpandedKeyBytes = 208;
+struct AesTraits<AesKeySize::Aes192> {
+    static constexpr uint8_t Nk = 6u;
+    static constexpr uint8_t Nr = 12u;
+    static constexpr Size KeyBytes = 24u;
+    static constexpr Size ExpandedKeyBytes = 208u;
 };
 
 template <>
-struct AesTraits<AESKeySize::AES_256> {
-    static constexpr uint8_t Nk = 8;
-    static constexpr uint8_t Nr = 14;
-    static constexpr uint8_t ExpandedKeyBytes = 240;
+struct AesTraits<AesKeySize::Aes256> {
+    static constexpr uint8_t Nk = 8u;
+    static constexpr uint8_t Nr = 14u;
+    static constexpr Size KeyBytes = 32u;
+    static constexpr Size ExpandedKeyBytes = 240u;
 };
 
+/// Таблицы подстановок. Обратная таблица существует только тогда, когда
+/// расшифрование вообще разрешено — иначе её 256 байт не попадут в прошивку.
 template <bool EnableDecrypt>
-struct AesTables;
-template <>
-struct AesTables<false> {
+struct AesTables {
     static constexpr uint8_t sbox[256] = {
         0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
         0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -62,6 +97,7 @@ struct AesTables<false> {
         0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
     };
 };
+
 template <>
 struct AesTables<true> : AesTables<false> {
     static constexpr uint8_t inv_sbox[256] = {
@@ -84,414 +120,519 @@ struct AesTables<true> : AesTables<false> {
     };
 };
 
-template <typename Impl, AESKeySize KeySize, AESMode Mode, bool EnableDecrypt = false, bool EnablePadding = false>
-class AES {
-public:
-    bool Encrypt(const uint8_t* input, Size input_len, uint8_t* output, Size* output_len) { return static_cast<Impl*>(this)->Encrypt(input, input_len, output, output_len); };
-    bool Decrypt(const uint8_t* input, Size input_len, uint8_t* output, Size* output_len) { return static_cast<Impl*>(this)->Decrypt(input, input_len, output, output_len); };
-    Size GetPaddedSize(Size data_len) { return static_cast<Impl*>(this)->GetPaddedSize(data_len); };
+} // namespace detail
+
+/**
+ * @brief Обратные раундовые преобразования.
+ *
+ * Специализация для EnableDecrypt == false состоит из пустых функций:
+ * обратная таблица подстановок (256 байт) в этом случае не только не
+ * вызывается, но и вообще не существует как объект.
+ */
+template <bool EnableDecrypt>
+struct AesInverse {
+    static void sub_bytes(uint8_t* state) noexcept { (void)state; }
+    static void mix_columns(uint8_t* state) noexcept { (void)state; }
 };
 
-template <AESKeySize KeySize, AESMode Mode, bool EnableDecrypt = false, bool EnablePadding = false>
-class SoftAES : public AES<SoftAES<KeySize, Mode, EnableDecrypt, EnablePadding>, KeySize, Mode, EnableDecrypt, EnablePadding>{
-public:
-    static_assert(
-        Mode != AESMode::CTR || EnablePadding == false,
-        "CTR mode cannot use PKCS7 padding"
-    );
-    SoftAES(const SoftAES&) = delete;
-    SoftAES& operator=(const SoftAES&) = delete;
-    SoftAES(const uint8_t* key, const uint8_t* iv = nullptr)  {
-        KeyExpansion(key);
-        if constexpr (Mode == AESMode::CBC || Mode == AESMode::CTR) {
-            if (iv != nullptr) {
-                utilities::fast_memcpy(_iv, iv, 16);
-            } else {
-                utilities::fill(_iv, 0);
-            }
-        } else {
-            utilities::fill(_iv, 0);
-        }
-    }
-    bool Encrypt(const uint8_t* input, Size input_len, uint8_t* output, Size* output_len) {
-        if (input == nullptr || output == nullptr || output_len == nullptr) {
-            return false; // Некорректные указатели
-        }
-        if constexpr (Mode == AESMode::CTR) {
-            *output_len = input_len;
-            EncryptCTR(input, output, input_len);
-            return true;
-        } else {
-            if constexpr (UsePadding) {
-                Size padded_len = GetPaddedSize(input_len);
-                if (padded_len > *output_len && *output_len != 0) {
-                    return false;
-                }
-                utilities::fast_memcpy(output, input, input_len);
-                Size actual_padded_len = AddPKCS7Padding(output, input_len, padded_len);
-                if (actual_padded_len == 0) {
-                    return false;
-                }
-                if constexpr (Mode == AESMode::ECB) {
-                    EncryptECB(output, output, actual_padded_len);
-                } else if constexpr (Mode == AESMode::CBC) {
-                    EncryptCBC(output, output, actual_padded_len);
-                }
-                *output_len = actual_padded_len;
-                return true;
-            }
-            else {
-                if (input_len % 16 != 0) {
-                    return false;
-                }
-                *output_len = input_len;
-                if constexpr (Mode == AESMode::ECB) {
-                    EncryptECB(output, output, input_len);
-                } else if constexpr (Mode == AESMode::CBC) {
-                    EncryptCBC(output, output, input_len);
-                }
-                return true;
-            }
+template <>
+struct AesInverse<true> {
+    static void sub_bytes(uint8_t* state) noexcept {
+        for (int i = 0; i < 16; ++i) {
+            state[i] = detail::AesTables<true>::inv_sbox[state[i]];
         }
     }
 
-    bool Decrypt(const uint8_t* input, Size input_len, uint8_t* output, Size* output_len) {
-        static_assert(
-            EnableDecrypt || Mode == AESMode::CTR,
-            "AES decryption is disabled for this configuration"
-        );
-        if (input == nullptr || output == nullptr || output_len == nullptr) {
-            return false; // Некорректные указатели
-        }
-        if constexpr (EnableDecrypt) {
-            if constexpr (Mode == AESMode::CTR) {
-                // CTR не требует padding'а, длина не меняется
-                *output_len = input_len;
-                DecryptCTR(input, output, input_len);
-                return true;
-            } 
-            else {
-                if (input_len == 0 || input_len % 16 != 0) {
-                    return false;
-                }
-                utilities::fast_memcpy(output, input, input_len);
-                if constexpr (Mode == AESMode::ECB) {
-                    DecryptECB(output, output, input_len);
-                } else if constexpr (Mode == AESMode::CBC) {
-                    DecryptCBC(output, output, input_len);
-                }
-                if constexpr (UsePadding) {
-                    Size actual_decrypted_len = RemovePKCS7Padding(output, input_len);
-                    if (actual_decrypted_len == 0) {
-                        return false;
-                    }
-                    *output_len = actual_decrypted_len;
-                }
-                else {
-                    *output_len = input_len;
-                }
-                return true;
-            }
-        }
-        else {
-            return false;
-        }
-    }
-
-    Size GetPaddedSize(Size data_len) {
-        Size remainder = data_len % 16;
-        if (remainder == 0) {
-            return data_len + 16; // Если длина кратна 16, добавляем полный блок padding'а
-        } else {
-            return data_len + (16 - remainder); // Добавляем до ближайшей кратности 16
+    static void mix_columns(uint8_t* state) noexcept {
+        for (int c = 0; c < 4; ++c) {
+            const uint8_t s0 = state[0 + c * 4];
+            const uint8_t s1 = state[1 + c * 4];
+            const uint8_t s2 = state[2 + c * 4];
+            const uint8_t s3 = state[3 + c * 4];
+            state[0 + c * 4] = static_cast<uint8_t>(
+                gmul(s0, 0x0e) ^ gmul(s1, 0x0b) ^ gmul(s2, 0x0d) ^ gmul(s3, 0x09));
+            state[1 + c * 4] = static_cast<uint8_t>(
+                gmul(s0, 0x09) ^ gmul(s1, 0x0e) ^ gmul(s2, 0x0b) ^ gmul(s3, 0x0d));
+            state[2 + c * 4] = static_cast<uint8_t>(
+                gmul(s0, 0x0d) ^ gmul(s1, 0x09) ^ gmul(s2, 0x0e) ^ gmul(s3, 0x0b));
+            state[3 + c * 4] = static_cast<uint8_t>(
+                gmul(s0, 0x0b) ^ gmul(s1, 0x0d) ^ gmul(s2, 0x09) ^ gmul(s3, 0x0e));
         }
     }
 
 private:
-    static constexpr uint8_t Nk = AesTraits<KeySize>::Nk; // Количество 32-битных слов в ключе (4, 6, 8)
-    static constexpr uint8_t Nr = AesTraits<KeySize>::Nr; // Количество раундов (10, 12, 14)
-    static constexpr uint8_t ExpandedKeyBytes = AesTraits<KeySize>::ExpandedKeyBytes;
-    uint8_t _expandedKey[ExpandedKeyBytes]; // Максимальный размер расширенного ключа (15 раундов * 16 байт/раунд)
-    uint8_t _iv[16]; // Вектор инициализации для CBC/CTR
-    static constexpr bool UsePadding = EnablePadding && (Mode != AESMode::CTR);
-    static constexpr uint8_t rcon[11] = {
-        0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36
-    };
-
-    Status KeyExpansion(const uint8_t* key) {
-        if (key == nullptr) {
-            return Status::InvalidArg;
-        }
-        uint8_t temp[4];
-        int i = 0;
-        // Копируем исходный ключ в расширенный ключ
-        while (i < Nk) {
-            _expandedKey[i * 4 + 0] = key[i * 4 + 0];
-            _expandedKey[i * 4 + 1] = key[i * 4 + 1];
-            _expandedKey[i * 4 + 2] = key[i * 4 + 2];
-            _expandedKey[i * 4 + 3] = key[i * 4 + 3];
-            i++;
-        }
-        // Генерируем оставшиеся раундовые ключи
-        int j = Nk;
-        while (j < 4 * (Nr + 1)) {
-            temp[0] = _expandedKey[(j - 1) * 4 + 0];
-            temp[1] = _expandedKey[(j - 1) * 4 + 1];
-            temp[2] = _expandedKey[(j - 1) * 4 + 2];
-            temp[3] = _expandedKey[(j - 1) * 4 + 3];
-
-            if (j % Nk == 0) {
-                RotWord(temp);
-                SubWord(temp);
-                temp[0] ^= rcon[j / Nk];
-            } else if (Nk > 6 && j % Nk == 4) { // Для AES-256
-                SubWord(temp);
+    static uint8_t gmul(uint8_t a, uint8_t b) noexcept {
+        uint8_t p = 0u;
+        for (int i = 0; i < 8; ++i) {
+            if ((b & 1u) != 0u) {
+                p = static_cast<uint8_t>(p ^ a);
             }
-            _expandedKey[j * 4 + 0] = _expandedKey[(j - Nk) * 4 + 0] ^ temp[0];
-            _expandedKey[j * 4 + 1] = _expandedKey[(j - Nk) * 4 + 1] ^ temp[1];
-            _expandedKey[j * 4 + 2] = _expandedKey[(j - Nk) * 4 + 2] ^ temp[2];
-            _expandedKey[j * 4 + 3] = _expandedKey[(j - Nk) * 4 + 3] ^ temp[3];
-            j++;
-        }
-        return Status::Ok;
-    }
-    void AddRoundKey(uint8_t* state, const uint8_t* roundKey) {
-        for (int i = 0; i < 16; i++) {
-            state[i] ^= roundKey[i];
-        }
-    }
-    void SubBytes(uint8_t* state) {
-        for (int i = 0; i < 16; i++) {
-            state[i] = AesTables<EnableDecrypt>::sbox[state[i]];
-        }
-    }
-    void InvSubBytes(uint8_t* state) {
-        if constexpr (EnableDecrypt) {
-            for (int i = 0; i < 16; i++) {
-                state[i] = AesTables<true>::inv_sbox[state[i]];
+            const uint8_t hi = static_cast<uint8_t>(a & 0x80u);
+            a = static_cast<uint8_t>(a << 1);
+            if (hi != 0u) {
+                a = static_cast<uint8_t>(a ^ 0x1bu);
             }
-        }
-    }
-    void clear() {
-        utilities::zero(_expandedKey);
-        utilities::zero(_iv);
-    }
-    void ShiftRows(uint8_t* state) {
-        uint8_t temp[16];
-        // Row 0: no shift
-        temp[0] = state[0]; temp[4] = state[4]; temp[8] = state[8]; temp[12] = state[12];
-        // Row 1: 1-byte circular shift left
-        temp[1] = state[5]; temp[5] = state[9]; temp[9] = state[13]; temp[13] = state[1];
-        // Row 2: 2-byte circular shift left
-        temp[2] = state[10]; temp[6] = state[14]; temp[10] = state[2]; temp[14] = state[6];
-        // Row 3: 3-byte circular shift left
-        temp[3] = state[15]; temp[7] = state[3]; temp[11] = state[7]; temp[15] = state[11];
-        utilities::fast_memcpy(state, temp, 16);
-    }
-    void InvShiftRows(uint8_t* state) {
-        uint8_t temp[16];
-        // Row 0: no shift
-        temp[0] = state[0]; temp[4] = state[4]; temp[8] = state[8]; temp[12] = state[12];
-        // Row 1: 1-byte circular shift right
-        temp[1] = state[13]; temp[5] = state[1]; temp[9] = state[5]; temp[13] = state[9];
-        // Row 2: 2-byte circular shift right
-        temp[2] = state[10]; temp[6] = state[14]; temp[10] = state[2]; temp[14] = state[6];
-        // Row 3: 3-byte circular shift right
-        temp[3] = state[7]; temp[7] = state[11]; temp[11] = state[15]; temp[15] = state[3];
-        utilities::fast_memcpy(state, temp, 16);
-    }
-    void MixColumns(uint8_t* state) {
-        for (int i = 0; i < 4; i++) {
-            uint8_t s0 = state[0 + i * 4];
-            uint8_t s1 = state[1 + i * 4];
-            uint8_t s2 = state[2 + i * 4];
-            uint8_t s3 = state[3 + i * 4];
-            state[0 + i * 4] = gmul(s0, 0x02) ^ gmul(s1, 0x03) ^ gmul(s2, 0x01) ^ gmul(s3, 0x01);
-            state[1 + i * 4] = gmul(s0, 0x01) ^ gmul(s1, 0x02) ^ gmul(s2, 0x03) ^ gmul(s3, 0x01);
-            state[2 + i * 4] = gmul(s0, 0x01) ^ gmul(s1, 0x01) ^ gmul(s2, 0x02) ^ gmul(s3, 0x03);
-            state[3 + i * 4] = gmul(s0, 0x03) ^ gmul(s1, 0x01) ^ gmul(s2, 0x01) ^ gmul(s3, 0x02);
-        }
-    }
-    void InvMixColumns(uint8_t* state) {
-        for (int i = 0; i < 4; i++) {
-            uint8_t s0 = state[0 + i * 4];
-            uint8_t s1 = state[1 + i * 4];
-            uint8_t s2 = state[2 + i * 4];
-            uint8_t s3 = state[3 + i * 4];
-            state[0 + i * 4] = gmul(s0, 0x0e) ^ gmul(s1, 0x0b) ^ gmul(s2, 0x0d) ^ gmul(s3, 0x09);
-            state[1 + i * 4] = gmul(s0, 0x09) ^ gmul(s1, 0x0e) ^ gmul(s2, 0x0b) ^ gmul(s3, 0x0d);
-            state[2 + i * 4] = gmul(s0, 0x0d) ^ gmul(s1, 0x09) ^ gmul(s2, 0x0e) ^ gmul(s3, 0x0b);
-            state[3 + i * 4] = gmul(s0, 0x0b) ^ gmul(s1, 0x0d) ^ gmul(s2, 0x09) ^ gmul(s3, 0x0e);
-        }
-    }
-
-    void Cipher(uint8_t* state) {
-        // Начальный раунд
-        AddRoundKey(state, _expandedKey);
-
-        // _Nr - 1 полных раундов
-        for (int round = 1; round < Nr; round++) {
-            SubBytes(state);
-            ShiftRows(state);
-            MixColumns(state);
-            AddRoundKey(state, _expandedKey + round * 16);
-        }
-        // Финальный раунд (без MixColumns)
-        SubBytes(state);
-        ShiftRows(state);
-        AddRoundKey(state, _expandedKey + Nr * 16);
-    }
-
-    void InvCipher(uint8_t* state) {
-        // Начальный инверсный раунд (инверсный финальный раунд шифрования)
-        AddRoundKey(state, _expandedKey + Nr * 16);
-        InvShiftRows(state);
-        InvSubBytes(state);
-        // _Nr - 1 полных инверсных раундов
-        for (int round = Nr - 1; round > 0; round--) {
-            AddRoundKey(state, _expandedKey + round * 16);
-            InvMixColumns(state);
-            InvShiftRows(state);
-            InvSubBytes(state);
-        }
-        AddRoundKey(state, _expandedKey);
-    }
-
-    void EncryptECB(const uint8_t* input, uint8_t* output, Size length) {
-        for (Size i = 0; i < length; i += 16) {
-            uint8_t block[16];
-            utilities::fast_memcpy(block, input + i, 16);
-            Cipher(block);
-            utilities::fast_memcpy(output + i, block, 16);
-        }
-    }
-    void DecryptECB(const uint8_t* input, uint8_t* output, Size length) {
-        for (Size i = 0; i < length; i += 16) {
-            uint8_t block[16];
-            utilities::fast_memcpy(block, input + i, 16);
-            InvCipher(block);
-            utilities::fast_memcpy(output + i, block, 16);
-        }
-    }
-    void EncryptCBC(const uint8_t* input, uint8_t* output, Size length) {
-        uint8_t prev_ciphertext_block[16];
-        utilities::copy(prev_ciphertext_block, _iv); // Начинаем с IV
-
-        for (Size i = 0; i < length; i += 16) {
-            uint8_t current_block[16];
-            utilities::fast_memcpy(current_block, input + i, 16);
-            for (int k = 0; k < 16; k++) {
-                current_block[k] ^= prev_ciphertext_block[k];
-            }
-            Cipher(current_block); // Шифруем XOR-ed блок
-            utilities::fast_memcpy(output + i, current_block, 16); // Сохраняем зашифрованный блок
-            utilities::copy(prev_ciphertext_block, current_block); // Обновляем prev_ciphertext_block
-        }
-    }
-    void DecryptCBC(const uint8_t* input, uint8_t* output, Size length) {
-        uint8_t prev_ciphertext_block[16];
-        utilities::copy(prev_ciphertext_block, _iv); // Начинаем с IV
-        for (Size i = 0; i < length; i += 16) {
-            uint8_t current_ciphertext_block[16];
-            utilities::fast_memcpy(current_ciphertext_block, input + i, 16); // Текущий зашифрованный блок
-            uint8_t decrypted_block[16];
-            utilities::copy(decrypted_block, current_ciphertext_block); // Копируем для дешифрования
-            InvCipher(decrypted_block); // Дешифруем текущий блок
-            for (int k = 0; k < 16; k++) {
-                decrypted_block[k] ^= prev_ciphertext_block[k];
-            }
-            utilities::fast_memcpy(output + i, decrypted_block, 16); // Сохраняем дешифрованный блок
-            utilities::copy(prev_ciphertext_block, current_ciphertext_block); // Обновляем prev_ciphertext_block
-        }
-    }
-    void EncryptCTR(const uint8_t* input, uint8_t* output, Size length) {
-        uint8_t counter[16];
-        uint8_t keystream[16];
-        utilities::copy(counter, _iv);
-        Size offset = 0;
-        while (offset < length) {
-            utilities::copy(keystream, counter);
-            Cipher(keystream);
-            Size block_len = length - offset;
-            if (block_len > 16) {
-                block_len = 16;
-            }
-            for (Size i = 0; i < block_len; ++i) {
-                output[offset + i] = input[offset + i] ^ keystream[i];
-            }
-            offset += block_len;
-            for (int i = 15; i >= 0; --i) {
-                if (++counter[i] != 0) {
-                    break;
-                }
-            }
-        }
-    }
-    void DecryptCTR(const uint8_t* input, uint8_t* output, Size length) {
-        EncryptCTR(input, output, length);
-    }
-    
-    // Добавляет PKCS7 padding к данным. Возвращает новую длину.
-    Size AddPKCS7Padding(uint8_t* data, Size data_len, Size max_len) {
-        uint8_t padding_value = 16 - (data_len % 16);
-        if (padding_value == 0) {
-            padding_value = 16;
-        }
-        Size new_len = data_len + padding_value;
-        if (new_len > max_len) {
-            return 0;
-        }
-        for (Size i = 0; i < padding_value; ++i) {
-            data[data_len + i] = padding_value;
-        }
-        return new_len;
-    }
-    Size RemovePKCS7Padding(const uint8_t* data, Size data_len) {
-        if (data_len == 0) {
-            return 0;
-        }
-        uint8_t padding_value = data[data_len - 1]; 
-        if (padding_value == 0 || padding_value > 16 || data_len < padding_value) {
-            return 0;
-        }
-        for (Size i = 0; i < padding_value; ++i) {
-            if (data[data_len - 1 - i] != padding_value) {
-                return 0; 
-            }
-        }
-        return data_len - padding_value;
-    }
-
-    inline void RotWord(uint8_t* word) {
-        uint8_t temp = word[0];
-        word[0] = word[1];
-        word[1] = word[2];
-        word[2] = word[3];
-        word[3] = temp;
-    }
-    inline void SubWord(uint8_t* word) {
-        word[0] = AesTables<EnableDecrypt>::sbox[word[0]];
-        word[1] = AesTables<EnableDecrypt>::sbox[word[1]];
-        word[2] = AesTables<EnableDecrypt>::sbox[word[2]];
-        word[3] = AesTables<EnableDecrypt>::sbox[word[3]];
-    }
-
-    static inline uint8_t gmul(uint8_t a, uint8_t b) {
-        uint8_t p = 0;
-        uint8_t hi_bit_set;
-        for (int counter = 0; counter < 8; counter++) {
-            if ((b & 1) != 0) {
-                p ^= a;
-            }
-            hi_bit_set = (uint8_t)(a & 0x80);
-            a <<= 1;
-            if (hi_bit_set != 0) {
-                a ^= 0x1b; // x^8 + x^4 + x^3 + x + 1
-            }
-            b >>= 1;
+            b = static_cast<uint8_t>(b >> 1);
         }
         return p;
     }
 };
 
-}
+/**
+ * @brief Программный AES.
+ *
+ * @tparam KeySize        128/192/256 бит.
+ * @tparam Mode           ECB, CBC или CTR.
+ * @tparam EnableDecrypt  Нужно ли расшифрование (ECB/CBC). Для CTR
+ *                        расшифрование доступно всегда — это та же операция.
+ * @tparam EnablePadding  PKCS#7 (только ECB/CBC; с CTR несовместим).
+ *
+ * Шифрование/расшифрование допускают работу «на месте» (output == input).
+ * Ёмкость выходного буфера проверяется всегда.
+ */
+template <AesKeySize KeySize, AesMode Mode,
+          bool EnableDecrypt = false, bool EnablePadding = false>
+class Aes {
+    using Traits = detail::AesTraits<KeySize>;
+    using Tables = detail::AesTables<EnableDecrypt>;
+
+    static_assert(Mode != AesMode::Ctr || !EnablePadding,
+                  "AES-CTR не использует padding: длина шифротекста равна длине "
+                  "открытого текста (гарантируется самой конструкцией класса)");
+
+public:
+    static constexpr Size BlockSize    = 16u;
+    static constexpr Size KeyBytes     = Traits::KeyBytes;
+    static constexpr Size IvBytes      = 16u;
+    static constexpr uint8_t Rounds    = Traits::Nr;
+    static constexpr bool UsesPadding  = EnablePadding && (Mode != AesMode::Ctr);
+    static constexpr bool CanDecrypt   = EnableDecrypt || (Mode == AesMode::Ctr);
+
+    /// Ключ обязателен, IV — только для CBC/CTR (nullptr ⇒ нулевой).
+    explicit Aes(const uint8_t* key, const uint8_t* iv = nullptr) noexcept {
+        if (iv != nullptr) {
+            utilities::fast_memcpy(iv_, iv, IvBytes);
+        } else {
+            utilities::fast_memset(iv_, 0, IvBytes);
+        }
+        valid_ = expand_key(key);
+    }
+
+    ~Aes() noexcept { clear(); }
+
+    Aes(const Aes&)            = delete;
+    Aes& operator=(const Aes&) = delete;
+
+    /// Ключ был принят и раундовые ключи построены.
+    bool valid() const noexcept { return valid_; }
+
+    /// Заменить IV/начальный счётчик.
+    Status set_iv(const uint8_t* iv) noexcept {
+        if (iv == nullptr) {
+            return Status::InvalidArg;
+        }
+        utilities::fast_memcpy(iv_, iv, IvBytes);
+        return Status::Ok;
+    }
+
+    /// Размер шифротекста для data_len байт открытого текста.
+    static constexpr Size encrypted_size(Size data_len) noexcept {
+        if constexpr (Mode == AesMode::Ctr) {
+            return data_len;
+        } else if constexpr (EnablePadding) {
+            return pkcs7_padded_size(data_len, BlockSize);
+        } else {
+            return data_len;
+        }
+    }
+
+    /// Ёмкость буфера для расшифрования: длина не увеличивается никогда.
+    static constexpr Size decrypted_capacity(Size cipher_len) noexcept {
+        return cipher_len;
+    }
+
+    /**
+     * @brief Зашифровать буфер.
+     * @param output_cap Ёмкость output (в байтах).
+     * @return Status::InvalidArg — нулевые указатели, неверная длина
+     *         (не кратна блоку без padding), непригодный ключ;
+     *         Status::NoMemory — output_cap меньше требуемого.
+     */
+    Status encrypt(const uint8_t* input, Size input_len,
+                   uint8_t* output, Size output_cap,
+                   Size* output_len) const noexcept {
+        if (input == nullptr || output == nullptr || output_len == nullptr) {
+            return Status::InvalidArg;
+        }
+        if (!valid_) {
+            return Status::InvalidArg;
+        }
+        if (input_len == 0u) {
+            *output_len = 0u;
+            return Status::Ok;
+        }
+
+        const Size need = encrypted_size(input_len);
+        if (output_cap < need) {
+            return Status::NoMemory;
+        }
+
+        if constexpr (Mode == AesMode::Ctr) {
+            ctr_xor(input, output, input_len);
+        } else if constexpr (EnablePadding) {
+            utilities::fast_memmove(output, input, input_len);
+            const Size padded = pkcs7_pad(output, input_len, output_cap, BlockSize);
+            if (padded == 0u) {
+                return Status::InvalidArg;
+            }
+            if constexpr (Mode == AesMode::Ecb) {
+                ecb_cipher(output, padded);
+            } else {
+                cbc_cipher(output, padded);
+            }
+            *output_len = padded;
+            return Status::Ok;
+        } else {
+            if (input_len % BlockSize != 0u) {
+                return Status::InvalidArg;
+            }
+            utilities::fast_memmove(output, input, input_len);
+            if constexpr (Mode == AesMode::Ecb) {
+                ecb_cipher(output, input_len);
+            } else {
+                cbc_cipher(output, input_len);
+            }
+        }
+        *output_len = input_len;
+        return Status::Ok;
+    }
+
+    /// Расшифровать буфер (см. encrypt() про статусы).
+    Status decrypt(const uint8_t* input, Size input_len,
+                   uint8_t* output, Size output_cap,
+                   Size* output_len) const noexcept {
+        if constexpr (!CanDecrypt) {
+            (void)input; (void)input_len; (void)output; (void)output_cap;
+            (void)output_len;
+            return Status::NotSupported;
+        } else {
+            if (input == nullptr || output == nullptr || output_len == nullptr) {
+                return Status::InvalidArg;
+            }
+            if (!valid_) {
+                return Status::InvalidArg;
+            }
+            if (input_len == 0u) {
+                *output_len = 0u;
+                return Status::Ok;
+            }
+            if (input_len % BlockSize != 0u) {
+                return Status::InvalidArg;
+            }
+            if (output_cap < input_len) {
+                return Status::NoMemory;
+            }
+
+            if constexpr (Mode == AesMode::Ctr) {
+                // CTR: расшифрование — то же XOR с гаммой.
+                ctr_xor(input, output, input_len);
+                *output_len = input_len;
+                return Status::Ok;
+            }
+
+            utilities::fast_memmove(output, input, input_len);
+            if constexpr (Mode == AesMode::Ecb) {
+                ecb_inv_cipher(output, input_len);
+            } else {
+                cbc_inv_cipher(output, input_len);
+            }
+
+            if constexpr (EnablePadding) {
+                Size plain_len = 0u;
+                if (!pkcs7_unpad(output, input_len, BlockSize, &plain_len)) {
+                    return Status::Corruption;   // неверный ключ/IV или порча данных
+                }
+                *output_len = plain_len;
+            } else {
+                *output_len = input_len;
+            }
+            return Status::Ok;
+        }
+    }
+
+    /// Затереть раундовые ключи и IV (вызывается деструктором).
+    void clear() noexcept {
+        wipe(expanded_key_, sizeof(expanded_key_));
+        wipe(iv_, sizeof(iv_));
+        valid_ = false;
+    }
+
+private:
+    static constexpr uint8_t Nk = Traits::Nk;
+    static constexpr uint8_t Nr = Traits::Nr;
+
+    uint8_t expanded_key_[Traits::ExpandedKeyBytes];
+    uint8_t iv_[IvBytes];
+    bool    valid_ = false;
+
+    static constexpr uint8_t rcon_[11] = {
+        0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36
+    };
+
+    bool expand_key(const uint8_t* key) noexcept {
+        if (key == nullptr) {
+            return false;
+        }
+        uint8_t temp[4];
+
+        for (int i = 0; i < Nk; ++i) {
+            for (int b = 0; b < 4; ++b) {
+                expanded_key_[i * 4 + b] = key[i * 4 + b];
+            }
+        }
+
+        const int total_words = 4 * (Nr + 1);
+        for (int j = Nk; j < total_words; ++j) {
+            for (int b = 0; b < 4; ++b) {
+                temp[b] = expanded_key_[(j - 1) * 4 + b];
+            }
+
+            if (j % Nk == 0) {
+                rot_word(temp);
+                sub_word(temp);
+                temp[0] ^= rcon_[j / Nk];
+            } else if (Nk > 6 && (j % Nk) == 4) {   // AES-256
+                sub_word(temp);
+            }
+
+            for (int b = 0; b < 4; ++b) {
+                expanded_key_[j * 4 + b] =
+                    static_cast<uint8_t>(expanded_key_[(j - Nk) * 4 + b] ^ temp[b]);
+            }
+        }
+
+        wipe(temp, sizeof(temp));
+        return true;
+    }
+
+    static void rot_word(uint8_t* w) noexcept {
+        const uint8_t t = w[0];
+        w[0] = w[1];
+        w[1] = w[2];
+        w[2] = w[3];
+        w[3] = t;
+    }
+
+    static void sub_word(uint8_t* w) noexcept {
+        for (int i = 0; i < 4; ++i) {
+            w[i] = Tables::sbox[w[i]];
+        }
+    }
+
+    static uint8_t gmul(uint8_t a, uint8_t b) noexcept {
+        uint8_t p = 0u;
+        for (int i = 0; i < 8; ++i) {
+            if ((b & 1u) != 0u) {
+                p = static_cast<uint8_t>(p ^ a);
+            }
+            const uint8_t hi = static_cast<uint8_t>(a & 0x80u);
+            a = static_cast<uint8_t>(a << 1);
+            if (hi != 0u) {
+                a = static_cast<uint8_t>(a ^ 0x1bu);
+            }
+            b = static_cast<uint8_t>(b >> 1);
+        }
+        return p;
+    }
+
+    static void add_round_key(uint8_t* state, const uint8_t* round_key) noexcept {
+        for (int i = 0; i < 16; ++i) {
+            state[i] = static_cast<uint8_t>(state[i] ^ round_key[i]);
+        }
+    }
+
+    static void sub_bytes(uint8_t* state) noexcept {
+        for (int i = 0; i < 16; ++i) {
+            state[i] = Tables::sbox[state[i]];
+        }
+    }
+
+    /// Обратные подстановки (пусты, если расшифрование выключено шаблоном).
+    static void inv_sub_bytes(uint8_t* state) noexcept {
+        AesInverse<EnableDecrypt>::sub_bytes(state);
+    }
+
+    /// Состояние хранится построчно-постолбцово: state[столбец * 4 + строка].
+    static void shift_rows(uint8_t* state) noexcept {
+        uint8_t t[16];
+        t[0]  = state[0];  t[4]  = state[4];
+        t[8]  = state[8];  t[12] = state[12];
+
+        t[1]  = state[5];  t[5]  = state[9];
+        t[9]  = state[13]; t[13] = state[1];
+
+        t[2]  = state[10]; t[6]  = state[14];
+        t[10] = state[2];  t[14] = state[6];
+
+        t[3]  = state[15]; t[7]  = state[3];
+        t[11] = state[7];  t[15] = state[11];
+
+        utilities::fast_memcpy(state, t, 16);
+    }
+
+    static void inv_shift_rows(uint8_t* state) noexcept {
+        uint8_t t[16];
+        t[0]  = state[0];  t[4]  = state[4];
+        t[8]  = state[8];  t[12] = state[12];
+
+        t[1]  = state[13]; t[5]  = state[1];
+        t[9]  = state[5];  t[13] = state[9];
+
+        t[2]  = state[10]; t[6]  = state[14];
+        t[10] = state[2];  t[14] = state[6];
+
+        t[3]  = state[7];  t[7]  = state[11];
+        t[11] = state[15]; t[15] = state[3];
+
+        utilities::fast_memcpy(state, t, 16);
+    }
+
+    static void mix_columns(uint8_t* state) noexcept {
+        for (int c = 0; c < 4; ++c) {
+            const uint8_t s0 = state[0 + c * 4];
+            const uint8_t s1 = state[1 + c * 4];
+            const uint8_t s2 = state[2 + c * 4];
+            const uint8_t s3 = state[3 + c * 4];
+            state[0 + c * 4] = static_cast<uint8_t>(
+                gmul(s0, 0x02) ^ gmul(s1, 0x03) ^ s2 ^ s3);
+            state[1 + c * 4] = static_cast<uint8_t>(
+                s0 ^ gmul(s1, 0x02) ^ gmul(s2, 0x03) ^ s3);
+            state[2 + c * 4] = static_cast<uint8_t>(
+                s0 ^ s1 ^ gmul(s2, 0x02) ^ gmul(s3, 0x03));
+            state[3 + c * 4] = static_cast<uint8_t>(
+                gmul(s0, 0x03) ^ s1 ^ s2 ^ gmul(s3, 0x02));
+        }
+    }
+
+    /// Обратное смешивание столбцов (пусто, если расшифрование выключено).
+    static void inv_mix_columns(uint8_t* state) noexcept {
+        AesInverse<EnableDecrypt>::mix_columns(state);
+    }
+
+    void cipher(uint8_t* state) const noexcept {
+        add_round_key(state, expanded_key_);
+        for (int round = 1; round < Nr; ++round) {
+            sub_bytes(state);
+            shift_rows(state);
+            mix_columns(state);
+            add_round_key(state, expanded_key_ + round * 16);
+        }
+        sub_bytes(state);
+        shift_rows(state);
+        add_round_key(state, expanded_key_ + Nr * 16);
+    }
+
+    void inv_cipher(uint8_t* state) const noexcept {
+        add_round_key(state, expanded_key_ + Nr * 16);
+        inv_shift_rows(state);
+        inv_sub_bytes(state);
+        for (int round = Nr - 1; round > 0; --round) {
+            add_round_key(state, expanded_key_ + round * 16);
+            inv_mix_columns(state);
+            inv_shift_rows(state);
+            inv_sub_bytes(state);
+        }
+        add_round_key(state, expanded_key_);
+    }
+
+    void ecb_cipher(uint8_t* buf, Size len) const noexcept {
+        for (Size i = 0; i < len; i += BlockSize) {
+            cipher(buf + i);
+        }
+    }
+
+    void ecb_inv_cipher(uint8_t* buf, Size len) const noexcept {
+        for (Size i = 0; i < len; i += BlockSize) {
+            inv_cipher(buf + i);
+        }
+    }
+
+    void cbc_cipher(uint8_t* buf, Size len) const noexcept {
+        uint8_t prev[16];
+        utilities::fast_memcpy(prev, iv_, 16);
+        for (Size i = 0; i < len; i += BlockSize) {
+            for (int b = 0; b < 16; ++b) {
+                buf[i + static_cast<Size>(b)] =
+                    static_cast<uint8_t>(buf[i + static_cast<Size>(b)] ^ prev[b]);
+            }
+            cipher(buf + i);
+            utilities::fast_memcpy(prev, buf + i, 16);
+        }
+        wipe(prev, sizeof(prev));
+    }
+
+    void cbc_inv_cipher(uint8_t* buf, Size len) const noexcept {
+        uint8_t prev[16];
+        uint8_t saved[16];
+        utilities::fast_memcpy(prev, iv_, 16);
+        for (Size i = 0; i < len; i += BlockSize) {
+            utilities::fast_memcpy(saved, buf + i, 16);
+            inv_cipher(buf + i);
+            for (int b = 0; b < 16; ++b) {
+                buf[i + static_cast<Size>(b)] =
+                    static_cast<uint8_t>(buf[i + static_cast<Size>(b)] ^ prev[b]);
+            }
+            utilities::fast_memcpy(prev, saved, 16);
+        }
+        wipe(prev, sizeof(prev));
+        wipe(saved, sizeof(saved));
+    }
+
+    /// CTR: счётчик — 128-битный, инкремент big-endian (NIST SP 800-38A).
+    void ctr_xor(const uint8_t* in, uint8_t* out, Size len) const noexcept {
+        uint8_t counter[16];
+        uint8_t gamma[16];
+        utilities::fast_memcpy(counter, iv_, 16);
+
+        Size offset = 0u;
+        while (offset < len) {
+            utilities::fast_memcpy(gamma, counter, 16);
+            cipher(gamma);
+            Size chunk = len - offset;
+            if (chunk > BlockSize) {
+                chunk = BlockSize;
+            }
+            for (Size i = 0; i < chunk; ++i) {
+                out[offset + i] = static_cast<uint8_t>(in[offset + i] ^ gamma[i]);
+            }
+            offset += chunk;
+
+            for (int i = 15; i >= 0; --i) {
+                counter[i] = static_cast<uint8_t>(counter[i] + 1u);
+                if (counter[i] != 0u) {
+                    break;
+                }
+            }
+        }
+        wipe(counter, sizeof(counter));
+        wipe(gamma, sizeof(gamma));
+    }
+};
+
+/// Готовые конфигурации (сокращают запись, экономят размер кода: каждая
+/// конфигурация инстанцируется один раз — в aes.cpp).
+/// ECB без padding требует данных, кратных 16 байтам.
+using Aes128Ecb      = Aes<AesKeySize::Aes128, AesMode::Ecb, true>;
+using Aes128Cbc      = Aes<AesKeySize::Aes128, AesMode::Cbc, true>;
+using Aes128CbcPkcs7 = Aes<AesKeySize::Aes128, AesMode::Cbc, true, true>;
+using Aes128Ctr      = Aes<AesKeySize::Aes128, AesMode::Ctr>;
+using Aes192Ecb      = Aes<AesKeySize::Aes192, AesMode::Ecb, true>;
+using Aes192CbcPkcs7 = Aes<AesKeySize::Aes192, AesMode::Cbc, true, true>;
+using Aes192Ctr      = Aes<AesKeySize::Aes192, AesMode::Ctr>;
+using Aes256Ecb      = Aes<AesKeySize::Aes256, AesMode::Ecb, true>;
+using Aes256Cbc      = Aes<AesKeySize::Aes256, AesMode::Cbc, true>;
+using Aes256CbcPkcs7 = Aes<AesKeySize::Aes256, AesMode::Cbc, true, true>;
+using Aes256Ctr      = Aes<AesKeySize::Aes256, AesMode::Ctr>;
+
+} // namespace crypto
+} // namespace embed
