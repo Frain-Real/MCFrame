@@ -703,6 +703,82 @@ void test_remove_current_and_exit() {
     check("после exit() ядро получило задачу", s.current_task() != nullptr);
 }
 
+// ─────────── Подготовка переключения (то, что делает PendSV) ───────────
+//
+// context_switch() = save_context → prepare_context_switch → load_context.
+// На МКУ СЕРЕДИНУ вызывает обработчик PendSV, и он обязан ВЕРНУТЬСЯ: если бы
+// загрузку контекста делал C-код (platform_load_context с `bx 0xFFFFFFFD`),
+// кадры обработчика остались бы в MSP навсегда и стек кончился бы за десятки
+// переключений (см. platforms/stm32/platform_ops.cpp). Поэтому выбор следующей
+// задачи вынесен в отдельную функцию, и её учётную часть можно проверить на
+// хосте — здесь проверяется именно она.
+void test_prepare_context_switch() {
+    (void)std::puts("подготовка переключения (середина PendSV):");
+    using embed::Status;
+    using embed::scheduler;
+    using embed::task;
+    using embed::TaskHandler;
+
+    scheduler& s = scheduler::instance();
+    if (!s.started()) {
+        check("планировщик запущен", s.start() == Status::Ok);
+    }
+
+    auto body = [](void*) noexcept {};
+
+    // Задача с высшим приоритетом: она обязана быть выбрана, если текущая
+    // задача не running (в этом случае вытеснять нечего).
+    static task hi;
+    static uint32_t hi_stack[64];
+    check("hi.init() == Ok", hi.init(body, nullptr, "pendsv", 64u, 0u) == Status::Ok);
+    check("hi добавлена", s.add_task(&hi, hi_stack, 64u));
+
+    // «SP, который вернул save_context()» — на хосте его роль играет любой
+    // указатель: важно, куда планировщик его запишет.
+    static uint32_t fake_frame[16];
+    uint32_t* const saved_sp = &fake_frame[8];
+
+    TaskHandler before = s.current_task();
+    const bool was_running = (before != nullptr) && before->is_running();
+
+    uint32_t* next_sp = s.prepare_context_switch(saved_sp);
+
+    // Главный инвариант: вернулся SP ИМЕННО той задачи, которая стала текущей.
+    // Обработчик загрузит контекст ровно отсюда, поэтому расхождение означало
+    // бы запуск одной задачи по кадрам другой.
+    check("вернулся не nullptr (загружать контекст есть откуда)", next_sp != nullptr);
+    check("вернулся SP новой текущей задачи",
+          next_sp != nullptr && next_sp == s.current_task()->load_sp());
+    check("выбранная задача помечена running",
+          s.current_task() != nullptr && s.current_task()->is_running());
+
+    if (was_running) {
+        // Уходящая задача обязана быть сохранена ДО выбора следующей: её SP
+        // записан в её же TCB, а сама она возвращена в очередь готовых.
+        check("SP уходящей задачи записан в её TCB", before->load_sp() == saved_sp);
+        // Состояние вытесненной задачи — suspended («вытеснена и стоит в
+        // ready-очереди»): это то, что ставит task::suspend(), и именно его
+        // разбирает wakeup(). Здесь важно, что задача НЕ потеряна.
+        check("уходящая задача не потеряна (в очереди готовых)",
+              before->state() == embed::task_state::suspended || before->is_ready());
+        check("уходящая задача больше не current", s.current_task() != before);
+    }
+
+    // Повторный вызов без сохранённого SP (так делает первый вызов обработчика
+    // на mock, где save_context возвращает nullptr) не должен ничего ломать.
+    TaskHandler cur = s.current_task();
+    uint32_t* again = s.prepare_context_switch(nullptr);
+    check("без сохранённого SP переключение всё равно состоялось", again != nullptr);
+    check("и вернулся SP текущей задачи",
+          again != nullptr && again == s.current_task()->load_sp());
+    if (cur != nullptr && cur != s.current_task()) {
+        // Прежняя задача была running — её сняли с ядра, но не потеряли.
+        check("снятая задача не потеряна",
+              cur->state() == embed::task_state::suspended ||
+              cur->is_ready() || cur->is_sleeping() || cur->is_blocked());
+    }
+}
+
 // ─────────────────────────────── утилиты ───────────────────────────────
 void test_utilities() {
     (void)std::puts("utilities:");
@@ -856,6 +932,7 @@ int main() {
     test_stack_pool();
     test_sleep_wake();
     test_remove_current_and_exit();
+    test_prepare_context_switch();
     test_utilities();
     test_atomic();
     test_semaphore_counters();

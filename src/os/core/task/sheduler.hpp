@@ -88,13 +88,62 @@ public:
 
     // ──────────── Тик и переключение ────────────
     void tick() noexcept;
+
+    /// Сменить контекст: сохранить SP уходящей задачи, выбрать следующую и
+    /// загрузить её контекст. На МКУ эту работу делает обработчик PendSV,
+    /// на хосте её вызывают тесты явно (переключения контекста там нет).
     void context_switch() noexcept;
+
+    /// СЕРЕДИНА переключения: сохранить SP уходящей задачи (saved_sp — то,
+    /// что вернул platform save_context(), либо nullptr, если сохранять нечем)
+    /// и выбрать следующую задачу; возвращает SP следующей (или saved_sp,
+    /// если переключаться некуда — тогда ядро продолжает прежний контекст).
+    ///
+    /// ЗАЧЕМ ОТДЕЛЬНО ОТ context_switch()
+    /// Обработчик PendSV на МКУ обязан быть СБАЛАНСИРОВАННЫМ по MSP: он сам
+    /// делает `bx lr` (EXC_RETURN), поэтому загрузка контекста не может
+    /// происходить «изнутри C» — кадры обработчика остались бы в MSP и
+    /// накапливались бы с каждым переключением (1 КБ MSP кончились бы за
+    /// десятки переключений). Отсюда деление: asm сохраняет контекст, вызывает
+    /// ЭТУ функцию (обычный вызов, который ВОЗВРАЩАЕТ SP следующей задачи),
+    /// затем сам загружает контекст и выходит из исключения.
+    ///
+    /// Вызывать из обработчика: состояние задач меняется целиком здесь, и
+    /// прерывания на это время должны быть запрещены (на МКУ это делает asm
+    /// обработчика, см. platforms/stm32/platform_ops.cpp).
+    uint32_t* prepare_context_switch(uint32_t* saved_sp) noexcept;
+
+    /// Продвинуть задержки спящих задач сразу на ticks тиков.
+    ///
+    /// Нужно ровно в одном случае: монотонное время ОС продвинулось скачком
+    /// (супервизор энергосбережения вернулся из глубокого сна, где SysTick
+    /// не считал). Вызывать вместо ticks вызовов tick(): tick_count_ растёт
+    /// сразу на ticks, а спящие задачи получают ту же семантику «задержка
+    /// истекла не позже срока», что и при обычных тиках.
+    ///
+    /// Из прерывания вызывать не нужно: это контекст задачи (idle).
+    void advance_ticks(uint32_t ticks) noexcept;
 
     // ──────────── Диагностика ────────────
     TaskHandler current_task() noexcept {
         const uint32_t core = platform::ops().current_core();
         return (core < core_count_) ? cores_[core].current : nullptr;
     }
+
+    /// Исполняется ли прямо сейчас idle-задача этого ядра.
+    ///
+    /// Единственный дешёвый способ измерить загрузку CPU: в тике достаточно
+    /// сравнить указатель. Именно так считает нагрузку супервизор
+    /// энергосбережения (os/power/power.hpp); точность — один тик.
+    bool idle_running() const noexcept {
+        const uint32_t core = platform::ops().current_core();
+        if (core >= core_count_) return false;
+        return cores_[core].current == &idle_tcb_;
+    }
+
+    /// Сколько тиков осталось ближайшей спящей задаче (kNoDeadline — таких нет).
+    /// Основа для «горизонта сна»: просыпаться раньше срока задачи нельзя.
+    uint32_t next_sleep_ticks() const noexcept;
     Size     task_count()  const noexcept { return all_tasks_.size(); }
     uint32_t core_count()  const noexcept { return core_count_; }
     uint32_t ready_count(uint32_t core_id) const noexcept {
@@ -146,7 +195,8 @@ private:
     bool ready_push(core_state& core, TaskHandler t) noexcept;   // false, если уже в очереди
     void ready_remove(core_state& core, TaskHandler t) noexcept;
     void check_preempt(core_state& core) noexcept;
-    void process_sleep_list() noexcept;
+    /// ticks_step == 1 — обычный тик; больше — «догон» после скачка времени.
+    void process_sleep_list(uint32_t ticks_step) noexcept;
     void switch_to(core_state& core, TaskHandler next) noexcept;
     /// Единственная точка запроса переключения: считает запросы и дёргает
     /// платформу. Прямые вызовы P().trigger_context_switch() мимо неё

@@ -669,6 +669,77 @@ public:
         return UpdateTickLocked();
     }
 
+    // ── Энергосбережение и диагностика ──
+
+    /// Период системного тика, мс. Нужен тем, кто переводит тики во время
+    /// (супервизор энергосбережения, отчёты).
+    static uint32_t TickMs() noexcept { return tick_ms_; }
+
+    /// Через сколько миллисекунд сработает ближайший программный таймер или
+    /// будильник. kNoDeadline — активных нет.
+    ///
+    /// Это «сколько времени у системы есть», то есть одна из границ горизонта
+    /// сна: заснуть дольше — значит проспать собственный таймер.
+    static uint32_t NextDeadlineMs() noexcept
+    {
+        Lock lock;
+        if (!running_) return kNoDeadline;
+
+        uint32_t best = kNoDeadline;
+
+        for (uint8_t i = 0; i < MaxTimers; ++i) {
+            const TimerSlot& s = timers_[i];
+            if (!s.used || !s.active) continue;
+            uint32_t  left;
+            if (s.due_ms <= now_ms_) {
+                left = 0u;
+            } else {
+                const uint64_t d = s.due_ms - now_ms_;
+                left = (d >= kNoDeadline) ? kNoDeadline : static_cast<uint32_t>(d);
+            }
+            if (left < best) best = left;
+        }
+
+        if (time_valid_) {
+            const int64_t wall_ms = WallNowMsLocked(now_ms_);
+            if (wall_ms < 0) return best;
+            const uint64_t wall_sec = static_cast<uint64_t>(wall_ms) / 1000u;
+            for (uint8_t i = 0; i < MaxAlarms; ++i) {
+                const AlarmSlot& a = alarms_[i];
+                if (!a.used || !a.active) continue;
+                uint32_t left = 0u;
+                if (a.due_sec > wall_sec) {
+                    const uint64_t d = (a.due_sec - wall_sec) * 1000u;
+                    left = (d >= kNoDeadline) ? kNoDeadline : static_cast<uint32_t>(d);
+                }
+                if (left < best) best = left;
+            }
+        }
+        return best;
+    }
+
+    /// Продвинуть монотонное время на delta_ms БЕЗ тиков.
+    ///
+    /// Нужно после глубокого сна: SysTick в STOP не считает, а время ОС
+    /// обязано идти — иначе таймауты и будильники «зависают» навсегда.
+    /// Обработчики сработавших таймеров/будильников вызываются ЗДЕСЬ, то есть
+    /// в контексте вызывающего (у супервизора — idle-задача), а не в
+    /// прерывании. Системные хуки (RegisterSystemHook) НЕ вызываются:
+    /// перепланирование — дело вызывающего (см. scheduler::advance_ticks).
+    static Status AdvanceMs(uint32_t delta_ms) noexcept
+    {
+        if (delta_ms == 0u) return Status::Ok;
+
+        Lock lock;
+        // Время стоит — продвигать нечего: вернуть Ok значило бы соврать.
+        if (!running_) return Status::Unavailable;
+
+        now_ms_ += delta_ms;
+        ProcessTimers(now_ms_);
+        ProcessAlarms(now_ms_);
+        return Status::Ok;
+    }
+
 private:
     static constexpr Size kTimerStorage =
         (MaxTimers > 0) ? static_cast<Size>(MaxTimers) : 1u;

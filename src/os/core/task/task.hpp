@@ -15,7 +15,7 @@ namespace embed {
         idle,       // не инициализирована / не готова к запуску
         ready,      // готова к выполнению
         running,    // выполняется сейчас
-        suspended,  // вытеснена (готова, но снята с ready-очереди)
+        suspended,  // вытеснена: готова и стоит в ready-очереди
         sleeping,   // спит N тиков
         blocked,    // ждёт события (семафор/мьютекс) без таймаута в тиках
         done        // завершена
@@ -168,10 +168,23 @@ namespace embed {
         /// через 3 тика. Прежний постфиксный вариант возвращал true только
         /// на 4-м тике — задача просыпалась на тик позже запрошенного
         /// (найдено тестом sleep/wake).
-        bool tick_delay() noexcept {
+        bool tick_delay() noexcept { return advance_delay(1u); }
+
+        /// Декремент задержки сразу на ticks тиков; true, когда задержка
+        /// истекла (в том числе «истекла ещё внутри интервала»).
+        ///
+        /// Нужен там, где монотонное время ОС продвинулось СКАЧКОМ: после
+        /// глубокого сна ядро не тикало, и вычитать по одному тику за раз
+        /// пришлось бы миллисекунды на каждую проспанную секунду. При
+        /// ticks == 1 семантика в точности совпадает с прежним tick_delay().
+        bool advance_delay(uint32_t ticks) noexcept {
             if (state_ != task_state::sleeping) return false;
-            if (delay_ticks_ > 0u) --delay_ticks_;
-            return delay_ticks_ == 0u;
+            if (delay_ticks_ > ticks) {
+                delay_ticks_ -= ticks;
+                return false;
+            }
+            delay_ticks_ = 0u;
+            return true;
         }
 
         // ── Accessors ──

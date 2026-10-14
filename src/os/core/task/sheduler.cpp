@@ -1,6 +1,7 @@
 // sheduler.cpp
 #include "sheduler.hpp"
 #include "../memory/memory_manager.hpp"
+#include "../../power/power.hpp"
 
 namespace embed {
 
@@ -41,9 +42,15 @@ Status scheduler::create_idle_task() noexcept {
     const Status st = idle_tcb_.init(
         [](void*) noexcept {
             scheduler& s = scheduler::instance();
+            power::Supervisor& supervisor = power::Supervisor::instance();
             for (;;) {
                 g_memory_manager.update_all_high_water();
-                if (P().idle) P().idle();      // __WFI, если нет готовой работы
+                // Простой отдаётся супервизору энергосбережения, если он
+                // инициализирован: он решает, остановить ли ядро (Sleep) или
+                // погасить тактирование (DeepSleep). Без супервизора
+                // поведение прежнее — платформенный WFI.
+                if (supervisor.initialized()) supervisor.on_idle();
+                else if (P().idle)            P().idle();
                 // На хосте (mock) idle возвращается сразу — уступаем,
                 // чтобы не выедать CPU в тестах.
                 s.yield();
@@ -221,12 +228,20 @@ Status scheduler::start() noexcept {
     TaskHandler first = cores_[0].current;
     if (!first || first->load_sp() == nullptr) return Status::Fault;
 
-    if (P().trigger_context_switch) {
-        // Полноценный запуск: уступаем планировщику через PendSV.
-        request_context_switch();
+    // ПЕРВОЕ переключение делает сама платформа, а не обработчик PendSV, и это
+    // не оптимизация, а необходимость: уходящего контекста ещё нет — ядро
+    // работает в потоковом режиме на MSP, а PSP не инициализирован вовсе.
+    // Обработчик переключения начинается с сохранения R4-R11 на стек ТЕКУЩЕЙ
+    // задачи (по PSP), то есть записал бы регистры по мусорному адресу.
+    // platform::Ops::start_first_task() — единственное место, которое умеет
+    // «войти» в задачу без сохранения предыдущей.
+    if (P().start_first_task) {
+        P().start_first_task(first->load_sp());
         return Status::Ok;
     }
-    P().start_first_task(first->load_sp());
+
+    // Платформа умеет только просить переключение — отдаём запуск обработчику.
+    request_context_switch();
     return Status::Ok;
 }
 
@@ -389,31 +404,53 @@ void scheduler::tick() noexcept {
     // занимается idle-задача. Измерение не влияет на планирование.
     g_memory_manager.update_all_high_water();
 
-    process_sleep_list();
+    process_sleep_list(1u);
 
     const uint32_t core = P().current_core();
     if (core >= core_count_) return;
 
-    TaskHandler cur = cores_[core].current;
-    if (cur && cur->is_running()) {
-        TaskHandler next = pick_next(cores_[core]);
-        if (next && next->priority() < cur->priority()) {
-            cur->suspend();
-            ready_push(cores_[core], cur);
-            switch_to(cores_[core], next);
-            request_context_switch();
-        }
-    }
+    // Вытеснение ТОЛЬКО ЗАПРАШИВАЕТСЯ, но не выполняется здесь.
+    //
+    // Прежде тик сам звал switch_to(next) — то есть переносил «текущую» задачу
+    // на новую ДО сохранения контекста уходящей. Обработчик переключения,
+    // получив такое состояние, сохранял бы контекст старой задачи в TCB новой
+    // (в c.current уже стояла новая) и портил её SP. Поэтому единственная
+    // точка смены задачи — context_switch()/prepare_context_switch(), а тик
+    // лишь просит переключение: ровно то же делает check_preempt() после
+    // пробуждения задач.
+    check_preempt(cores_[core]);
 }
 
-void scheduler::process_sleep_list() noexcept {
+void scheduler::advance_ticks(uint32_t ticks) noexcept {
+    if (!started_ || ticks == 0u) return;
+
+    Lock lock;
+    tick_count_ += ticks;
+    g_memory_manager.update_all_high_water();
+    process_sleep_list(ticks);
+
+    // Разбуженные задачи попадают в ready, но вытеснения здесь не делаем:
+    // мы в контексте задачи, а не прерывания, и вернуть ядро обязана
+    // вызывающая сторона (idle-задача сразу уступает через yield()).
+}
+
+uint32_t scheduler::next_sleep_ticks() const noexcept {
+    uint32_t best = kNoDeadline;
+    for (auto it = sleep_list_.safe_begin(); !it.done(); it.advance()) {
+        const uint32_t d = it.get()->delay_ticks();
+        if (d < best) best = d;
+    }
+    return best;
+}
+
+void scheduler::process_sleep_list(uint32_t ticks_step) noexcept {
     // Задачи, чья задержка истекла, собираем отдельно: нельзя мутировать
     // список во время обхода.
     task_queue_list woken;
 
     for (auto it = sleep_list_.safe_begin(); !it.done(); it.advance()) {
         TaskHandler t = it.get();
-        if (!t->tick_delay()) continue;      // ещё спит
+        if (!t->advance_delay(ticks_step)) continue;   // ещё спит
 
         sleep_list_.remove(t);
         t->wake_from_sleep();
@@ -438,15 +475,16 @@ void scheduler::check_preempt(core_state& core) noexcept {
 
 // ─────────────────────────── Смена контекста ────────────────────────────────
 
-void scheduler::context_switch() noexcept {
+uint32_t* scheduler::prepare_context_switch(uint32_t* saved_sp) noexcept {
     const uint32_t core_id = P().current_core();
-    if (core_id >= core_count_) return;
+    // Ядро не зарегистрировано: переключаться некуда — продолжаем прежний
+    // контекст (его кадр только что сохранён, так что он цел).
+    if (core_id >= core_count_) return saved_sp;
 
     core_state& c = cores_[core_id];
 
     if (c.current) {
-        uint32_t* sp = P().save_context ? P().save_context() : nullptr;
-        if (sp) c.current->save_sp(sp);
+        if (saved_sp) c.current->save_sp(saved_sp);
 
         // Возвращаем в ready ТОЛЬКО если задача не заблокировала себя сама
         // (sleep/sleep_for/block_on уже перевели её в sleeping/blocked).
@@ -462,13 +500,21 @@ void scheduler::context_switch() noexcept {
     TaskHandler next = pick_next(c);
     if (!next) next = &idle_tcb_;      // страховка: idle есть всегда
 
-    if (next == nullptr) return;       // нечего запускать (init не вызывался)
+    // Загружать нечего (планировщик не инициализирован): оставляем ядро на
+    // прежнем контексте, а не уходим по nullptr — обработчик загрузил бы
+    // регистры из адреса 0.
+    if (next == nullptr || next->load_sp() == nullptr) return saved_sp;
 
     ready_remove(c, next);
     next->set_running();
     c.current = next;
+    return next->load_sp();
+}
 
-    if (P().load_context) P().load_context(next->load_sp());
+void scheduler::context_switch() noexcept {
+    uint32_t* sp = P().save_context ? P().save_context() : nullptr;
+    uint32_t* next_sp = prepare_context_switch(sp);
+    if (next_sp != nullptr && P().load_context) P().load_context(next_sp);
 }
 
 } // namespace embed

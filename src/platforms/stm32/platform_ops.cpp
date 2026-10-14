@@ -9,6 +9,9 @@
 // ---------------------------------------------------------------------------
 #include "../../os/iplatform.hpp"
 #include "../../os/config/time_config.hpp"   // OsTimer для SysTick_Handler
+#include "../../os/core/task/sheduler.hpp"   // тело обработчика переключения (PendSV)
+#include "power_stm32.hpp"                   // энергосбережение (Sleep/STOP/профили)
+#include "watchdog_stm32.hpp"                // сторожевой таймер (IWDG), причина сброса
 
 #include "stm32f10x.h"
 #include "core_cm3.h"
@@ -82,11 +85,19 @@ void platform_trigger_context_switch() noexcept {
 // Сохранение контекста: аппаратная часть (R0-R3, R12, LR, PC, xPSR) уже
 // лежит в стеке задачи (PSP). Сохраняем R4-R11 и возвращаем новый SP.
 //
-// ВНИМАНИЕ: это обычная (не naked) функция. Прежний вариант был
-// __attribute__((naked)) с extended asm и параметром — GCC этого не
-// гарантирует. Здесь тело на basic asm, а значение возвращается через R0,
-// что для AAPCS корректно.
-__attribute__((naked)) uint32_t* platform_save_context() noexcept {
+// Имя — extern "C": эту функцию вызывает из ассемблера обработчик PendSV, и
+// ему нужен СТАБИЛЬНЫЙ символ (mangled-имя C++ меняется от перегрузок и может
+// быть переименовано LTO).
+//
+// ВНИМАНИЕ: это naked-функция (basic asm и возврат значения через R0 по
+// AAPCS), поэтому её нельзя инлайнить и у неё нет пролога: стек она не трогает
+// вовсе — это важно для обработчика, который обязан быть сбалансирован по MSP.
+// used + externally_visible: на символ ссылается ТОЛЬКО встроенный asm
+// (обработчик PendSV), а его компилятор не видит — без этих атрибутов LTO
+// считает функцию/переменную неиспользуемой, переименовывает её во внутренний
+// символ, и ассемблерная ссылка остаётся «undefined reference» (проверено).
+extern "C" __attribute__((naked, used, externally_visible))
+uint32_t* platform_save_context() noexcept {
     __asm volatile(
         "   mrs r0, psp          \n"
         "   subs r0, r0, #32     \n"
@@ -96,9 +107,16 @@ __attribute__((naked)) uint32_t* platform_save_context() noexcept {
     );
 }
 
-// Загрузка контекста: последний шаг PendSV. Выполняет аппаратный возврат
-// из прерывания, намеренно не возвращаясь в C++.
-__attribute__((naked)) void platform_load_context(uint32_t* sp) noexcept {
+// Загрузка контекста + возврат из прерывания.
+//
+// ОСТОРОЖНО: этот путь выполняет возврат из исключения ИЗНУТРИ C-вызова
+// (`bx 0xFFFFFFFD`), поэтому кадры стека обработчика, из которого его позвали,
+// остаются в MSP навсегда — на каждом переключении MSP утекал бы на десятки
+// байт. Обработчик переключения задач (PendSV_Handler ниже) поэтому НЕ
+// пользуется этой функцией, а делает загрузку и выход сам, сохраняя MSP.
+// Функция оставлена как часть контракта (platform::Ops::load_context) для
+// платформ, где переключение устроено иначе, и для хостовых тестов.
+extern "C" __attribute__((naked)) void platform_load_context(uint32_t* sp) noexcept {
     (void)sp;
     __asm volatile(
         "   ldmia r0!, {r4-r11}  \n"
@@ -110,17 +128,115 @@ __attribute__((naked)) void platform_load_context(uint32_t* sp) noexcept {
     );
 }
 
-// Запуск первой задачи из main(): имитируем возврат из прерывания.
-__attribute__((naked)) void platform_start_first_task(uint32_t* sp) noexcept {
+// ────────────────────── Смена контекста: обработчик PendSV ──────────────────
+//
+// ЕДИНСТВЕННОЕ место, где на МКУ меняется задача. Без него в таблице векторов
+// стояла слабая заглушка из startup-файла (бесконечный цикл), то есть первый
+// же yield()/вытеснение по тику вешало устройство.
+//
+// ПОЧЕМУ ОБРАБОТЧИК СБАЛАНСИРОВАН ПО MSP, А НЕ «УХОДИТ ИЗНУТРИ C»
+// Переключение состоит из трёх шагов: сохранить R4-R11 уходящей задачи,
+// выбрать следующую, загрузить её R4-R11 и вернуться из исключения. Если бы
+// загрузку делал C-код с `bx 0xFFFFFFFD` (как platform_load_context), то кадры
+// стека обработчика остались бы в MSP: исключение уже не вернётся, а MSP никто
+// не размотает — за десятки переключений 1 КБ MSP кончились бы, и ядро
+// затёрло бы .bss. Поэтому середина (выбор задачи) — обычный C-вызов, который
+// ВОЗВРАЩАЕТ SP следующей задачи, а сохранение, загрузка и выход сделаны в
+// asm: `push {r4, lr}` / `pop {r4, lr}` возвращают MSP ровно к тому состоянию,
+// каким он был на входе в обработчик.
+//
+// ПОЧЕМУ ССЫЛКА НА EXC_RETURN ЖИВЁТ В LR
+// На входе в исключение LR = EXC_RETURN (0xFFFFFFFD — «потоковый режим, PSP»),
+// и именно он говорит процессору, откуда снимать аппаратный кадр. Мы его
+// сохраняем в push и восстанавливаем в pop, а `bx lr` в конце — штатный выход
+// из обработчика: аппаратный кадр снимается уже со стека НОВОЙ задачи.
+//
+// ПОЧЕМУ ПРЕРЫВАНИЯ ЗАПРЕЩЕНЫ НА ВРЕМЯ ВЫБОРА
+// Обработчик меняет очереди готовых задач, а прерывание периферии (у него
+// приоритет выше, чем у PendSV) может в этот момент разбудить задачу и полезть
+// в те же очереди. Поэтому середина окружена cpsid/cpsie. На входе в PendSV
+// PRIMASK=0 (с запрещёнными прерываниями исключение просто не начнётся),
+// поэтому возврат в ноль корректен; оставить PRIMASK=1 нельзя — вернувшаяся
+// задача осталась бы без прерываний навсегда.
+extern "C" __attribute__((used, externally_visible))
+uint32_t* embed_pendsv_switch(uint32_t* saved_sp) noexcept {
+    return embed::scheduler::instance().prepare_context_switch(saved_sp);
+}
+
+extern "C" __attribute__((naked)) void PendSV_Handler(void) {
+    __asm volatile(
+        "   bl   platform_save_context        \n"  // r0 = SP сохранённого контекста
+        "   cpsid i                           \n"  // критическая секция выбора
+        "   push {r4, lr}                     \n"  // + выравнивание MSP по 8 (AAPCS)
+        "   bl   embed_pendsv_switch          \n"  // r0 = SP следующей задачи
+        "   pop  {r4, lr}                     \n"  // MSP как на входе в обработчик
+        "   ldmia r0!, {r4-r11}               \n"
+        "   msr  psp, r0                      \n"
+        "   isb                               \n"
+        "   cpsie i                           \n"  // PRIMASK возвращаем в 0
+        "   bx   lr                           \n"  // EXC_RETURN: выход в новую задачу
+    );
+}
+
+// ─────────────── Запуск первой задачи (первое переключение) ─────────────────
+//
+// Первое переключение НЕЛЬЗЯ делать через PendSV: уходящего контекста нет —
+// ядро работает в потоковом режиме на MSP, а PSP не инициализирован, поэтому
+// `bl platform_save_context` записал бы R4-R11 по мусорному адресу.
+//
+// Запуск делается в два шага, как в классических портах Cortex-M:
+//   1) здесь: запомнить SP первой задачи, обнулить MSP (стек main больше не
+//      нужен — задача живёт на PSP), разрешить прерывания и войти в обработчик
+//      SVC (в потоковом режиме войти в режим обработчика иначе нечем);
+//   2) SVC_Handler: загрузить контекст задачи и выйти из исключения с
+//      EXC_RETURN = «потоковый режим, PSP» — задача начинает исполняться.
+//
+// Прежний вариант дёргал CONTROL.SPSEL прямо в потоковом режиме и заканчивал
+// `bx 0xFFFFFFFD`: в потоковом режиме это не возврат из исключения, а переход
+// по адресу 0xFFFFFFFC, то есть UsageFault — запуск первой задачи не работал.
+// used + externally_visible по той же причине, что и выше: адрес этой
+// переменной берётся только из asm (movw/movt) в обработчиках ниже.
+extern "C" {
+__attribute__((used, externally_visible)) uint32_t* g_first_task_sp = nullptr;
+}
+
+extern "C" __attribute__((naked)) void platform_start_first_task(uint32_t* sp) noexcept {
     (void)sp;
     __asm volatile(
-        "   msr psp, r0          \n"
-        "   movs r0, #2          \n"
-        "   msr control, r0      \n"
-        "   isb                  \n"
-        "   cpsie i              \n"
-        "   mov r0, #0xFFFFFFFD  \n"
-        "   bx r0                 \n"
+        // Адреса грузим movw/movt, а НЕ `ldr =symbol`: `ldr =` требует
+        // литерального пула, а naked-функция — это чистый asm без `.pool`,
+        // поэтому пул уезжает далеко и ассемблер падает «offset out of range».
+        // С LTO это вылезает сразу (проверено), без LTO — как повезёт с
+        // раскладкой секции.
+        "   movw r1, #:lower16:g_first_task_sp   \n"
+        "   movt r1, #:upper16:g_first_task_sp   \n"
+        "   str r0, [r1]                          \n"   // SP первой задачи
+        "   movw r1, #:lower16:_estack            \n"
+        "   movt r1, #:upper16:_estack            \n"
+        "   msr msp, r1                           \n"   // чистый MSP: стек main не нужен
+        "   cpsie i                               \n"   // прерывания разрешаем ДО задачи
+        "   dsb                                   \n"
+        "   isb                                   \n"
+        "   svc 0                                 \n"   // → SVC_Handler
+        "   b .                                   \n"   // недостижимо: управление у задачи
+    );
+}
+
+// Продолжение запуска первой задачи: загрузить её контекст и вернуться из
+// исключения в потоковый режим на PSP. Обработчик существует только для этого
+// (SVC в проекте больше нигде не используется).
+extern "C" __attribute__((naked)) void SVC_Handler(void) {
+    __asm volatile(
+        "   movw r1, #:lower16:g_first_task_sp   \n"   // без литерального пула
+        "   movt r1, #:upper16:g_first_task_sp   \n"
+        "   ldr r0, [r1]                          \n"
+        "   movs r2, #0                           \n"
+        "   str r2, [r1]                          \n"   // одноразово: второй запуск невозможен
+        "   ldmia r0!, {r4-r11}                   \n"
+        "   msr psp, r0                           \n"
+        "   isb                                   \n"
+        "   mov r0, #0xFFFFFFFD                   \n"   // потоковый режим, стек PSP
+        "   bx r0                                 \n"
     );
 }
 
@@ -225,10 +341,101 @@ uint32_t* platform_stack_init_frame(uint32_t* sp, void (*fn)(void*), void* ctx) 
 
 // ─────────────────────────────── Простой ────────────────────────────────────
 // WFI экономит ток; прерывание (SysTick) разбудит ядро.
+//
+// Глубокий сон (STOP) здесь НЕ вызывается: Ops::idle — это «останови ядро»,
+// безусловно безопасное действие. Уходить в STOP решает супервизор
+// энергосбережения (os/power/power.hpp), который сначала проверяет источник
+// пробуждения и сроки, — см. platform_power_* ниже.
 void platform_idle() noexcept {
     __DSB();
     __WFI();
 }
+
+// ─────────────────────────── Энергосбережение ───────────────────────────────
+// Таблица power — тонкая обёртка над embed::stm32::power (power_stm32.cpp):
+// политика живёт в ядре (os/power), а регистры RTC/PWR/EXTI/FLASH — здесь.
+namespace {
+
+uint32_t platform_power_caps() OS_PLATFORM_FN {
+    return embed::stm32::power::caps();
+}
+
+uint32_t platform_power_sysclk_hz() OS_PLATFORM_FN {
+    return embed::stm32::power::sysclk_hz();
+}
+
+uint32_t platform_power_set_profile(uint32_t profile) OS_PLATFORM_FN {
+    return embed::stm32::power::set_profile(profile);
+}
+
+uint32_t platform_power_deep_horizon_ms() OS_PLATFORM_FN {
+    return embed::stm32::power::deep_sleep_horizon_ms();
+}
+
+uint32_t platform_power_deep_granularity_ms() OS_PLATFORM_FN {
+    return embed::stm32::power::deep_sleep_granularity_ms();
+}
+
+uint32_t platform_power_deep_sleep(uint32_t max_ms) OS_PLATFORM_FN {
+    return embed::stm32::power::deep_sleep(max_ms);
+}
+
+const PowerOps kPowerOps{
+    /* caps                      */ &platform_power_caps,
+    /* sysclk_hz                 */ &platform_power_sysclk_hz,
+    /* set_profile               */ &platform_power_set_profile,
+    /* deep_sleep_horizon_ms     */ &platform_power_deep_horizon_ms,
+    /* deep_sleep_granularity_ms */ &platform_power_deep_granularity_ms,
+    /* deep_sleep                */ &platform_power_deep_sleep,
+};
+
+// ─────────────────────────── Сторожевой таймер ──────────────────────────────
+// Независимый таймер (IWDG) и причина последнего сброса; политика — в ядре
+// (os/watchdog), регистры — в watchdog_stm32.cpp.
+uint32_t platform_wd_caps() OS_PLATFORM_FN {
+    return embed::stm32::watchdog::caps();
+}
+
+uint32_t platform_wd_closest_timeout_ms(uint32_t requested_ms) OS_PLATFORM_FN {
+    return embed::stm32::watchdog::closest_timeout_ms(requested_ms);
+}
+
+bool platform_wd_start(uint32_t timeout_ms) OS_PLATFORM_FN {
+    return embed::stm32::watchdog::start(timeout_ms);
+}
+
+void platform_wd_kick() OS_PLATFORM_FN {
+    embed::stm32::watchdog::kick();
+}
+
+bool platform_wd_stop() OS_PLATFORM_FN {
+    return embed::stm32::watchdog::stop();
+}
+
+bool platform_wd_note_write(uint32_t index, uint16_t value) OS_PLATFORM_FN {
+    return embed::stm32::watchdog::note_write(index, value);
+}
+
+uint16_t platform_wd_note_read(uint32_t index) OS_PLATFORM_FN {
+    return embed::stm32::watchdog::note_read(index);
+}
+
+uint32_t platform_wd_read_reset_cause() OS_PLATFORM_FN {
+    return embed::stm32::watchdog::read_reset_cause();
+}
+
+const WatchdogOps kWatchdogOps{
+    /* caps               */ &platform_wd_caps,
+    /* closest_timeout_ms */ &platform_wd_closest_timeout_ms,
+    /* start              */ &platform_wd_start,
+    /* kick               */ &platform_wd_kick,
+    /* stop               */ &platform_wd_stop,
+    /* note_write         */ &platform_wd_note_write,
+    /* note_read          */ &platform_wd_note_read,
+    /* read_reset_cause   */ &platform_wd_read_reset_cause,
+};
+
+} // namespace
 
 // ─────────────────────────── Привязка АЦП ──────────────────────────────────
 // Драйвер регистрирует свой обработчик, а ADC1_2_IRQHandler его вызывает.
@@ -286,11 +493,34 @@ static const Ops kOps{
     /* idle                  */ &platform_idle,
     /* adc_bind              */ &platform_adc_bind,
     /* log                   */ &platform_log,
+    /* power                 */ &kPowerOps,
+    /* watchdog              */ &kWatchdogOps,
 };
 
 const Ops& ops() noexcept { return kOps; }
 
-bool validate() noexcept { return true; }
+bool validate() noexcept {
+    // Проверяем ровно то, что не может проверить компилятор. Отсутствие
+    // таблицы энергосбережения проявилось бы разыменованием nullptr в
+    // idle-задаче, то есть падением в простое — самом «тихом» месте системы.
+    if (kOps.power == nullptr) return false;
+    if (kOps.power->caps == nullptr) return false;
+    if (kOps.power->sysclk_hz == nullptr) return false;
+    if (kOps.power->set_profile == nullptr) return false;
+    if (kOps.power->deep_sleep == nullptr) return false;
+    if (kOps.power->deep_sleep_horizon_ms == nullptr) return false;
+    if (kOps.power->deep_sleep_granularity_ms == nullptr) return false;
+
+    // Сторожевой таймер: его отсутствие проявилось бы падением в прерывании
+    // тика — то есть ровно там, где защита от зависаний и нужна.
+    if (kOps.watchdog == nullptr) return false;
+    if (kOps.watchdog->caps == nullptr) return false;
+    if (kOps.watchdog->closest_timeout_ms == nullptr) return false;
+    if (kOps.watchdog->start == nullptr) return false;
+    if (kOps.watchdog->kick == nullptr) return false;
+    if (kOps.watchdog->stop == nullptr) return false;
+    return true;
+}
 
 } // namespace platform
 } // namespace embed
@@ -308,3 +538,12 @@ extern "C" void ADC1_2_IRQHandler(void) {
         embed::g_adc_irq_hook();
     }
 }
+
+#if MCFRAME_STM32_DEEP_SLEEP
+// Будильник RTC (линия EXTI17). Ядро выходит из STOP ДО этого обработчика:
+// здесь только снимаются флаги, иначе прерывание «дребезжит» и мешает
+// измерению времени сна.
+extern "C" void RTCAlarm_IRQHandler(void) {
+    embed::stm32::power::on_alarm_irq();
+}
+#endif

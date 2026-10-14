@@ -15,6 +15,8 @@
 #include "os/async/async_hal.hpp"
 #include "os/async/async_port.hpp"
 #include "os/config/time_config.hpp"
+#include "os/power/power.hpp"
+#include "os/watchdog/watchdog.hpp"
 
 // Драйверы UART/I2C для текущей платформы. На STM32 это регистровые
 // драйверы, на mock — эмуляция; прикладной код ниже ОДИНАКОВ для обеих.
@@ -52,12 +54,26 @@ uint32_t        g_worker_stack[kWorkerStackWords];
 embed::atomic_t<uint32_t> g_blink_count{0u};
 embed::atomic_t<uint32_t> g_worker_count{0u};
 
+// ── Сторожевой таймер ──
+//
+// Участники — то, что обязано работать. Отметка делается в КОНЦЕ успешного
+// цикла: задача, которая отметилась и тут же упала, ничего не доказала бы.
+// Срок взят с запасом к периоду работы задачи (спит 5000 мс — отмечается не
+// реже 8000 мс): слишком туго выставленный срок превращает сторож в источник
+// ложных сбросов, слишком свободный — в бесполезный счётчик.
+embed::watchdog::Participant g_blink_wd;
+embed::watchdog::Participant g_worker_wd;
+
+constexpr uint32_t kBlinkWdTimeout  = 8000u;    // период задачи — 500 тиков (5 с)
+constexpr uint32_t kWorkerWdTimeout = 15000u;   // период задачи — 1000 тиков (10 с)
+
 void blink_task(void* /*ctx*/) noexcept {
     embed::scheduler& sched = embed::scheduler::instance();
     for (;;) {
         (void)g_blink_count.fetch_add(1u, embed::MemoryOrderRelaxed);
         // sleep_for сам инициирует переключение контекста.
         (void)sched.sleep_for(500);
+        (void)g_blink_wd.check_in();
     }
 }
 
@@ -66,6 +82,7 @@ void worker_task(void* /*ctx*/) noexcept {
     for (;;) {
         (void)g_worker_count.fetch_add(1u, embed::MemoryOrderRelaxed);
         (void)sched.sleep_for(1000);
+        (void)g_worker_wd.check_in();
     }
 }
 
@@ -106,6 +123,30 @@ embed::Status user_app_register(embed::scheduler& sched) noexcept {
         return embed::Status::NoMemory;
     }
     return embed::Status::Ok;
+}
+
+// ─────────────────────────── Сторожевой таймер ──────────────────────────────
+
+// Счётчик предупреждений: пишется из прерывания, читается отчётом — поэтому
+// atomic, а не «просто переменная».
+embed::atomic_bool     g_watchdog_warned{false};
+embed::atomic_t<uint32_t> g_watchdog_warnings{0u};
+
+void user_app_watchdog_warning(void* /*arg*/) noexcept {
+    // ВАЖНО: это прерывание тика перед сбросом устройства. Здесь нельзя ни
+    // ждать, ни блокироваться, ни обмениваться по шинам. Логировать отсюда
+    // тоже нельзя: вывод в ITM ждёт отладчик и мог бы «подвесить» ядро вместо
+    // сброса — а сброс здесь и есть правильное поведение.
+    (void)g_watchdog_warnings.fetch_add(1u, embed::MemoryOrderRelaxed);
+    g_watchdog_warned.store(true, embed::MemoryOrderRelease);
+}
+
+embed::Status user_app_watchdog_register() noexcept {
+    using namespace embed;
+
+    if (g_blink_wd.init("blink", kBlinkWdTimeout) != Status::Ok) return Status::Fault;
+    if (g_worker_wd.init("worker", kWorkerWdTimeout) != Status::Ok) return Status::Fault;
+    return Status::Ok;
 }
 
 // ──────────────────────────────── Самотест ──────────────────────────────────
@@ -310,7 +351,9 @@ void user_app_report_ram() noexcept {
     log_u32("static core capacities, bytes:",
             static_cast<uint32_t>(scheduler::instance().static_bytes()
                                   + g_memory_manager.static_bytes()
-                                  + config::OsTimer::static_bytes()));
+                                  + config::OsTimer::static_bytes()
+                                  + power::Supervisor::static_bytes()
+                                  + watchdog::Service::static_bytes()));
 
     log_u32("  scheduler.static_bytes:",
             static_cast<uint32_t>(scheduler::instance().static_bytes()));
@@ -318,6 +361,10 @@ void user_app_report_ram() noexcept {
             static_cast<uint32_t>(g_memory_manager.static_bytes()));
     log_u32("  OsTimer.static_bytes:",
             static_cast<uint32_t>(config::OsTimer::static_bytes()));
+    log_u32("  power::Supervisor.static_bytes:",
+            static_cast<uint32_t>(power::Supervisor::static_bytes()));
+    log_u32("  watchdog::Service.static_bytes:",
+            static_cast<uint32_t>(watchdog::Service::static_bytes()));
 
     log_u32("heap total, bytes:",  static_cast<uint32_t>(g_memory_manager.heap_total()));
     log_u32("heap free, bytes:",   static_cast<uint32_t>(g_memory_manager.heap_free_bytes()));
@@ -339,4 +386,91 @@ void user_app_report_ram() noexcept {
     log_u32("worker iterations:", g_worker_count.load(embed::MemoryOrderRelaxed));
 
     platform_log_line("-----------");
+}
+
+// ──────────────────────────── Отчёт сторожа ────────────────────────────────
+
+void user_app_report_watchdog() noexcept {
+    using namespace embed;
+
+    watchdog::Service& wd = watchdog::Service::instance();
+    const watchdog::Stats st = wd.stats();
+    const watchdog::Fault f  = wd.last_fault();
+
+    platform_log_line("--- WATCHDOG ---");
+    log_u32("hardware timeout, ms:", wd.hardware_timeout_ms());
+    log_u32("participants:", st.participants);
+    log_u32("deadline checks:", st.checks);
+    log_u32("hardware kicks:", st.kicks);
+
+    // Просрочки и предупреждения: в норме — нули. Ненулевое значение означает,
+    // что устройство УЖЕ перезагружалось по сторожу (или перезагрузится).
+    log_u32("misses:", st.misses);
+    log_u32("warnings:", st.warnings);
+    log_u32("max late, ms:", st.max_late_ms);
+    log_u32("rearms (снятий защёлки):", st.rearms);
+
+    // Сон: сторож считает и в STOP, поэтому сон ограничен его сроком.
+    log_u32("deep sleeps under watchdog:", st.deep_sleeps);
+    log_u32("slept under watchdog, ms:", st.slept_ms);
+    log_u32("sleep limit, ms:", wd.sleep_limit_ms());
+
+    // Причина прошлой перезагрузки: ради этого отметка и пишется в резервные
+    // регистры (они переживают сброс).
+    log_u32("reset cause bits:", wd.reset_cause());
+    log_u32("last fault known:", f.valid ? 1u : 0u);
+    log_u32("last fault participant:", (f.participant == watchdog::kNoParticipant)
+                                       ? 0xFFFFFFFFu : f.participant);
+    log_u32("last fault late, ms:", f.late_ms);
+    log_u32("boot count:", f.boot_count);
+
+    // Предупреждения, пойманные колбэком ДО сброса: если они есть, а сброса не
+    // случилось, значит приложение успело снять защёлку (rearm).
+    log_u32("warning callbacks:", g_watchdog_warnings.load(embed::MemoryOrderRelaxed));
+    log_u32("warning flag set:", g_watchdog_warned.load(embed::MemoryOrderAcquire) ? 1u : 0u);
+    platform_log_line("----------------");
+}
+
+// ──────────────────────────── Отчёт энергосбережения ───────────────────────
+
+void user_app_report_power() noexcept {
+    using namespace embed;
+
+    const power::Stats st = power::Supervisor::instance().stats();
+    const power::Supervisor& sup = power::Supervisor::instance();
+
+    platform_log_line("--- POWER ---");
+    log_u32("sysclk, Hz:", sup.sysclk_hz());
+
+    log_u32("windows measured:", st.windows);
+    log_u32("window accumulated, ms:", st.window_ms);
+    log_u32("busy in window, ms:", st.busy_ms);
+    log_u32("idle in window, ms:", st.idle_ms);
+    log_u32("load last window, %:", st.load_percent);
+    log_u32("load peak, %:", st.peak_load_percent);
+    log_u32("load average, %:", st.avg_load_percent);
+
+    // ГЛАВНАЯ ЦИФРА ДЛЯ ВЫБОРА ПРОФИЛЯ ЧАСТОТЫ.
+    //
+    // Нагрузка обратно пропорциональна частоте, поэтому «что будет на 8 МГц»
+    // — это арифметика, а не догадка. Значение больше 100 означает, что на
+    // пониженной частоте система не успеет за реальным временем: профиль
+    // LowPower брать нельзя, как бы он ни экономил ток.
+    log_u32("load at 8 MHz, % (projected):",
+            power::project_load_percent(st.peak_load_percent,
+                                        sup.sysclk_hz(), 8000000u));
+
+    log_u32("sleep (WFI) entries:", st.sleep_entries);
+    log_u32("deep sleep entries:", st.deep_sleep_entries);
+    log_u32("deep sleep total, ms:", st.deep_sleep_ms);
+
+    // Причины отказов от глубокого сна: без них «мы не спим» выглядит как
+    // ошибка супервизора, хотя обычно это чей-то незакрытый обмен или
+    // слишком короткий простой.
+    log_u32("refused: no wake source:", st.refused_no_source);
+    log_u32("refused: horizon too short:", st.refused_short);
+    log_u32("refused: keep-awake held:", st.refused_keep_awake);
+    log_u32("refused: platform failed:", st.deep_sleep_failed);
+
+    platform_log_line("-------------");
 }

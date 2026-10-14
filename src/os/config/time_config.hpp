@@ -21,7 +21,10 @@ namespace embed::config {
     #define MCFRAME_ALARM_COUNT 2u
     #endif
     #ifndef MCFRAME_HOOK_COUNT
-    #define MCFRAME_HOOK_COUNT 2u
+    // Два хука занимает само ядро: scheduler::tick_hook и
+    // power::Supervisor::tick_hook (учёт нагрузки и решение о сне).
+    // Третий — запас для приложения; HookSlot стоит 12 Б статики.
+    #define MCFRAME_HOOK_COUNT 3u
     #endif
 
     using OsTimer = TimerModule<

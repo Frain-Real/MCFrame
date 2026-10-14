@@ -45,3 +45,73 @@ target_link_options(mcu_flags INTERFACE
 if(MCU_LINKER_SCRIPT)
     target_link_options(mcu_flags INTERFACE -T${MCU_LINKER_SCRIPT})
 endif()
+
+# ──────────────────────────────────── LTO ────────────────────────────────────
+#
+# ЗАЧЕМ: без LTO каждая единица трансляции оптимизируется отдельно, поэтому
+# функция, невидимая снаружи файла, остаётся настоящим вызовом — с сохранением
+# регистров, выравниванием стека и без межмодульных упрощений. Для этого проекта
+# цена выше обычной: ядро собирается в СТАТИЧЕСКУЮ БИБЛИОТЕКУ, то есть границы
+# модулей (sheduler ↔ power ↔ watchdog ↔ драйверы) для оптимизатора такие же
+# непрозрачные, как границы файлов, — а именно через них идёт горячий путь
+# (тик, простой, проверка сроков).
+#
+# ПОЧЕМУ ОПЦИЯ, А НЕ «ВСЕГДА ВКЛЮЧЕНО»:
+#   * LTO удлиняет сборку и требует, чтобы архиватор умел плагин LTO: индекс
+#     символов LTO-объектов строит gcc-ar (в toolchain-файлах он и прописан),
+#     обычный ar даёт «plugin needed to handle lto object»;
+#   * при -O0 (Debug) LTO почти ничего не даёт, зато усложняет отладку
+#     (инлайненный код, переставленные строки) — поэтому по умолчанию он
+#     включён ТОЛЬКО для оптимизированных сборок;
+#   * у LTO есть известные грабли с naked-функциями и таблицей векторов
+#     (см. README, раздел «LTO»): их полезно включать осознанно.
+#
+# Режим задаётся ТРЁХЗНАЧНО: ON | OFF | AUTO.
+#
+# ПОЧЕМУ AUTO, А НЕ «BOOL ON ПО УМОЛЧАНИЮ ДЛЯ RELEASE»: значение по умолчанию,
+# однажды положенное в кэш, остаётся там навсегда — и переконфигурирование уже
+# существующего каталога сборки с Debug на Release молча оставляло бы LTO
+# выключенным (проверено: именно так и произошло). AUTO пересчитывается при
+# каждом запуске cmake, а явные ON/OFF пользователь задаёт сам и они, как и
+# положено кэшу, запоминаются.
+#
+# Переопределение: -DMCFRAME_LTO=ON | -DMCFRAME_LTO=OFF | -DMCFRAME_LTO=AUTO
+set(MCFRAME_LTO "AUTO" CACHE STRING
+    "Межмодульная оптимизация: ON | OFF | AUTO (AUTO — для оптимизированных сборок)")
+set_property(CACHE MCFRAME_LTO PROPERTY STRINGS AUTO ON OFF)
+
+if(MCFRAME_LTO STREQUAL "AUTO")
+    if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+        set(_mcframe_lto ON)
+    else()
+        set(_mcframe_lto OFF)
+    endif()
+else()
+    set(_mcframe_lto "${MCFRAME_LTO}")
+endif()
+
+if(_mcframe_lto)
+    # -flto=auto распараллеливает LTRANS через jobserver make: иначе на одном
+    # ядре сборка прошивки заметно замедляется. Старые GCC такого варианта не
+    # знают — тогда обычный -flto.
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-flto=auto" MCFRAME_FLTO_AUTO)
+    if(MCFRAME_FLTO_AUTO)
+        set(_mcframe_lto_flag "-flto=auto")
+    else()
+        set(_mcframe_lto_flag "-flto")
+    endif()
+
+    # Только C/C++: ассемблер (startup, core_cm3) LTO не касается, и лишний
+    # флаг ему передавать не нужно.
+    target_compile_options(mcu_flags INTERFACE
+        $<$<COMPILE_LANGUAGE:C,CXX>:${_mcframe_lto_flag}>)
+    # На линковке флаг обязателен: именно он запускает LTRANS и подключает
+    # плагин, который читает LTO-объекты из архива.
+    target_link_options(mcu_flags INTERFACE ${_mcframe_lto_flag})
+
+    message(STATUS "MCFrame: LTO включён (${_mcframe_lto_flag}), запрошено ${MCFRAME_LTO}")
+else()
+    message(STATUS "MCFrame: LTO выключен (запрошено ${MCFRAME_LTO})")
+endif()
+

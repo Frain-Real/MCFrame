@@ -19,6 +19,21 @@ set(CMAKE_SIZE    arm-none-eabi-size       CACHE FILEPATH "")
 # MCFRAME_TARGET_MCU используется примером, чтобы отличить прошивку от mock.
 set(MCU_DEFINES -DSTM32F10X_MD -DMCFRAME_TARGET_MCU)
 
+# ── Глубокий сон (STOP + будильник RTC) ──
+#
+# По умолчанию ВЫКЛЮЧЕН, и это не «недоделка», а осознанное решение: уход
+# в STOP без проверенного источника пробуждения не лечится ничем, кроме
+# кнопки Reset. Включайте, когда на плате есть кварц 32.768 кГц (или вы
+# согласны на неточный LSI) и выход из STOP проверен на вашей плате:
+#   cmake .. -DMCU_TARGET=stm32 -DMCFRAME_STM32_DEEP_SLEEP=ON
+set(MCFRAME_STM32_DEEP_SLEEP OFF CACHE BOOL
+    "Разрешить DeepSleep (STOP + RTC) на STM32")
+if(MCFRAME_STM32_DEEP_SLEEP)
+    list(APPEND MCU_DEFINES -DMCFRAME_STM32_DEEP_SLEEP=1)
+else()
+    list(APPEND MCU_DEFINES -DMCFRAME_STM32_DEEP_SLEEP=0)
+endif()
+
 set(MCU_ARCH_FLAGS -mcpu=cortex-m3 -mthumb)
 
 set(MCU_C_FLAGS

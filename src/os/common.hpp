@@ -74,6 +74,14 @@ namespace embed {
     using Timeout = uint64_t;
     constexpr Timeout WaitForever = ~Timeout{0};
 
+    /// Сентинел «ближайшего срока нет» для запросов вида
+    /// «через сколько миллисекунд системе точно понадобится ядро».
+    ///
+    /// Значение — максимальное uint32_t, поэтому min() с ним работает как
+    /// «нет ограничения», а арифметика по нему НЕ ведётся: сравнивать и
+    /// подставлять в min, не складывать.
+    inline constexpr uint32_t kNoDeadline = 0xFFFFFFFFu;
+
     using task_func = void (*)(void* ctx);
 
     enum class Access : unsigned char

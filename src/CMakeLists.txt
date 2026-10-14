@@ -10,6 +10,8 @@ set(OS_CORE_SOURCES
     os/core/memory/memory_manager.cpp
     os/core/memory/global_allocator.cpp
     os/core/task/sheduler.cpp
+    os/power/power.cpp
+    os/watchdog/watchdog.cpp
     os/interfaces/dma_manager.cpp
     os/interfaces/dma_arbiter.cpp)
 
@@ -45,7 +47,7 @@ endforeach()
 set(OS_PLATFORM_SOURCES
     platforms/${MCU_TARGET}/platform_ops.cpp)
 
-foreach(_extra platform.cpp platform_adc.cpp)
+foreach(_extra platform.cpp platform_adc.cpp power_stm32.cpp watchdog_stm32.cpp)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/platforms/${MCU_TARGET}/${_extra}")
         list(APPEND OS_PLATFORM_SOURCES platforms/${MCU_TARGET}/${_extra})
     endif()
@@ -56,7 +58,9 @@ endforeach()
 if(MCU_TARGET STREQUAL "mock")
     list(APPEND OS_PLATFORM_SOURCES
         platforms/mock/mock_interface.cpp
-        platforms/mock/platform_adc.cpp)
+        platforms/mock/platform_adc.cpp
+        platforms/mock/platform_power.cpp
+        platforms/mock/platform_watchdog.cpp)
 endif()
 
 # Startup-код и clock-инициализация нужны только для реального МКУ.

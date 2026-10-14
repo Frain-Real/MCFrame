@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 #include "../../os/iplatform.hpp"
 #include "../../os/core/memory/memory_manager.hpp"
+#include "platform_power_mock.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -104,7 +105,11 @@ static uint32_t* mock_stack_init_frame(uint32_t* sp, void (*fn)(void*), void* ct
 }
 
 // ─────────────────────────────── Простой ────────────────────────────────────
-static void mock_idle() OS_PLATFORM_FN {}
+// На хосте останавливать нечего: считаем вызовы — по ним тест проверяет, что
+// супервизор энергосбережения действительно отдал простой платформе.
+static void mock_idle() OS_PLATFORM_FN {
+    ++embed::mock_platform::power_model().idle_calls;
+}
 
 // ─────────────────────────── Привязка АЦП ──────────────────────────────────
 static void mock_adc_bind(void (* /*on_irq*/)() noexcept) OS_PLATFORM_FN {}
@@ -117,6 +122,12 @@ static void mock_log(const char* str) OS_PLATFORM_FN {
 }
 
 // ─────────────────────────────── Таблица Ops ────────────────────────────────
+// Энергосбережение и сторожевой таймер собираются отдельными файлами
+// (platform_power.cpp, platform_watchdog.cpp): их модели «железа» нужны и
+// тестам, поэтому живут в своих TU.
+const PowerOps& mock_power_ops() noexcept;
+const WatchdogOps& mock_watchdog_ops() noexcept;
+
 static const Ops kOps{
     /* critical_enter        */ &mock_critical_enter,
     /* critical_exit         */ &mock_critical_exit,
@@ -148,10 +159,36 @@ static const Ops kOps{
     /* idle                  */ &mock_idle,
     /* adc_bind              */ &mock_adc_bind,
     /* log                   */ &mock_log,
+    /* power                 */ &mock_power_ops(),
+    /* watchdog              */ &mock_watchdog_ops(),
 };
 
 const Ops& ops() OS_PLATFORM_FN { return kOps; }
 
-bool validate() OS_PLATFORM_FN { return true; }
+bool validate() OS_PLATFORM_FN {
+    // Единственное, что нельзя проверить компилятором: заполнена ли таблица
+    // энергосбережения. Её отсутствие проявилось бы разыменованием nullptr
+    // в idle-задаче — то есть падением в простое.
+    if (kOps.power == nullptr) return false;
+    if (kOps.power->caps == nullptr) return false;
+    if (kOps.power->sysclk_hz == nullptr) return false;
+    if (kOps.power->set_profile == nullptr) return false;
+    if (kOps.power->deep_sleep == nullptr) return false;
+    if (kOps.power->deep_sleep_horizon_ms == nullptr) return false;
+    if (kOps.power->deep_sleep_granularity_ms == nullptr) return false;
+
+    // Таблица сторожевого таймера: её отсутствие проявилось бы падением в
+    // прерывании тика — то есть в коде, который и должен спасать от зависаний.
+    if (kOps.watchdog == nullptr) return false;
+    if (kOps.watchdog->caps == nullptr) return false;
+    if (kOps.watchdog->closest_timeout_ms == nullptr) return false;
+    if (kOps.watchdog->start == nullptr) return false;
+    if (kOps.watchdog->kick == nullptr) return false;
+    if (kOps.watchdog->stop == nullptr) return false;
+    if (kOps.watchdog->note_write == nullptr) return false;
+    if (kOps.watchdog->note_read == nullptr) return false;
+    if (kOps.watchdog->read_reset_cause == nullptr) return false;
+    return true;
+}
 
 } // namespace embed::platform

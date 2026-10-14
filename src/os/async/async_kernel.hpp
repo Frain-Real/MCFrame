@@ -11,6 +11,7 @@
 
 #include "../core/primitives/mutex.hpp"   // sched_api: current/block_on/unblock_one/wake/yield
 #include "../config/time_config.hpp"
+#include "../power/power.hpp"             // удержание системы от глубокого сна
 
 namespace embed::async::kernel {
 
@@ -52,5 +53,37 @@ inline bool has_time() noexcept {
 inline uint64_t time_ms() noexcept {
     return config::OsTimer::NowMs();
 }
+
+/// Удержание системы от глубокого сна на время ожидания периферии.
+///
+/// ЗАЧЕМ ЭТО В МОДУЛЕ, А НЕ В ПРИКЛАДНОМ КОДЕ
+/// В глубоком сне (STOP) гаснет тактирование, поэтому незавершённый обмен по
+/// UART/I2C/DMA не продвинется НИКОГДА: задача, ждущая его без таймаута,
+/// зависла бы навсегда, а с таймаутом — потеряла бы данные, которые уже
+/// должна была принять. Пока идёт ожидание, система обязана оставаться
+/// работоспособной, и это свойство операции ввода-вывода, а не приложения:
+/// поэтому удержание берёт сам модуль (см. async::completion::wait).
+///
+/// Стоимость удержания — ноль, пока супервизор энергосбережения не
+/// инициализирован (или глубокий сон выключен).
+///
+/// ЧЕГО УДЕРЖАНИЕ НЕ ДЕЛАЕТ: оно не запрещает Sleep (WFI). Остановку ядра
+/// будит любое прерывание, в том числе от той самой периферии, — это и есть
+/// нормальное поведение ожидания.
+struct KeepAwake {
+    KeepAwake() noexcept : lease_(power::Supervisor::instance().keep_awake()) {}
+    ~KeepAwake() noexcept = default;
+
+    KeepAwake(const KeepAwake&)            = delete;
+    KeepAwake& operator=(const KeepAwake&) = delete;
+    KeepAwake(KeepAwake&&)                 = delete;
+    KeepAwake& operator=(KeepAwake&&)      = delete;
+
+    /// Удерживается ли система прямо сейчас (диагностика/тесты).
+    bool held() const noexcept { return lease_.held(); }
+
+private:
+    power::Supervisor::Lease lease_;
+};
 
 } // namespace embed::async::kernel
