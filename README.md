@@ -199,7 +199,8 @@ using UartDriver = embed::stm32::UartDriver1;
 embed::async::UartPort<UartDriver> uart;
 
 UartDriver::Config cfg{};
-cfg.baudRate = 115200u;
+cfg.baudRate   = 115200u;
+cfg.strategy   = embed::async::Strategy::Async;   // Polling | Async | Dma
 UartDriver::instance().configure(cfg);
 UartDriver::instance().open();
 
@@ -219,24 +220,103 @@ bool found[128];
 i2c.scan(found);                             // поиск устройств на шине
 ```
 
+### Как выбирается стратегия
+
+Одна и та же для mock и STM32:
+
+```cpp
+UartDriver::Config cfg{};
+cfg.baudRate = 115200u;
+cfg.strategy = embed::async::Strategy::Dma;   // Polling | Async | Dma
+UartDriver::instance().configure(cfg);        // NotSupported, если режим не поддержан
+
+UartDriver::instance().usePolling();          // сменить на лету
+UartDriver::instance().useInterrupts();       // (требуется простой: на середине
+UartDriver::instance().useDma();              //  операции вернётся Busy)
+UartDriver::strategy();                       // что выбрано сейчас
+```
+
+По умолчанию у драйверов STM32 включены прерывания (`Async`): DMA требует
+свободного канала, поэтому включается явно. У mock стратегия задана шаблоном
+(`UartMock<Polling>` и т.п.), и `Config::strategy` только проверяется —
+запрос другого режима даёт честный `NotSupported`.
+
 ### Что делает каждая стратегия
 
-| Стратегия | Кто завершает операцию | Где реализовано |
+| Стратегия | USART1 (STM32) | I2C1 (STM32) |
 |---|---|---|
-| `Polling` | драйвер в `pollOnIrq()`, который порт вызывает в цикле ожидания | `UartMock<Polling>`, `I2cDriver1` |
-| `Async` | `USART1_IRQHandler` → `onRxIrq()/onTxIrq()`, `I2C1_EV/ER_IRQHandler` | `UartMock<Async>`, `I2cDriver1` (события) |
-| `Dma` | обработчик DMA → `onDmaComplete()` | `UartDriver1`, `UartMock<Dma>` |
+| `Polling` | `pollOnIrq()` читает SR; `RXNEIE/TXEIE/TCIE/IDLEIE` и NVIC выключены, DMA не участвует | `pollOnIrq()` крутит автомат `pump()`; `CR2` IE и NVIC выключены |
+| `Async` | прерывания `USART1_IRQHandler`: RXNE (байты), TXE (отдать байт), TC (передача завершена), IDLE (конец пачки) | `I2C1_EV_IRQHandler` (SB/ADDR/BTF/RXNE/TXE), `I2C1_ER_IRQHandler` (AF/BERR/ARLO) |
+| `Dma` | DMA1 Ch4 (TX) / Ch5 (RX): `DMAT/DMAR`, завершение TX — по TC из `USART1_IRQHandler`, RX — по IDLE или заполнению буфера | DMA1 Ch6 (TX) / Ch7 (RX): `DMAEN`, события по-прежнему по прерываниям; приём — N-1 байт через DMA, последний байт программно (NACK+STOP до его приёма) |
 
 Приложение от этого не зависит: `AsyncPort::write()`/`read()` работают
-одинаково. Это проверено тестами — один и тот же набор проверок
-прогоняется по всем трём стратегиям.
+одинаково. Что результат совпадает во всех трёх режимах, проверяют два
+набора: `uart_i2c` — на mock-драйверах, `stm32_hal_strategies` — на
+настоящих STM32-драйверах, собранных на ПК против программной модели
+регистров (см. «Тесты»).
+
+### Арбитр каналов DMA: очередь вместо Busy
+
+На STM32F1 запрос DMA **жёстко привязан к каналу** (remap запросов не
+существует), поэтому интерфейсы делят каналы: `USART1_TX` и `I2C2_TX` — это
+один и тот же DMA1 Channel4, `USART1_RX` и `I2C2_RX` — Channel5. Без арбитра
+второй интерфейс просто получал `Status::Busy`, и его запрос терялся.
+
+Арбитр (`os/interfaces/dma_arbiter.hpp`) превращает отказ в ожидание: работа
+встаёт в очередь и выполняется, когда канал освободится.
+
+```cpp
+embed::async::UartPort<embed::stm32::UartDriver1> uart;
+// Линейно: как обычный write, но при занятом канале работа ждёт в очереди.
+uart.writeQueued("payload", 7u, /*timeout_ms*/ 100u);
+
+embed::async::I2cPort<embed::stm32::I2cDriver1> i2c;
+uint8_t t = 0u;
+i2c.readRegisterQueued(embed::I2cAddress{0x48u}, 0x00u, t, 100u);
+
+// Асинхронно: submit() + ready()/status()/transferred(), затем release().
+embed::DmaJob job{};
+job.tx    = UartDriver1::kTxRequest;
+job.owner = &UartDriver1::instance();
+job.start = &my_start;          // Status (*)(void* ctx, async::completion&)
+job.ctx   = &my_ctx;
+embed::DmaTicket ticket;
+embed::DmaArbiter::instance().submit(job, ticket);
+```
+
+Что гарантируется:
+
+| Свойство | Как достигается |
+|---|---|
+| канал занят одной работой | захват через `DmaManager`, поэтому «проигравший» не выставит `DMAT/DMAR/DMAEN` |
+| разные каналы — параллельно | очередь не глобальная, а по каналам: поток АЦП не ждёт UART |
+| один интерфейс — одна работа | у драйвера один объект завершения; работы с общим `owner` выстраиваются |
+| нет взаимной блокировки | все каналы работы (например `I2C1_TX` + `I2C1_RX` у `writeRead`) захватываются **разом** |
+| порядок FIFO | кто раньше попросил — тот раньше и поедет |
+| таймаут считается от приёма | включая ожидание в очереди; истёк — работа снимается, слот и канал освобождаются |
+
+Ограничения, о которых нужно знать:
+
+* очередь **не делит** канал между перифериями внутри одной операции — это
+  невозможно аппаратно; работы на общем канале последовательны;
+* глубина очереди статическая (`config::DMA_ARBITER_JOBS`, по умолчанию 4 —
+  это ~520 байт RAM); переполнение даёт честный `Status::NoMemory`;
+* работа, которой интерфейс занят обменом **вне** арбитра (например вызовом
+  `port.write()` напрямую), завершится статусом драйвера (обычно `Busy`);
+* арбитр защищает только тех, кто ходит к DMA через `DmaManager` (АЦП в
+  проекте настраивает канал напрямую — его канал арбитру не виден);
+* обёртки `*Queued` требуют `Strategy::Dma`: иначе вернётся `NotSupported`
+  (занимать канал под обмен по прерываниям бессмысленно).
 
 ### Как написать свой драйвер
 
 Драйвер наследует `IUart<СвойДрайвер>` или `II2c<СвойДрайвер>` и реализует:
 
 ```cpp
-static constexpr async::Strategy kStrategy;   // Polling/Async/Dma
+// Стратегия: ЛИБО функция (режим можно менять на лету), ЛИБО константа.
+static async::Strategy strategy() noexcept;   // как у STM32-драйверов
+static constexpr async::Strategy kStrategy;   // как у mock: режим фиксирован
+
 static constexpr bool           kHasDma;
 static constexpr Size           kMaxChunk;    // предел одного обмена
 static СвойДрайвер& instance() noexcept;      // единственный экземпляр
@@ -376,12 +456,51 @@ D::derive_shared_secret_bytes(priv, peer_pub, secret);
 ./build.sh mock
 ctest --test-dir .build/mock --output-on-failure
 # или напрямую:
-.build/mock/tests/mc_tests          # ядро: 40 проверок
-.build/mock/tests/mc_tests_crypto   # криптография: 187 проверок
+.build/mock/tests/mc_tests           # ядро: 210 проверок
+.build/mock/tests/mc_tests_async     # async IO: 54 проверки
+.build/mock/tests/mc_tests_periph    # UART/I2C на mock: 192 проверки
+.build/mock/tests/mc_tests_stm32hal  # HAL-логика STM32: 257 проверок
+.build/mock/tests/mc_tests_crypto    # криптография: 187 проверок
+.build/mock/tests/mc_tests_dma_arbiter  # арбитр каналов: 80 проверок
 ```
 
-`ctest` прогоняет четыре набора: `core_selftest`, `async_io`, `uart_i2c` и
-`crypto`.
+`ctest` прогоняет шесть наборов: `core_selftest`, `async_io`, `uart_i2c`,
+`stm32_hal_strategies`, `dma_arbiter` и `crypto`.
+
+Набор `dma_arbiter` (`tests/host/test_dma_arbiter.cpp`) проверяет собственно
+арбитрацию, без драйверов и железа: ожидание занятого канала (USART1_TX и
+SPI2_RX — один DMA1 Ch4), параллельность разных каналов, «одна работа на
+интерфейс», FIFO, захват пары каналов разом, завершение прямо внутри `start()`,
+ошибка старта, таймаут и отмена, переполнение очереди. Интеграция с настоящими
+драйверами (очередь из трёх запросов UART1 к занятому каналу, параллельная
+работа UART1 + I2C1) — в наборе `stm32_hal_strategies`.
+
+### HAL-логика STM32 на ПК (`stm32_hal_strategies`)
+
+Автоматы `uart_stm32.hpp`/`i2c_stm32.hpp` — это тот код, который уходит в
+прошивку, поэтому проверять их только через mock-драйверы нельзя: mock
+повторяет идею, а не реализацию. Набор `tests/host/` собирает НАСТОЯЩИЕ
+заголовки STM32-драйверов на ПК, подменив MMIO на программную модель
+регистров:
+
+* `tests/host/stm32_regs_fake.hpp` — модель USART1/I2C1/RCC/NVIC. Битовые
+  маски, имена регистров и номера IRQ берутся из настоящей CMSIS, а чтение и
+  запись регистров идут через хуки: модель видит `DR`, снимает `RXNE` при
+  чтении, ставит `ADDR` при ответе устройства и т.п.;
+* `tests/host/fake_dma.cpp` — модель DMA1, реализующая тот же контракт
+  `platform_dma_*`, что и `platforms/stm32/platform.cpp`: канал, `CPAR`,
+  `CNDTR`, флаги `TC/TE`, колбэк с `DmaCallbackContext`;
+* переключатель подмены — один `#if` в `platforms/stm32/stm32_regs.hpp`;
+  в самих драйверах ветвлений «для теста» нет.
+
+Что проверяется: завершение передачи по `TC` (а не по записи в `DR`), приём
+по `IDLE` при буфере больше пакета, выключенные прерывания и NVIC в режиме
+`Polling`, обязательные `DMAT/DMAR`/`DMAEN` в режиме `Dma`, `N-1` байт через
+DMA и последний байт программно у I2C, `NotFound` на NACK адреса, ошибки
+канала DMA.
+
+Чего этот набор НЕ делает: он не заменяет проверку на железе. Модель
+воспроизводит только то поведение регистров, на которое опираются драйверы.
 
 Набор тестов (`tests/test_os.cpp`) фиксирует каждый исправленный дефект ядра:
 арифметику `BigInt` (деление, переносы, алиасинг), бухгалтерию кучи

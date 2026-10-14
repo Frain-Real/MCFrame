@@ -3,6 +3,7 @@
 
 #include "iinterface.hpp"
 #include "../async/async_completion.hpp"
+#include "../async/async_strategy.hpp"   // async::Strategy, DriverStrategy
 
 namespace embed {
 
@@ -102,6 +103,24 @@ public:
 
     // ─────────────────────── Операции обмена ───────────────────────
 
+    /// Подключить опрос интерфейса к ожиданию (нужно только для Polling).
+    ///
+    /// AsyncPort опрашивает интерфейс сам, но методы ниже ждут completion
+    /// напрямую: без опроса драйвер в режиме Polling не завершил бы обмен
+    /// никогда (в mock это незаметно — он завершает операцию внутри start*).
+    static void armPoll(async::completion& token) noexcept {
+        if (async::DriverStrategy<Impl>::get() == async::Strategy::Polling) {
+            token.set_poll(&poll_once, nullptr);
+        }
+    }
+
+    /// Снять операцию, если она НЕ завершилась (таймаут): драйвер не должен
+    /// остаться с указателем на локальный объект завершения, который вот-вот
+    /// будет уничтожен (см. IUart::releaseIfPending).
+    void releaseIfPending(async::completion& token) noexcept {
+        if (self().pendingCompletion() == &token) (void)self().abort();
+    }
+
     /// Ожидание завершения операции по привязанному объекту.
     /// Вынесено в базу: драйверу остаётся только выставить завершение.
     static Status waitCompletion(async::completion& token,
@@ -124,6 +143,7 @@ public:
         token.reset(timeout == WaitForever ? async::WaitPolicy::Forever
                                            : async::WaitPolicy::Timeout,
                     static_cast<uint32_t>(timeout));
+        armPoll(token);
 
         const Status st = setCompletion(token);
         if (st != Status::Ok) return st;
@@ -134,6 +154,7 @@ public:
 
         (void)token.wait();
         written = token.transferred();
+        releaseIfPending(token);
         return token.status();
     }
 
@@ -147,6 +168,7 @@ public:
         token.reset(timeout == WaitForever ? async::WaitPolicy::Forever
                                            : async::WaitPolicy::Timeout,
                     static_cast<uint32_t>(timeout));
+        armPoll(token);
 
         const Status st = setCompletion(token);
         if (st != Status::Ok) return st;
@@ -157,6 +179,7 @@ public:
 
         (void)token.wait();
         bytesRead = token.transferred();
+        releaseIfPending(token);
         return token.status();
     }
 
@@ -176,6 +199,7 @@ public:
         token.reset(timeout == WaitForever ? async::WaitPolicy::Forever
                                            : async::WaitPolicy::Timeout,
                     static_cast<uint32_t>(timeout));
+        armPoll(token);
 
         const Status st = setCompletion(token);
         if (st != Status::Ok) return st;
@@ -186,6 +210,7 @@ public:
 
         (void)token.wait();
         bytesRead = token.transferred();
+        releaseIfPending(token);
         return token.status();
     }
 
@@ -244,6 +269,11 @@ protected:
 private:
     Impl&       self()       noexcept { return *static_cast<Impl*>(this); }
     const Impl& self() const noexcept { return *static_cast<const Impl*>(this); }
+
+    /// Опрос интерфейса вместо прерывания — для стратегии Polling.
+    static void poll_once(async::completion& /*c*/, void* /*arg*/) noexcept {
+        Impl::instance().pollOnIrq();
+    }
 };
 
 }

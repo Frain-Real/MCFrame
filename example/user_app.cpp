@@ -168,22 +168,30 @@ embed::Status user_app_adc_demo() noexcept {
 //
 // Главное, что здесь видно: прикладной код ПОСЛЕДОВАТЕЛЬНЫЙ и ОДИНАКОВЫЙ
 // для STM32 и mock. Ни одного колбэка. Стратегия (Polling/Async/Dma)
-// определяется драйвером, а не этим кодом.
+// выбирается в Config драйвера, а не этим кодом.
 
 namespace {
 
-// Выбор драйверов по платформе: на STM32 — USART1 с DMA,
+// Выбор драйверов по платформе: на STM32 — USART1/I2C1 (реальные регистры),
 // на mock — эмулятор, прогоняющий тот же код без платы.
 #ifdef MCFRAME_TARGET_MCU
 using UartDriver = embed::stm32::UartDriver1;
 using I2cDriver  = embed::stm32::I2cDriver1;
 #else
 using UartDriver = embed::mock::UartMockDma;
-using I2cDriver  = embed::mock::I2cMockPolling;
+using I2cDriver  = embed::mock::I2cMockDma;
 #endif
 
 embed::async::UartPort<UartDriver> g_uart;
 embed::async::I2cPort<I2cDriver>   g_i2c;
+
+/// Стратегия интерфейсов для примера.
+///
+/// Одна и та же константа уходит в Config обоих драйверов и на STM32, и на
+/// mock: у mock она проверяется (его «железо» фиксировано шаблоном), у STM32
+/// — реально выбирает режим. Поменяйте на Async/Polling, и прикладной код
+/// ниже не изменится ни на строку — это и есть смысл трёх стратегий.
+constexpr embed::async::Strategy kDemoStrategy = embed::async::Strategy::Dma;
 
 /// Датчик на шине I2C: регистр 0x00 — температура, 0x01 — конфигурация.
 constexpr uint8_t kSensorAddr = 0x48u;
@@ -198,18 +206,33 @@ embed::Status user_app_async_demo() noexcept {
     // ── Настройка интерфейсов ──
     UartDriver::Config ucfg{};
     ucfg.baudRate = 115200u;
+    ucfg.strategy = kDemoStrategy;
     if (UartDriver::instance().configure(ucfg) != Status::Ok) return Status::HardwareError;
     if (UartDriver::instance().open() != Status::Ok) return Status::HardwareError;
 
     I2cDriver::Config icfg{};
     icfg.speed = I2cDriver::Speed::Fast400k;
     icfg.peripheralClockHz = 36000000u;          // APB1 при SYSCLK 72 МГц
+    icfg.strategy = kDemoStrategy;
     if (I2cDriver::instance().configure(icfg) != Status::Ok) return Status::HardwareError;
     if (I2cDriver::instance().open() != Status::Ok) return Status::HardwareError;
 
     // ── UART: три передачи подряд, линейно ──
     if (g_uart.writeLine("MCFrame: async io demo") != Status::Ok) return Status::HardwareError;
     if (g_uart.write("uart: line mode ok") != Status::Ok)          return Status::HardwareError;
+
+    // ── Через арбитр каналов DMA ──
+    //
+    // На STM32 каналы интерфейсов пересекаются (USART1_TX и I2C2_TX — это один
+    // DMA1 Ch4), поэтому работа не отказывает при занятом канале, а встаёт в
+    // очередь арбитра и выполняется, когда канал освободится. На mock
+    // DMA-каналов нет вовсе, и обёртка честно отвечает NotSupported — поэтому
+    // вызов только для МКУ.
+#ifdef MCFRAME_TARGET_MCU
+    if (g_uart.writeQueued("uart: queued ok", 15u, 100u) != Status::Ok) {
+        return Status::HardwareError;
+    }
+#endif
 
     // ── I2C: читаем датчик ──
     // На mock устройство нужно зарегистрировать; на STM32 отвечает железо.

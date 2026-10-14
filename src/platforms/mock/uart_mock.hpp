@@ -29,20 +29,36 @@ public:
     static constexpr Size            kMaxChunk = 64u;   // как у реального FIFO
 
     using Base    = IUart<UartMock<Strat>>;
-    using Config  = typename Base::Config;
     using Parity  = typename Base::Parity;
     using StopBits = typename Base::StopBits;
+
+    /// Конфигурация = базовая + запрошенная стратегия.
+    ///
+    /// У mock стратегия задана шаблоном (это «железо»), поэтому поле только
+    /// проверяется: запрос другой стратегии — честный NotSupported, а не
+    /// молчаливая подмена. На STM32 это же поле РЕАЛЬНО выбирает режим
+    /// (uart_stm32.hpp), поэтому прикладной код одинаков для обеих платформ.
+    struct Config : Base::Config {
+        async::Strategy strategy = Strat;
+
+        Config() = default;
+        Config(const Base::Config& base) noexcept : Base::Config(base) {}
+    };
 
     static UartMock& instance() noexcept {
         static UartMock d;
         return d;
     }
 
+    /// Стратегия драйвера: читается async::UartPort и приложением.
+    static constexpr async::Strategy strategy() noexcept { return Strat; }
+
     UartBus& bus() noexcept { return g_uart_bus; }
 
     // ─────────────────────────── Настройка ───────────────────────────
 
     Status configure(const Config& cfg) noexcept {
+        if (cfg.strategy != Strat) return Status::NotSupported;   // не наше «железо»
         cfg_ = cfg;
         if (cfg.baudRate == 0u) return Status::InvalidArg;
         configured_ = true;

@@ -466,6 +466,60 @@ void test_uart_driver_level() {
     }
 }
 
+// ─────────────── Стратегия: Config + проверка у драйверов (mock) ─────────────
+//
+// Тот же API, что и у STM32-драйверов (uart_stm32.hpp/i2c_stm32.hpp), где
+// Config::strategy РЕАЛЬНО выбирает режим. У mock «железо» фиксировано
+// шаблоном, поэтому запрос другого режима обязан давать NotSupported —
+// иначе прикладной код молча работал бы не в том режиме, который просил.
+
+void test_strategy_api() {
+    (void)std::puts("стратегия: Config и strategy() у mock-драйверов:");
+
+    // ── UART ──
+    {
+        UartMockPolling::Config cfg{};
+        cfg.baudRate = 115200u;
+        check("UartMockPolling: strategy() == Polling",
+              UartMockPolling::strategy() == async::Strategy::Polling);
+        check("UartMockPolling: своя стратегия принята",
+              UartMockPolling::instance().configure(cfg) == Status::Ok);
+
+        cfg.strategy = async::Strategy::Dma;
+        check("UartMockPolling: чужая стратегия -> NotSupported",
+              UartMockPolling::instance().configure(cfg) == Status::NotSupported);
+
+        UartMockAsync::Config acfg{};
+        acfg.baudRate = 115200u;
+        check("UartMockAsync: strategy() == Async",
+              UartMockAsync::strategy() == async::Strategy::Async);
+        check("UartMockAsync: configure() == Ok",
+              UartMockAsync::instance().configure(acfg) == Status::Ok);
+
+        async::UartPort<UartMockDma> port;
+        check("порт видит стратегию драйвера",
+              port.strategy() == async::Strategy::Dma);
+    }
+
+    // ── I2C ──
+    {
+        I2cMockDma::Config cfg{};
+        cfg.peripheralClockHz = 36000000u;
+        check("I2cMockDma: strategy() == Dma",
+              I2cMockDma::strategy() == async::Strategy::Dma);
+        check("I2cMockDma: configure() == Ok",
+              I2cMockDma::instance().configure(cfg) == Status::Ok);
+
+        cfg.strategy = async::Strategy::Polling;
+        check("I2cMockDma: чужая стратегия -> NotSupported",
+              I2cMockDma::instance().configure(cfg) == Status::NotSupported);
+
+        async::I2cPort<I2cMockAsync> port;
+        check("порт I2C видит стратегию драйвера",
+              port.strategy() == async::Strategy::Async);
+    }
+}
+
 // ───────────────────────── Запуск ядра для тестов ─────────────────────────
 
 task     g_tick_tcb;
@@ -501,6 +555,8 @@ int main() {
     (void)std::puts("=== UART / I2C tests (mock) ===");
 
     check("старт ядра", start_kernel());
+
+    test_strategy_api();
 
     // Один и тот же набор проверок для всех трёх стратегий:
     // это и доказывает, что результат не зависит от стратегии.

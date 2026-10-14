@@ -13,6 +13,7 @@ DmaManager& DmaManager::instance() noexcept {
 }
 
 Status DmaManager::init() noexcept {
+    Lock lock;
     if (initialized_) return Status::Ok;
 
     const uint8_t max_ch = platform_dma_max_channels();
@@ -36,6 +37,10 @@ Status DmaManager::init() noexcept {
 Status DmaManager::acquire(config::DmaRequest request,
                            DmaChannel& outChannel,
                            bool hint_tx) noexcept {
+    // Состояние каналов меняют И задача, и обработчик прерывания DMA
+    // (арбитр завершает работу из ISR), поэтому доступ под критической секцией.
+    Lock lock;
+
     if (!initialized_) return Status::InvalidArg;
     if (request == config::DmaRequest::None || request >= config::DmaRequest::Count_) {
         return Status::InvalidArg;
@@ -59,11 +64,23 @@ Status DmaManager::acquire(config::DmaRequest request,
         if (ch_id >= config::TOTAL_CHANNELS) continue;
 
         ChannelState& st = states_[ch_id];
-        if (st.occupied) continue;
 
-        st.occupied = true;
-        st.owned    = true;
-        st.request  = request;
+        if (st.occupied) {
+            // Тот же запрос уже держит этот канал (арбитр, запускающий работу):
+            // это ВТОРАЯ ССЫЛКА на тот же канал, а не конфликт двух периферий.
+            if (st.owned && st.request == request && st.holders != 0u &&
+                st.holders != 0xFFu) {
+                ++st.holders;
+                outChannel = DmaChannel(ch_id);
+                return Status::Ok;
+            }
+            continue;   // канал занят ДРУГИМ запросом — конфликт каналов
+        }
+
+        st.occupied   = true;
+        st.owned      = true;
+        st.holders    = 1u;
+        st.request    = request;
         st.configured = false;
 
         outChannel = DmaChannel(ch_id);
@@ -74,12 +91,24 @@ Status DmaManager::acquire(config::DmaRequest request,
 }
 
 Status DmaManager::release(DmaChannel& channel) noexcept {
+    Lock lock;
+
     if (!initialized_)    return Status::InvalidArg;
     if (!channel.valid()) return Status::InvalidArg;
 
     const uint8_t id = channel.id();
+    if (id >= config::TOTAL_CHANNELS) return Status::InvalidArg;
+
     ChannelState& st = states_[id];
     if (!st.owned) return Status::Unavailable;
+
+    // Ссылок было больше одной — снимаем только свою, канал остаётся за
+    // другим владельцем (арбитром). Гасим канал, лишь когда ушла последняя.
+    if (st.holders > 1u) {
+        --st.holders;
+        channel = DmaChannel{};
+        return Status::Ok;
+    }
 
     platform_dma_stop(id);
     platform_dma_set_callback(id, nullptr, nullptr);
@@ -89,6 +118,30 @@ Status DmaManager::release(DmaChannel& channel) noexcept {
 
     channel = DmaChannel{};
     return Status::Ok;
+}
+
+bool DmaManager::channelAvailable(config::DmaRequest request) const noexcept {
+    if (request == config::DmaRequest::None) return false;
+
+    for (uint8_t i = 0; i < config::mappings_count; ++i) {
+        if (config::mappings[i].request != request) continue;
+
+        for (uint8_t k = 0; k < config::mappings[i].channel_count; ++k) {
+            const uint8_t ch_id = config::mappings[i].channels[k];
+            if (ch_id >= config::TOTAL_CHANNELS) continue;
+
+            // Только полностью свободный канал: занятый (даже нашим же
+            // запросом) канал новой работе не отдадут.
+            if (!states_[ch_id].occupied) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+uint8_t DmaManager::channelHolders(uint8_t channel_id) const noexcept {
+    if (channel_id >= config::TOTAL_CHANNELS) return 0u;
+    return states_[channel_id].holders;
 }
 
 Status DmaManager::configure(uint8_t id, config::DmaRequest request,
@@ -143,11 +196,8 @@ void DmaManager::onTransferComplete(uint8_t channel_id, Status result) noexcept 
     if (!st.cb) return;
 
     // Контекст на стеке: колбэк обязан скопировать данные, если сохраняет.
-    struct CbContext {
-        uint8_t channel;
-        Status  result;
-        void*   user;
-    } ctx{ channel_id, result, st.cb_arg };
+    // Тип общий с платформенным обработчиком (см. dma_manager.hpp).
+    DmaCallbackContext ctx{ channel_id, result, st.cb_arg };
 
     st.cb(&ctx);
 }

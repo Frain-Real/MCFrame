@@ -388,14 +388,9 @@ void platform_dma_irq_handler(uint8_t global_id) noexcept {
     void*      arg = g_callbacks[global_id].arg;
     if (!cb) return;
 
-    // Контекст живёт на стеке обработчика. Если пользователю нужны данные
-    // надолго — он обязан их скопировать.
-    struct CbContext {
-        uint8_t channel;
-        Status  result;
-        void*   user;
-    } ctx{ global_id, result, arg };
-
+    // Контекст живёт на стеке обработчика. Тип — общий для ядра и драйверов
+    // (dma_manager.hpp): драйвер обязан читать свой указатель из поля user.
+    DmaCallbackContext ctx{ global_id, result, arg };
     cb(&ctx);
 }
 
@@ -408,7 +403,9 @@ void platform_dma_irq_handler(uint8_t global_id) noexcept {
 // драйверов (handleIrq / pump).
 
 extern "C" void USART1_IRQHandler(void) {
-    embed::stm32::UartDriver1::instance().onRxIrq();
+    // Одно прерывание на всё: RXNE, TXE, TC, IDLE и ошибки приёма.
+    // Автомат сам разбирает SR, поэтому отдельного «TX-обработчика» нет.
+    embed::stm32::UartDriver1::instance().onIrq();
 }
 
 extern "C" void I2C1_EV_IRQHandler(void) {

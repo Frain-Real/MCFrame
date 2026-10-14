@@ -21,20 +21,36 @@ public:
 
     using Base    = II2c<I2cMock<Strat>>;
     using Address = I2cAddress;
-    using Config  = typename Base::Config;
     using Speed   = typename Base::Speed;
     using MasterMode = typename Base::MasterMode;
+
+    /// Конфигурация = базовая + запрошенная стратегия.
+    ///
+    /// У mock стратегия задана шаблоном (это «железо»), поэтому поле только
+    /// проверяется: запрос другой стратегии — честный NotSupported, а не
+    /// молчаливая подмена. На STM32 то же поле РЕАЛЬНО выбирает режим
+    /// (i2c_stm32.hpp), поэтому прикладной код одинаков для обеих платформ.
+    struct Config : Base::Config {
+        async::Strategy strategy = Strat;
+
+        Config() = default;
+        Config(const Base::Config& base) noexcept : Base::Config(base) {}
+    };
 
     static I2cMock& instance() noexcept {
         static I2cMock d;
         return d;
     }
 
+    /// Стратегия драйвера: читается async::I2cPort и приложением.
+    static constexpr async::Strategy strategy() noexcept { return Strat; }
+
     I2cBus& bus() noexcept { return g_i2c_bus; }
 
     // ─────────────────────────── Настройка ───────────────────────────
 
     Status configure(const Config& cfg) noexcept {
+        if (cfg.strategy != Strat) return Status::NotSupported;   // не наше «железо»
         if (cfg.peripheralClockHz == 0u) return Status::InvalidArg;
         if (cfg.speed == Speed::FastPlus1M) return Status::NotSupported;
         cfg_ = cfg;

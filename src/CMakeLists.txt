@@ -10,7 +10,8 @@ set(OS_CORE_SOURCES
     os/core/memory/memory_manager.cpp
     os/core/memory/global_allocator.cpp
     os/core/task/sheduler.cpp
-    os/interfaces/dma_manager.cpp)
+    os/interfaces/dma_manager.cpp
+    os/interfaces/dma_arbiter.cpp)
 
 # ─────────── Криптография (не зависит от платформы) ───────────
 # Модуль целиком статический, без динамической памяти. Единицы трансляции

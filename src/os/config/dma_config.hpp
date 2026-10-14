@@ -12,6 +12,22 @@ constexpr uint8_t DMA1_CHANNELS = 7;
 constexpr uint8_t DMA2_CHANNELS = 0;
 constexpr uint8_t TOTAL_CHANNELS = DMA1_CHANNELS + DMA2_CHANNELS;
 
+/// Глубина очереди арбитра каналов DMA (dma_arbiter.hpp).
+///
+/// Очередь статическая: слот хранит саму работу, объект завершения и каналы —
+/// около 130 байт на слот (точный размер даёт DmaArbiter::static_bytes()).
+/// Четыре слота — это ~520 байт RAM; этого хватает, чтобы все каналы DMA1
+/// имели по работе в очереди. Приложению с длинной очередью запросов значение
+/// поднимается здесь или флагом -DMCFRAME_DMA_ARBITER_JOBS=n.
+///
+/// Если арбитр не используется, его объект в прошивку не попадает вовсе:
+/// единственный экземпляр — статическая переменная внутри dma_arbiter.cpp,
+/// а объектный файл линкуется только при обращении.
+#ifndef MCFRAME_DMA_ARBITER_JOBS
+#define MCFRAME_DMA_ARBITER_JOBS 4
+#endif
+constexpr uint16_t DMA_ARBITER_JOBS = MCFRAME_DMA_ARBITER_JOBS;
+
 /// Запросы DMA. Строгое перечисление вместо строк: опечатка в имени
 /// периферии теперь ошибка компиляции, а не «NotSupported» в рантайме.
 enum class DmaRequest : uint8_t {

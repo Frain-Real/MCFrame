@@ -8,6 +8,20 @@ namespace embed {
 // ─────────────── Платформенный слой (реализуется в platforms/<target>/) ──────
 uint8_t platform_dma_max_channels() noexcept;
 
+/// Контекст, который ядро передаёт колбэку канала DMA.
+///
+/// ВАЖНО про соглашение: колбэк получает указатель НА ЭТУ структуру, а не
+/// значение, переданное в DmaChannel::setCallback(). Сам пользовательский
+/// указатель лежит в поле user. Раньше тип контекста объявлялся локально
+/// в двух местах (platform.cpp и dma_manager.cpp) и драйвер не мог его
+/// назвать: UART-драйвер трактовал аргумент как собственный this и читал
+/// поля по мусорному адресу. Теперь тип один на всех.
+struct DmaCallbackContext {
+    uint8_t channel;   ///< глобальный id канала
+    Status  result;    ///< Ok либо HardwareError
+    void*   user;      ///< то, что передали в DmaChannel::setCallback()
+};
+
 /// Глобальный id канала -> (контроллер, номер канала). Живёт в платформе,
 /// чтобы ядро не знало про раскладку DMA1/DMA2.
 void global_id_to_hw(uint8_t global_id, uint8_t& ctrl, uint8_t& ch) noexcept;
@@ -123,11 +137,36 @@ public:
 
     /// Захватить канал под запрос. hint_tx выбирает направление,
     /// если для запроса есть и TX, и RX (например SPI/USART).
+    ///
+    /// ПОВТОРНЫЙ ЗАХВАТ ТОГО ЖЕ ЗАПРОСА не конфликтует сам с собой: канал уже
+    /// занят этим запросом, поэтому возвращается ОН ЖЕ, а счётчик ссылок
+    /// растёт. Так работает связка «арбитр каналов (dma_arbiter.hpp) →
+    /// драйвер»: арбитр удерживает канал на время работы целиком, а драйвер
+    /// берёт вторую ссылку на него при старте обмена.
+    ///
+    /// Освобождать обязан каждый, кто захватил: канал гасится, когда уходит
+    /// последняя ссылка. Запрос ДРУГОЙ периферии на том же канале по-прежнему
+    /// получает Status::Busy — это аппаратное ограничение F1 (запрос DMA
+    /// жёстко привязан к каналу), а не программное.
     Status acquire(config::DmaRequest request,
                    DmaChannel& outChannel,
                    bool hint_tx = true) noexcept;
 
     Status release(DmaChannel& channel) noexcept;
+
+    /// Свободен ли канал под запрос ДЛЯ НОВОГО ВЛАДЕЛЬЦА: есть ли канал,
+    /// который не захвачен НИКЕМ.
+    ///
+    /// Это строже, чем «acquire() сейчас сработает»: повторный захват того же
+    /// запроса (арбитр → драйвер) здесь свободой не считается, потому что
+    /// канал уже занят работой. Именно эту проверку делает арбитр
+    /// (dma_arbiter.hpp), когда решает, можно ли запускать работу, — и по всем
+    /// её каналам сразу, чтобы две работы с парой каналов не встали взаимной
+    /// блокировкой.
+    bool channelAvailable(config::DmaRequest request) const noexcept;
+
+    /// Сколько ссылок выдано на канал (0 — свободен). Диагностика и тесты.
+    uint8_t channelHolders(uint8_t channel_id) const noexcept;
 
     /// Вызывается платформенным обработчиком прерывания.
     void onTransferComplete(uint8_t channel_id, Status result) noexcept;
@@ -154,6 +193,8 @@ private:
         bool              occupied    = false;
         bool              owned       = false;
         bool              configured  = false;
+        /// Сколько ссылок на канал выдано: арбитр + драйвер = 2.
+        uint8_t           holders     = 0u;
         config::DmaRequest request    = config::DmaRequest::None;
         dma::Direction    direction   = dma::Direction::MemToMem;
         dma::TransferSize unit_size   = dma::TransferSize::Byte;
