@@ -9,6 +9,14 @@
 #   ./build.sh stm32 Release -DMCFRAME_LTO=OFF
 #   ./build.sh stm32 Release -DMCFRAME_STM32_DEEP_SLEEP=ON
 #
+# Схема с загрузчиком (см. README, «Загрузчик»):
+#   ./build.sh stm32 Release -DMCFRAME_IMAGE=slot   # приложение в слоте A
+# собирает ДВА образа: bootloader_fw (с 0x08000000) и example_fw (по адресу
+# слота). Раскладка слотов задаётся тут же:
+#   -DMCFRAME_FLASH_BOOT_SIZE=20K -DMCFRAME_FLASH_SLOT_SIZE=52K
+# Приложение, не влезающее в слот, — ошибка линковки, а не «странное»
+# поведение на устройстве.
+#
 # Прежде здесь был `cmake ..` без выбора платформы и без проброса флагов,
 # из-за чего собрать прошивку этим скриптом было нельзя.
 #
@@ -64,7 +72,15 @@ cmake --build "${BUILD_DIR}" --parallel
 echo
 echo "Сборка завершена: ${BUILD_DIR}"
 if [[ "${TARGET}" == "mock" ]]; then
-    echo "Запуск: ${BUILD_DIR}/example/example_host"
+    echo "Запуск:        ${BUILD_DIR}/example/example_host"
+    echo "Загрузчик:     ${BUILD_DIR}/bootloader/bootloader_host"
 else
-    echo "Прошивка: ${BUILD_DIR}/example_fw.hex (и .bin)"
+    echo "Загрузчик:     ${BUILD_DIR}/bootloader_fw.hex  (.bin) — прошивается с 0x08000000"
+    echo "Приложение:    ${BUILD_DIR}/example_fw.hex     (.bin) — по адресу слота"
+    echo
+    echo "Первая прошивка (программатором):"
+    echo "  st-flash write ${BUILD_DIR}/bootloader_fw.bin 0x08000000"
+    echo "  st-flash write ${BUILD_DIR}/example_fw.bin    0x08005000   # слот A"
+    echo "Дальше образ можно заливать по OTA (в приложении или в загрузчике,"
+    echo "если он собран с -DMCFRAME_BOOTLOADER_OTA=ON)."
 fi

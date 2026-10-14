@@ -116,7 +116,22 @@ public:
 
     Status open() noexcept {
         I2C1->CR1 |= I2C_CR1_PE;
+        // Привязываем обработчики прерываний к ЭТОМУ драйверу: в таблице
+        // векторов они вызывают хук, а не драйвер напрямую, — иначе автомат
+        // драйвера попадал бы в каждый образ, включая загрузчик, которому I2C
+        // не нужен (см. platform::Ops::i2c_bind).
+        if (platform::ops().i2c_bind != nullptr) {
+            platform::ops().i2c_bind(&I2cDriver1::irq_event_entry,
+                                     &I2cDriver1::irq_error_entry);
+        }
         return Status::Ok;
+    }
+
+    /// Точки входа прерываний: статические, потому что обработчик в таблице
+    /// векторов не знает (и не должен знать) про объект драйвера.
+    static void irq_event_entry() noexcept { instance().onCompleteIrq(); }
+    static void irq_error_entry() noexcept {
+        instance().onErrorIrq(Status::HardwareError);
     }
 
     Status close() noexcept {

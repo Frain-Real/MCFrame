@@ -394,6 +394,11 @@ void platform_dma_irq_handler(uint8_t global_id) noexcept {
     cb(&ctx);
 }
 
+/// Хуки I2C. Определены в platform_ops.cpp (там же, где хук АЦП): обработчики
+/// ниже их только вызывают, поэтому драйвер I2C в образ не попадает.
+extern void (*g_i2c_ev_hook)() noexcept;
+extern void (*g_i2c_er_hook)() noexcept;
+
 } // namespace embed
 
 // ─────────────── Обработчики прерываний USART и I2C ─────────────────────────
@@ -408,14 +413,23 @@ extern "C" void USART1_IRQHandler(void) {
     embed::stm32::UartDriver1::instance().onIrq();
 }
 
+// ── I2C: обработчик не знает про драйвер ──
+//
+// ПОЧЕМУ ЧЕРЕЗ ХУК, А НЕ НАПРЯМУЮ. Обработчик из таблицы векторов существует в
+// каждом образе, а драйвер I2C нужен далеко не каждому (загрузчику — не нужен
+// вовсе). Прямой вызов `I2cDriver1::instance()` втягивал бы автомат драйвера в
+// ЛЮБОЙ образ — на плате со 128 КБ Flash это килобайты, которых потом не
+// хватает приложению, чтобы влезть в слот. Поэтому драйвер сам регистрирует
+// свои точки входа, когда его открывают (см. II2c/ i2c_stm32.hpp: open()).
+// Ровно так же устроена привязка АЦП (Ops::adc_bind).
 extern "C" void I2C1_EV_IRQHandler(void) {
-    embed::stm32::I2cDriver1::instance().onCompleteIrq();
+    if (embed::g_i2c_ev_hook != nullptr) embed::g_i2c_ev_hook();
 }
 
 extern "C" void I2C1_ER_IRQHandler(void) {
     // В ER-обработчике важен сам факт ошибки: конкретный код (AF/BERR/ARLO)
-    // драйвер разбирает сам по SR1, поэтому здесь передаём общий статус.
-    embed::stm32::I2cDriver1::instance().onErrorIrq(embed::Status::HardwareError);
+    // драйвер разбирает сам по SR1, поэтому хуку нечего передавать.
+    if (embed::g_i2c_er_hook != nullptr) embed::g_i2c_er_hook();
 }
 
 // ─────────────── Обработчики прерываний каналов DMA1 ────────────────────────

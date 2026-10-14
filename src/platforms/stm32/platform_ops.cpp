@@ -12,6 +12,8 @@
 #include "../../os/core/task/sheduler.hpp"   // тело обработчика переключения (PendSV)
 #include "power_stm32.hpp"                   // энергосбережение (Sleep/STOP/профили)
 #include "watchdog_stm32.hpp"                // сторожевой таймер (IWDG), причина сброса
+#include "boot_stm32.hpp"                    // переход к образу прошивки (загрузчик)
+#include "flash_stm32.hpp"                   // встроенная Flash: слот OTA и записи
 
 #include "stm32f10x.h"
 #include "core_cm3.h"
@@ -35,6 +37,12 @@ namespace embed {
 /// Хук обработчика АЦП. Живёт вне platform, чтобы его видел
 /// ADC1_2_IRQHandler, объявленный на уровне embed.
 void (*g_adc_irq_hook)() noexcept = nullptr;
+
+/// Хуки обработчиков I2C (см. platform::Ops::i2c_bind): обработчик в таблице
+/// векторов зовёт хук, а не драйвер, — так образ, которому I2C не нужен, не
+/// тащит его автомат.
+void (*g_i2c_ev_hook)() noexcept = nullptr;
+void (*g_i2c_er_hook)() noexcept = nullptr;
 
 namespace platform {
 
@@ -444,6 +452,15 @@ static void platform_adc_bind(void (*on_irq)() noexcept) OS_PLATFORM_FN {
     g_adc_irq_hook = on_irq;
 }
 
+// Привязка драйвера I2C: обработчики в таблице векторов зовут хуки, а не
+// драйвер — поэтому образ, который I2C не использует, не содержит его автомат
+// (см. platform.cpp и README, «Размер образа и что его определяет»).
+static void platform_i2c_bind(void (*on_ev)() noexcept,
+                              void (*on_er)() noexcept) OS_PLATFORM_FN {
+    g_i2c_ev_hook = on_ev;
+    g_i2c_er_hook = on_er;
+}
+
 // ───────────────────────────────── Лог ──────────────────────────────────────
 // Вывод в ITM (SWO): не требует UART и не тянет newlib-форматтер.
 // Если отладчик не подключён, запись просто игнорируется ядром.
@@ -492,9 +509,12 @@ static const Ops kOps{
     /* stack_init_frame      */ &platform_stack_init_frame,
     /* idle                  */ &platform_idle,
     /* adc_bind              */ &platform_adc_bind,
+    /* i2c_bind              */ &platform_i2c_bind,
     /* log                   */ &platform_log,
     /* power                 */ &kPowerOps,
     /* watchdog              */ &kWatchdogOps,
+    /* boot                  */ &embed::stm32::boot::ops(),
+    /* flash                 */ &embed::stm32::flash::ops(),
 };
 
 const Ops& ops() noexcept { return kOps; }
@@ -519,6 +539,28 @@ bool validate() noexcept {
     if (kOps.watchdog->start == nullptr) return false;
     if (kOps.watchdog->kick == nullptr) return false;
     if (kOps.watchdog->stop == nullptr) return false;
+
+    // Переход к другой прошивке: его отсутствие проявилось бы отказом
+    // загрузчика ровно в тот момент, когда исправлять уже нечего.
+    if (kOps.i2c_bind == nullptr) return false;
+    if (kOps.boot == nullptr) return false;
+    if (kOps.boot->image_base == nullptr) return false;
+    if (kOps.boot->image_plausible == nullptr) return false;
+    if (kOps.boot->jump == nullptr) return false;
+    if (kOps.boot->relocate_vectors == nullptr) return false;
+
+    // Встроенная Flash: её отсутствие проявилось бы отказом записи посреди
+    // обновления — то есть когда слот уже стёрт, а откатиться некуда.
+    if (kOps.flash == nullptr) return false;
+    if (kOps.flash->caps == nullptr) return false;
+    if (kOps.flash->capacity == nullptr) return false;
+    if (kOps.flash->page_size == nullptr) return false;
+    if (kOps.flash->write_granularity == nullptr) return false;
+    if (kOps.flash->unlock == nullptr) return false;
+    if (kOps.flash->lock == nullptr) return false;
+    if (kOps.flash->erase == nullptr) return false;
+    if (kOps.flash->program == nullptr) return false;
+    if (kOps.flash->read == nullptr) return false;
     return true;
 }
 

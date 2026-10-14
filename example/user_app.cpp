@@ -14,7 +14,11 @@
 #include "os/adc/adc.hpp"
 #include "os/async/async_hal.hpp"
 #include "os/async/async_port.hpp"
+#include "os/boot/boot.hpp"
+#include "os/boot/boot_app.hpp"
 #include "os/config/time_config.hpp"
+#include "os/ota/ota.hpp"
+#include "os/ota/ota_transport.hpp"
 #include "os/power/power.hpp"
 #include "os/watchdog/watchdog.hpp"
 
@@ -122,6 +126,12 @@ embed::Status user_app_register(embed::scheduler& sched) noexcept {
     if (!sched.add_task(&g_worker_tcb, g_worker_stack, kWorkerStackWords)) {
         return embed::Status::NoMemory;
     }
+
+    // Задача приёма прошивки: она опрашивает интерфейс, объявленный в
+    // настройке OTA (см. user_app_ota_init).
+    st = user_app_ota_register(sched);
+    if (st != embed::Status::Ok) return st;
+
     return embed::Status::Ok;
 }
 
@@ -318,7 +328,10 @@ embed::Status user_app_async_demo() noexcept {
     return Status::Ok;
 }
 
-// ─────────────────────────────── Отчёт о RAM ────────────────────────────────
+// ──────────────────────────── Отчёты: помощник ─────────────────────────────
+//
+// Печать числа без newlib: printf на МКУ тянет форматтер и float-подсистему,
+// а отчёту нужно ровно одно беззнаковое число в десятичном виде.
 
 namespace {
 
@@ -343,6 +356,209 @@ void log_u32(const char* label, uint32_t value) {
 
 } // namespace
 
+// ────────────────────────────── OTA: обновление прошивки ─────────────────────
+//
+// Приложение — ВТОРАЯ половина схемы обновления. Первая — загрузчик
+// (bootloader/): он запускается первым, проверяет образ в слоте и умеет
+// откатиться, если новая прошивка не подтвердила себя.
+//
+// Что делает приложение:
+//   * принимает образ по протоколу OTA (тот же ota::Service, что и загрузчик);
+//   * ПОДТВЕРЖДАЕТ свою загрузку, когда дошло до конца инициализации, — без
+//     этого загрузчик будет считать её пробной и в конце концов откатится;
+//   * сообщает, ИЗ КАКОГО СЛОТА оно работает: слот берётся из VTOR (куда его
+//     загрузили), а не из константы сборки — иначе приложение, собранное для
+//     слота A и запущенное из B, «подтвердило» бы чужую загрузку.
+//
+// Раскладка берётся ИЗ ОДНОГО МЕСТА (os/boot/boot_layout.hpp + CMake): если
+// загрузчик и приложение разойдутся в адресах, загрузчик будет стирать не тот
+// слот, и это самая дорогая ошибка из возможных.
+
+namespace {
+
+// Раскладка — общая с загрузчиком и с линкером (см. cmake/firmware_layout.cmake).
+constexpr embed::boot::Layout kLayout = embed::boot::kBoard;
+
+/// Версия работающей прошивки. Уходит хосту в INFO и служит порогом для
+/// запрета откатов: без него «обновление» старым образом затирало бы рабочую
+/// версию, и устройство молча откатывалось.
+constexpr uint32_t kFirmwareVersion = 0x00010000u;
+
+embed::ota::InternalFlashStorage g_ota_flash;
+
+#ifdef MCFRAME_TARGET_MCU
+using OtaUart = embed::stm32::UartDriver1;
+#else
+using OtaUart = embed::mock::UartMockPolling;
+#endif
+
+/// Транспорт: интерфейс приёма. Порт берётся у драйвера, стратегия
+/// (Polling/Async/Dma) — его дело; для OTA это невидимо.
+embed::ota::StreamTransport<OtaUart> g_ota_transport{
+    OtaUart::instance(), embed::ota::proto::Iface::Uart, 0u, "ota-uart"};
+
+/// Участник сторожевого таймера: задача приёма обязана отмечаться.
+/// Срок взят с запасом к периоду задачи (100 мс) — OTA не должна превращаться
+/// в источник ложных сбросов, когда обновлений нет.
+embed::watchdog::Participant g_ota_wd;
+constexpr uint32_t kOtaWdTimeout = 5000u;
+
+embed::task g_ota_tcb;
+constexpr uint32_t kOtaStackWords = 96u;    // 384 Б: буферы сервиса статические
+uint32_t g_ota_stack[kOtaStackWords];
+
+embed::atomic_t<uint32_t> g_ota_polls{0u};
+
+/// Настройка загрузчика со стороны приложения: носитель и раскладка.
+embed::boot::Config& boot_cfg() noexcept {
+    static embed::boot::Config cfg = [] {
+        embed::boot::Config c{};
+        c.storage = &g_ota_flash;
+        c.layout  = kLayout;
+        return c;
+    }();
+    return cfg;
+}
+
+void ota_task(void* /*ctx*/) noexcept {
+    embed::scheduler& sched = embed::scheduler::instance();
+    for (;;) {
+        // Бюджет 50 мс: за это время сервис принимает столько кадров, сколько
+        // успело прийти, и возвращает управление — задача не «съедает» цикл,
+        // когда обновления нет.
+        (void)embed::ota::Service::instance().poll(50u);
+        (void)g_ota_polls.fetch_add(1u, embed::MemoryOrderRelaxed);
+        (void)g_ota_wd.check_in();
+        (void)sched.sleep_for(100);
+    }
+}
+
+} // namespace
+
+// ─────────────────────────── Регистрация и инициализация ───────────────────
+
+embed::Status user_app_ota_register(embed::scheduler& sched) noexcept {
+    using namespace embed;
+
+    const Status st = g_ota_tcb.init(&ota_task, nullptr, "ota", kOtaStackWords,
+                                    /*priority*/ 4u);
+    if (st != Status::Ok) return st;
+    if (!sched.add_task(&g_ota_tcb, g_ota_stack, kOtaStackWords)) {
+        return Status::NoMemory;
+    }
+    return Status::Ok;
+}
+
+embed::Status user_app_ota_init() noexcept {
+    using namespace embed;
+
+    // Окно носителя — вся встроенная Flash: смещения в раскладке заданы как
+    // «адрес в пространстве Flash» (база прибавляется платформой).
+    g_ota_flash.set_window(0u, 0u);
+
+    ota::Config cfg{};
+    // Адреса слотов, метаданных и АКТИВНЫЙ СЛОТ (по VTOR — тот, из которого мы
+    // действительно работаем) даёт общая обвязка с загрузчиком.
+    const Status fst = boot::fill_ota_config(cfg, boot_cfg());
+    if (fst == Status::NotFound) {
+        // Прошивка лежит вне слотов (залита программатором с 0x08000000):
+        // обновляться из неё нечему и некуда. Это не ошибка — просто режим без
+        // загрузчика.
+        platform_log_line("MCFrame: OTA unavailable (image is not in a slot)");
+        return Status::Ok;
+    }
+    if (fst != Status::Ok) return fst;
+
+    cfg.transport        = &g_ota_transport;   // ПО ЧЕМУ принимается
+    cfg.fw_version       = kFirmwareVersion;
+
+    // Приложение занято обменом и датчиками: обновление не должно мешать
+    // сторожу (стирание страницы идёт десятки миллисекунд) и не должно
+    // уходить в глубокий сон посреди передачи.
+    cfg.erase_stall_ms     = 1000u;
+    cfg.use_watchdog_stall = true;
+    cfg.keep_awake         = true;
+    cfg.checkpoint_bytes   = 4096u;               // как на железе
+    cfg.session_timeout_ms = 30000u;
+
+    const Status st = ota::Service::instance().init(cfg);
+    if (st != Status::Ok) return st;
+
+    if (g_ota_wd.init("ota", kOtaWdTimeout) != Status::Ok) return Status::Fault;
+
+    // ── Подтверждение собственной загрузки ──
+    //
+    // Загрузчик считает загрузку новой прошивки ПРОБНОЙ и разрешает её
+    // ограниченное число раз. Подтверждение снимает счётчик; без него
+    // устройство, у которого приложение поднимается, но не доходит до этой
+    // строки, будет откатываться на прежний слот.
+    //
+    // ВАЖНО: подтверждать нужно ПОСЛЕ того, как приложение доказало, что
+    // работает (самотест, поднятая периферия). Здесь подтверждение делается
+    // сразу после инициализации OTA: в примере нет ничего, что могло бы «упасть
+    // на старте»; в реальном приложении это место — ПОСЛЕ самотеста.
+    const Status cst = boot::confirm_self(boot_cfg());
+    if (cst == Status::NotSupported) {
+        // Запись метки не прошла: загрузчик будет считать загрузку пробной и в
+        // конце концов откатится. Молчать об этом нельзя.
+        platform_log_line("MCFrame: OTA confirm failed (flash write?)");
+    }
+    return Status::Ok;
+}
+
+void user_app_report_ota() noexcept {
+    using namespace embed;
+
+    const ota::Stats st = ota::Service::instance().stats();
+
+    platform_log_line("--- OTA ---");
+    platform_log_line("storage:");
+    platform_log_line(g_ota_flash.name());
+    platform_log_line("interface:");
+    platform_log_line(ota::proto::iface_text(ota::Service::instance().iface()));
+
+    // Из какого слота работаем: по VTOR, а не по константе сборки.
+    const uint8_t slot = boot::Loader::instance().current_slot();
+    log_u32("running from slot:", (slot == boot::Layout::kNoSlot) ? 0xFFFFFFFFu : slot);
+    log_u32("image base:", boot::Loader::instance().image_base());
+    log_u32("slot A at:", kLayout.slot_offset[0]);
+    log_u32("slot B at:", kLayout.slot_offset[1]);
+    log_u32("metadata at:", kLayout.meta_offset);
+
+    log_u32("state:", static_cast<uint32_t>(ota::Service::instance().state()));
+    log_u32("frames:", st.frames);
+    log_u32("bad frames:", st.bad_frames);
+    log_u32("resync bytes:", st.resync_bytes);
+    log_u32("sessions:", st.sessions);
+    log_u32("resumed:", st.resumed);
+    log_u32("bytes written:", st.bytes_written);
+    log_u32("page erases:", st.page_erases);
+    log_u32("verify ok:", st.verify_ok);
+    log_u32("verify fail:", st.verify_fail);
+    log_u32("readback fail:", st.readback_fail);
+    log_u32("activations:", st.activations);
+    log_u32("naks sent:", st.naks);
+
+    for (uint8_t slot = 0u; slot < 2u; ++slot) {
+        ota::SlotRecord rec{};
+        if (ota::Service::instance().slot_record(slot, rec) != Status::Ok) continue;
+        platform_log_line(slot == 0u ? "slot A:" : "slot B:");
+        log_u32("  state:", rec.state);
+        log_u32("  image size:", rec.image_size);
+        log_u32("  image crc32:", rec.image_crc32);
+        log_u32("  version:", rec.fw_version);
+        log_u32("  stored bytes:", rec.stored_bytes);
+        log_u32("  boot attempts:", rec.boot_attempts);
+    }
+
+    // Задача приёма: если счётчик не растёт, значит задача не исполняется —
+    // это видно здесь, а не в «тихом» отказе обновления.
+    log_u32("poll iterations:", g_ota_polls.load(embed::MemoryOrderRelaxed));
+    platform_log_line("-----------");
+}
+
+// ─────────────────────────────── Отчёт о RAM ────────────────────────────────
+
 void user_app_report_ram() noexcept {
     using namespace embed;
 
@@ -353,7 +569,8 @@ void user_app_report_ram() noexcept {
                                   + g_memory_manager.static_bytes()
                                   + config::OsTimer::static_bytes()
                                   + power::Supervisor::static_bytes()
-                                  + watchdog::Service::static_bytes()));
+                                  + watchdog::Service::static_bytes()
+                                  + ota::Service::static_bytes()));
 
     log_u32("  scheduler.static_bytes:",
             static_cast<uint32_t>(scheduler::instance().static_bytes()));
@@ -365,6 +582,11 @@ void user_app_report_ram() noexcept {
             static_cast<uint32_t>(power::Supervisor::static_bytes()));
     log_u32("  watchdog::Service.static_bytes:",
             static_cast<uint32_t>(watchdog::Service::static_bytes()));
+    // OTA: буферы кадров (приём и ответ), буфер проверки чтением, записи
+    // состояния слотов и контекст SHA-256. Число статическое: сколько RAM
+    // съест приём прошивки, известно заранее и не зависит от размера образа.
+    log_u32("  ota::Service::static_bytes:",
+            static_cast<uint32_t>(ota::Service::static_bytes()));
 
     log_u32("heap total, bytes:",  static_cast<uint32_t>(g_memory_manager.heap_total()));
     log_u32("heap free, bytes:",   static_cast<uint32_t>(g_memory_manager.heap_free_bytes()));

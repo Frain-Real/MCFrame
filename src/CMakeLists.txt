@@ -34,9 +34,28 @@ set(OS_CRYPTO_SOURCES
     os/crypto/ecc.cpp
     os/crypto/ecies.cpp)
 
-foreach(_f ${OS_CORE_SOURCES} ${OS_CRYPTO_SOURCES})
+# ─────────── OTA: приём и проверка новой прошивки (не зависит от платформы) ───────────
+# Модуль работает поверх двух абстракций: Storage (где лежит образ) и Transport
+# (по какому интерфейсу приходит). Конкретику дают платформенные драйверы —
+# поэтому одна и та же логика приёма, проверки и активации собирается и для
+# STM32, и для стенда на ПК.
+set(OS_OTA_SOURCES
+    os/ota/ota.cpp)
+
+# ─────────── Загрузчик: что грузить и когда передавать управление ───────────
+# Политика (выбор слота, проверка образа, окно ожидания) не зависит от
+# платформы; сам переход — контракт platform::BootOps (VTOR/MSP/обработчик
+# сброса), поэтому на стенде он моделируется, а решения проверяются тестами.
+# boot.cpp — политика (метки и переход), нужна и загрузчику, и приложению;
+# boot_app.cpp — обвязка приложения, она работает через сервис OTA и в
+# загрузчик не попадает (иначе он не влез бы в свой регион Flash).
+set(OS_BOOT_SOURCES
+    os/boot/boot.cpp
+    os/boot/boot_app.cpp)
+
+foreach(_f ${OS_CORE_SOURCES} ${OS_CRYPTO_SOURCES} ${OS_OTA_SOURCES} ${OS_BOOT_SOURCES})
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_f}")
-        message(FATAL_ERROR "Нет источника ядра/криптографии: ${_f}")
+        message(FATAL_ERROR "Нет источника ядра/криптографии/OTA: ${_f}")
     endif()
 endforeach()
 
@@ -47,7 +66,8 @@ endforeach()
 set(OS_PLATFORM_SOURCES
     platforms/${MCU_TARGET}/platform_ops.cpp)
 
-foreach(_extra platform.cpp platform_adc.cpp power_stm32.cpp watchdog_stm32.cpp)
+foreach(_extra platform.cpp platform_adc.cpp power_stm32.cpp watchdog_stm32.cpp
+               flash_stm32.cpp flash_mock.cpp boot_stm32.cpp boot_mock.cpp)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/platforms/${MCU_TARGET}/${_extra}")
         list(APPEND OS_PLATFORM_SOURCES platforms/${MCU_TARGET}/${_extra})
     endif()
@@ -88,7 +108,8 @@ if(NOT MCFRAME_OVERRIDE_GLOBAL_ALLOCATOR)
     list(REMOVE_ITEM _core os/core/memory/global_allocator.cpp)
 endif()
 
-add_library(MCFrame STATIC ${_core} ${OS_CRYPTO_SOURCES} ${OS_PLATFORM_SOURCES})
+add_library(MCFrame STATIC ${_core} ${OS_CRYPTO_SOURCES} ${OS_OTA_SOURCES}
+                          ${OS_BOOT_SOURCES} ${OS_PLATFORM_SOURCES})
 add_library(MCFrame::MCFrame ALIAS MCFrame)
 
 # Приложение видит ТОЛЬКО ядро (os/...). Платформенные заголовки — PRIVATE:

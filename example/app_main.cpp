@@ -6,6 +6,8 @@
 // собирался вовсе: glob не покрывал os/*.cpp. Точка входа обязана быть
 // у приложения, поэтому она здесь.
 // ---------------------------------------------------------------------------
+#include "os/boot/boot.hpp"
+#include "os/boot/boot_app.hpp"
 #include "os/common.hpp"
 #include "os/config/time_config.hpp"
 #include "os/core/memory/memory_manager.hpp"
@@ -18,11 +20,28 @@
 #ifdef MCFRAME_TARGET_MCU
   #include "power_stm32.hpp"   // энергосбережение платформы (RTC, профиль частоты)
 #else
+  #include "boot_mock.hpp"             // модель перехода к другой прошивке
   #include "platform_power_mock.hpp"   // модель «железа» энергосбережения на ПК
 #endif
 
 using namespace embed;
 using namespace embed::config;
+
+// ── Минимальное приложение ──────────────────────────────────────────────────
+//
+// Приложение, которое лежит В СЛОТЕ (схема с загрузчиком), ограничено размером
+// слота — на STM32F103RB это 50 КБ. «Витрина» примера (демонстрация АЦП,
+// async-ввода-вывода с UART и I2C, отчёты) занимает десятки килобайт и в слот
+// не влезает.
+//
+// Поэтому демонстрации можно выключить одной настройкой, и тогда остаётся то,
+// что действительно нужно работающему устройству: память, время, планировщик,
+// задачи, сторож, подсистема OTA и подтверждение собственной загрузки.
+// Неиспользуемые функции отчётов при этом не попадают в образ (линковка с
+// --gc-sections), поэтому выключение — это не «косметика», а реальные килобайты.
+#ifndef MCFRAME_APP_MINIMAL
+#define MCFRAME_APP_MINIMAL 0
+#endif
 
 namespace {
 
@@ -47,6 +66,17 @@ constexpr Size kStackPoolWords = 0u;    // все стеки задач стат
 } // namespace
 
 int main() {
+    // ── 0. Таблица векторов — на СВОЙ образ ──
+    //
+    // САМОЕ ПЕРВОЕ действие. Приложение, собранное в слот, после сброса
+    // наследует VTOR загрузчика: если не переставить таблицу векторов сейчас,
+    // то первое же прерывание (тик, приём байта) уйдёт в чужой код. Здесь это
+    // делается явно, потому что SystemInit живёт в библиотеке и собран один
+    // раз для всех образов — «смещение на образ» в него не передать.
+    if (boot::relocate_vectors_to_self() != Status::Ok) {
+        platform_log_line("MCFrame: vector table relocation failed");
+    }
+
     // ── 1. Память ──
     // Адреса регионов приходят от платформы (на STM32 — из линкер-скрипта),
     // поэтому никаких магических 0x20000000 в коде нет.
@@ -183,6 +213,7 @@ int main() {
         return 1;
     }
 
+#if !MCFRAME_APP_MINIMAL
     if (user_app_selftest() != Status::Ok) {
         platform_log_line("MCFrame: selftest failed");
         return 1;
@@ -197,6 +228,27 @@ int main() {
         platform_log_line("MCFrame: async io demo failed");
         return 1;
     }
+#endif
+
+#ifndef MCFRAME_TARGET_MCU
+    // На стенде «прошивка уже загружена загрузчиком в слот A»: адрес таблицы
+    // векторов ставим тот, который поставил бы загрузчик. Иначе пример честно
+    // сообщил бы «обновление недоступно» (образ вне слотов) — и вся ветка OTA
+    // на хосте осталась бы непроверенной.
+    mock_platform::boot_model().vectors = boot::kBoard.slot_offset[0];
+#endif
+
+    // ── OTA: где лежит новая прошивка и по чему принимается ──
+    //
+    // Инициализация идёт ПОСЛЕ запуска времени: сервису нужны таймауты сессии
+    // и сторож (окно на длительное стирание). Задача приёма уже зарегистрирована
+    // в user_app_register, но начнёт исполняться только после sched.start() —
+    // до этого интерфейс никто не опрашивает, и это правильно: половина
+    // подсистем ещё не готова.
+    if (user_app_ota_init() != Status::Ok) {
+        platform_log_line("MCFrame: OTA init failed");
+        return 1;
+    }
 
     // Участники сторожа: то, что обязано работать. Регистрируются ДО start()
     // сторожа — аппаратный таймаут считается по их срокам.
@@ -206,7 +258,9 @@ int main() {
     }
 
     platform_log_line("MCFrame: tasks registered, starting");
+#if !MCFRAME_APP_MINIMAL
     user_app_report_ram();
+#endif
 
     // ── 9. Запуск сторожа и планировщика ──
     //
@@ -242,8 +296,11 @@ int main() {
         OsTimer::TickIsr();
         if (i == 20u) power::Supervisor::instance().on_idle();
     }
+#if !MCFRAME_APP_MINIMAL
     user_app_report_power();
     user_app_report_watchdog();
+    user_app_report_ota();
+#endif
     platform_log_line("MCFrame: simulated run finished");
     return 0;
 #else

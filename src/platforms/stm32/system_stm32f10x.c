@@ -125,8 +125,19 @@
 /*!< Uncomment the following line if you need to relocate your vector Table in
      Internal SRAM. */ 
 /* #define VECT_TAB_SRAM */
-#define VECT_TAB_OFFSET  0x0 /*!< Vector Table base offset field. 
+/* Смещение таблицы векторов от начала Flash.
+ *
+ * ВНИМАНИЕ: этот файл собирается в БИБЛИОТЕКУ — один раз на все образы, —
+ * поэтому задать здесь «смещение на образ» через -D нельзя: оно оказалось бы
+ * общим и для загрузчика, и для приложения. Приложение, собранное в слот,
+ * переставляет таблицу векторов ВО ВРЕМЯ ВЫПОЛНЕНИЯ, по адресу из линкера:
+ * boot::relocate_vectors_to_self() в начале main (см. os/boot).
+ * Значение ниже остаётся для сборок, где этот файл компилируется на конкретный
+ * образ (например если проект вынесет его из библиотеки). */
+#ifndef VECT_TAB_OFFSET
+#define VECT_TAB_OFFSET  0x0 /*!< Vector Table base offset field.
                                   This value must be a multiple of 0x200. */
+#endif
 
 
 /**

@@ -7,6 +7,8 @@
 // ---------------------------------------------------------------------------
 #include "../../os/iplatform.hpp"
 #include "../../os/core/memory/memory_manager.hpp"
+#include "boot_mock.hpp"                  // модель перехода к другой прошивке
+#include "flash_mock.hpp"                 // модели Flash/внешней памяти + FlashOps
 #include "platform_power_mock.hpp"
 
 #include <cstdint>
@@ -77,11 +79,19 @@ static bool mock_has_ext_ram() OS_PLATFORM_FN { return false; }
 static uint32_t* mock_ext_ram_base() OS_PLATFORM_FN { return nullptr; }
 static Size mock_ext_ram_capacity() OS_PLATFORM_FN { return 0u; }
 
-static bool mock_has_ext_rom() OS_PLATFORM_FN { return false; }
-static Size mock_ext_rom_capacity() OS_PLATFORM_FN { return 0u; }
-static bool mock_ext_rom_read(uint32_t, uint8_t*, uint32_t) OS_PLATFORM_FN { return false; }
-static bool mock_ext_rom_write(uint32_t, const uint8_t*, uint32_t) OS_PLATFORM_FN { return false; }
-static bool mock_ext_rom_erase(uint32_t, uint32_t) OS_PLATFORM_FN { return false; }
+static bool mock_has_ext_rom() OS_PLATFORM_FN { return true; }
+static Size mock_ext_rom_capacity() OS_PLATFORM_FN {
+    return mock_platform::ext_rom_model().capacity();
+}
+static bool mock_ext_rom_read(uint32_t offset, uint8_t* buf, uint32_t len) OS_PLATFORM_FN {
+    return mock_platform::ext_rom_model().read(offset, buf, len);
+}
+static bool mock_ext_rom_write(uint32_t offset, const uint8_t* buf, uint32_t len) OS_PLATFORM_FN {
+    return mock_platform::ext_rom_model().program(offset, buf, len);
+}
+static bool mock_ext_rom_erase(uint32_t offset, uint32_t len) OS_PLATFORM_FN {
+    return mock_platform::ext_rom_model().erase(offset, len);
+}
 
 // ─────────────────────────────── Стек задачи ────────────────────────────────
 static void mock_stack_paint(uint32_t* stack, uint32_t words) OS_PLATFORM_FN {
@@ -114,6 +124,11 @@ static void mock_idle() OS_PLATFORM_FN {
 // ─────────────────────────── Привязка АЦП ──────────────────────────────────
 static void mock_adc_bind(void (* /*on_irq*/)() noexcept) OS_PLATFORM_FN {}
 
+// На стенде обработчиков прерываний нет: тесты вызывают точки входа драйвера
+// напрямую (onRxIrq/onCompleteIrq), поэтому привязка — no-op.
+static void mock_i2c_bind(void (* /*on_ev*/)() noexcept,
+                          void (* /*on_er*/)() noexcept) OS_PLATFORM_FN {}
+
 // ───────────────────────────────── Лог ──────────────────────────────────────
 static void mock_log(const char* str) OS_PLATFORM_FN {
     if (!str) return;
@@ -127,7 +142,6 @@ static void mock_log(const char* str) OS_PLATFORM_FN {
 // тестам, поэтому живут в своих TU.
 const PowerOps& mock_power_ops() noexcept;
 const WatchdogOps& mock_watchdog_ops() noexcept;
-
 static const Ops kOps{
     /* critical_enter        */ &mock_critical_enter,
     /* critical_exit         */ &mock_critical_exit,
@@ -158,9 +172,12 @@ static const Ops kOps{
     /* stack_init_frame      */ &mock_stack_init_frame,
     /* idle                  */ &mock_idle,
     /* adc_bind              */ &mock_adc_bind,
+    /* i2c_bind              */ &mock_i2c_bind,
     /* log                   */ &mock_log,
     /* power                 */ &mock_power_ops(),
     /* watchdog              */ &mock_watchdog_ops(),
+    /* boot                  */ &mock_platform::mock_boot_ops(),
+    /* flash                 */ &mock_platform::mock_flash_ops(),
 };
 
 const Ops& ops() OS_PLATFORM_FN { return kOps; }
@@ -188,6 +205,28 @@ bool validate() OS_PLATFORM_FN {
     if (kOps.watchdog->note_write == nullptr) return false;
     if (kOps.watchdog->note_read == nullptr) return false;
     if (kOps.watchdog->read_reset_cause == nullptr) return false;
+
+    // Переход к другой прошивке: его отсутствие проявилось бы отказом
+    // загрузчика в момент, когда исправлять уже нечего.
+    if (kOps.i2c_bind == nullptr) return false;
+    if (kOps.boot == nullptr) return false;
+    if (kOps.boot->image_base == nullptr) return false;
+    if (kOps.boot->image_plausible == nullptr) return false;
+    if (kOps.boot->jump == nullptr) return false;
+    if (kOps.boot->relocate_vectors == nullptr) return false;
+
+    // Встроенная Flash: её отсутствие проявилось бы отказом записи посреди
+    // обновления — то есть тогда, когда слот уже стёрт.
+    if (kOps.flash == nullptr) return false;
+    if (kOps.flash->caps == nullptr) return false;
+    if (kOps.flash->capacity == nullptr) return false;
+    if (kOps.flash->page_size == nullptr) return false;
+    if (kOps.flash->write_granularity == nullptr) return false;
+    if (kOps.flash->unlock == nullptr) return false;
+    if (kOps.flash->lock == nullptr) return false;
+    if (kOps.flash->erase == nullptr) return false;
+    if (kOps.flash->program == nullptr) return false;
+    if (kOps.flash->read == nullptr) return false;
     return true;
 }
 

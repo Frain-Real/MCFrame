@@ -126,6 +126,31 @@ target_include_directories(mc_tests_stm32watchdog PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/platforms/stm32)
 target_compile_definitions(mc_tests_stm32watchdog PRIVATE MCFRAME_STM32_REGS_FAKE=1)
 
+# ─────────── OTA: приём прошивки, проверка, продолжение, активация ───────────
+#
+# Собирается настоящий os/ota (тот же код, что уходит в прошивку) поверх
+# mock-платформы: носитель — модель встроенной Flash (128 КБ, страница 1 КБ,
+# запись только «в стёртое»), интерфейсы — транспорт в памяти и mock-UART.
+# Тест содержит и ВТОРУЮ сторону протокола (хост-отправителя), поэтому
+# проверяется спецификация целиком, а не только приёмник.
+add_executable(mc_tests_ota test_ota.cpp)
+target_link_libraries(mc_tests_ota PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_ota PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/platforms/${MCU_TARGET})
+
+# ─────────── Загрузчик: выбор слота, проверка образа, переход ───────────
+#
+# Собирается настоящий os/boot поверх mock-платформы: носитель — модель
+# встроенной Flash, «прыжок» — модель (boot_mock.hpp), которая запоминает адрес,
+# VTOR и запрет прерываний. Так решения загрузчика проверяются без платы, а
+# «прыжок в мусор» проверяется на РЕАЛЬНЫХ байтах вектора в модели носителя.
+add_executable(mc_tests_boot test_boot.cpp)
+target_link_libraries(mc_tests_boot PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_boot PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/platforms/${MCU_TARGET})
+
 if(BUILD_TESTING)
     add_test(NAME core_selftest COMMAND mc_tests)
     set_tests_properties(core_selftest PROPERTIES
@@ -161,6 +186,14 @@ if(BUILD_TESTING)
 
     add_test(NAME stm32_watchdog COMMAND mc_tests_stm32watchdog)
     set_tests_properties(stm32_watchdog PROPERTIES
+        FAIL_REGULAR_EXPRESSION "FAIL")
+
+    add_test(NAME boot COMMAND mc_tests_boot)
+    set_tests_properties(boot PROPERTIES
+        FAIL_REGULAR_EXPRESSION "FAIL")
+
+    add_test(NAME ota COMMAND mc_tests_ota)
+    set_tests_properties(ota PROPERTIES
         FAIL_REGULAR_EXPRESSION "FAIL")
 
     # Криптография считается дольше прочих: ECC — программная арифметика

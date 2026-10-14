@@ -27,10 +27,16 @@ endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mcu_flags.cmake)
 
+# Раскладка Flash (загрузчик + слоты + метаданные) и функция подключения
+# линкер-скрипта к конкретной прошивке. Один источник чисел на загрузчик,
+# приложение и линкер — см. cmake/firmware_layout.cmake.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/firmware_layout.cmake)
+
 # enable_testing() обязан вызываться в корневом CMakeLists до add_subdirectory,
 # иначе ctest не увидит тесты подпроекта.
 include(CTest)
 
 add_subdirectory(src)
 add_subdirectory(example)
+add_subdirectory(bootloader)
 add_subdirectory(tests)
