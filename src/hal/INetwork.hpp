@@ -44,6 +44,9 @@ public:
     virtual ~INetwork() = default;
 
     virtual Status init(const NetworkConfig& cfg) noexcept = 0;
+    virtual Status reconfigure(const NetworkConfig& cfg) noexcept {
+        (void)cfg; return Status::NotSupported;
+    }
     virtual Status connect() noexcept = 0;
     virtual Status disconnect() noexcept = 0;
     virtual Status start_ap(const NetworkConfig& cfg) noexcept = 0;

@@ -1,6 +1,13 @@
 #include "boards/f407_generic/board.hpp"
+#include "os/nvs/nvs.hpp"
 
 namespace {
+// NVS: 16 КБ после OTA-метаданных (F4 layout: boot 64K + 2*448K + meta 4K
+// = 0xF1000). На F1/G4 свободного места под такой банк нет.
+embed::ota::InternalFlashStorage g_nvs_flash{0xF1000u, 16u * 1024u};
+embed::nvs::Store                g_nvs_store;
+embed::nvs::HalNvs               g_nvs;
+
 
 embed::stm32::Uart1 g_console{16000000u};
 embed::stm32::GpioPin g_led{GPIOC, 13u};
@@ -16,6 +23,8 @@ embed::stm32::Pwm g_pwm{TIM2, 1u, g_pwm_pin, 16000000u};
 
 namespace board {
 
+embed::hal::INvs& nvs() noexcept { return g_nvs; }
+
 Uart& uart1() noexcept { return g_console; }
 Console& console() noexcept { return g_console; }
 Gpio& led() noexcept { return g_led; }
@@ -24,6 +33,9 @@ Spi& spi1() noexcept { return g_spi; }
 Pwm& pwm1() noexcept { return g_pwm; }
 
 void init() noexcept {
+    if (g_nvs_store.init({&g_nvs_flash, 8192u}) == embed::Status::Ok) {
+        g_nvs.bind(&g_nvs_store);
+    }
     embed::hal::GpioConfig out{};
     out.mode = embed::hal::GpioMode::Output;
     out.initial = false;

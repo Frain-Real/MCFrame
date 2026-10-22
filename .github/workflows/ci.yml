@@ -57,6 +57,31 @@ jobs:
           arm-none-eabi-size .build/${{ matrix.target }}/firmware/phase2/phase2_fw.elf
           arm-none-eabi-size .build/${{ matrix.target }}/firmware/phase3/phase3_fw.elf
 
+  esp32c3-idf:
+    name: esp32c3-idf-build
+    runs-on: ubuntu-latest
+    container: espressif/idf:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with ESP-IDF
+        run: |
+          cd firmware/esp32c3
+          idf.py set-target esp32c3
+          idf.py build
+
+  esp32c3-project:
+    name: esp32c3-project
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Static ESP-IDF project checks
+        run: python3 firmware/esp32c3/tools/check_project.py
+
+      - name: mcflash protocol tests
+        run: cd tools && python3 -m unittest -q test_mcflash.py
+
   esp32c3-stub:
     name: esp32c3-stub
     runs-on: ubuntu-latest

@@ -88,6 +88,7 @@ if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
     # Phase 2: пока только self-test ядра/FPU. Полное приложение — Phase 3.
     add_subdirectory(firmware/phase2)
     add_subdirectory(firmware/phase3)
+    add_subdirectory(bootloader)
 else()
     add_subdirectory(example)
     add_subdirectory(bootloader)

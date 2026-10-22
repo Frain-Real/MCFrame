@@ -22,7 +22,8 @@ g_pfnVectors:
     .word 0
     .word PendSV_Handler
     .word SysTick_Handler
-    .rept 6
+    .word PVD_IRQHandler
+    .rept 5
     .word Default_Handler
     .endr
     .word EXTI0_IRQHandler
@@ -110,6 +111,8 @@ _init:
 _fini:
     bx lr
 
+.weak PVD_IRQHandler
+.thumb_set PVD_IRQHandler, Default_Handler
 .weak EXTI0_IRQHandler
 .thumb_set EXTI0_IRQHandler, Default_Handler
 .weak EXTI1_IRQHandler

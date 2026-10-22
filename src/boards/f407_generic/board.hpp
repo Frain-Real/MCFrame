@@ -6,6 +6,7 @@
 #include "hal/ISpi.hpp"
 #include "hal/IPwm.hpp"
 #include "hal/IUart.hpp"
+#include "hal/INvs.hpp"
 #include "stm32_periph_m4.hpp"
 
 namespace board {
@@ -17,6 +18,7 @@ using Pwm = embed::hal::IPwm;
 using Gpio = embed::hal::IGpioPin;
 
 Uart& uart1() noexcept;
+embed::hal::INvs& nvs() noexcept;
 Console& console() noexcept;
 Gpio& led() noexcept;
 Gpio& spi_cs() noexcept;

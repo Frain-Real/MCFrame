@@ -110,17 +110,107 @@ const WatchdogOps kWatchdogOps{&wd_caps, &wd_closest, &wd_start, &wd_kick,
                                &wd_stop, &wd_note_write, &wd_note_read,
                                &wd_reset_cause};
 
-uint32_t flash_caps() noexcept { return 0u; }
+uint32_t flash_caps() noexcept {
+    return static_cast<uint32_t>(FlashCaps::Internal) |
+           static_cast<uint32_t>(FlashCaps::Lockable) |
+           static_cast<uint32_t>(FlashCaps::ErasePage);
+}
 uint32_t flash_base() noexcept { return kFlashBase; }
 uint32_t flash_capacity() noexcept { return kFlashCapacity; }
-uint32_t flash_page() noexcept { return 0u; }
-uint32_t flash_gran() noexcept { return 1u; }
-bool flash_unlock() noexcept { return false; }
-void flash_lock() noexcept {}
-bool flash_erase(uint32_t, uint32_t) noexcept { return false; }
-bool flash_program(uint32_t, const void*, uint32_t) noexcept { return false; }
+uint32_t flash_page() noexcept {
+#if defined(MCFRAME_SOC_STM32G4)
+    return 2048u;
+#else
+    return 128u * 1024u;
+#endif
+}
+uint32_t flash_gran() noexcept {
+#if defined(MCFRAME_SOC_STM32G4)
+    return 8u;
+#else
+    return 1u;
+#endif
+}
+bool flash_wait() noexcept {
+    uint32_t guard = 2000000u;
+    while ((FLASH->SR & FLASH_SR_BSY) != 0u) {
+        if (--guard == 0u) return false;
+    }
+    FLASH->SR = FLASH_SR_EOP;
+    return true;
+}
+bool flash_unlock() noexcept {
+    if ((FLASH->CR & FLASH_CR_LOCK) == 0u) return true;
+    FLASH->KEYR = FLASH_KEY1;
+    FLASH->KEYR = FLASH_KEY2;
+    return (FLASH->CR & FLASH_CR_LOCK) == 0u;
+}
+void flash_lock() noexcept { FLASH->CR |= FLASH_CR_LOCK; }
+bool flash_erase(uint32_t addr, uint32_t len) noexcept {
+    if (addr < kFlashBase || len == 0u) return false;
+    if ((addr - kFlashBase) + len > kFlashCapacity) return false;
+#if defined(MCFRAME_SOC_STM32G4)
+    const uint32_t page = 2048u;
+    uint32_t pos = addr;
+    while (pos < addr + len) {
+        FLASH->CR = FLASH_CR_PER | (((pos - kFlashBase) / page) << 3);
+        FLASH->CR |= FLASH_CR_STRT;
+        if (!flash_wait()) return false;
+        FLASH->CR &= ~FLASH_CR_PER;
+        pos += page;
+    }
+#else
+    static const uint32_t kSectorOffsets[] = {
+        0x00000u, 0x04000u, 0x08000u, 0x0C000u, 0x10000u, 0x20000u,
+        0x40000u, 0x60000u, 0x80000u, 0xA0000u, 0xC0000u, 0xE0000u, 0x100000u
+    };
+    uint32_t end = addr + len;
+    while (addr < end) {
+        const uint32_t off = addr - kFlashBase;
+        uint32_t sector = 0u;
+        for (uint32_t i = 0u; i < 12u; ++i) {
+            if (off >= kSectorOffsets[i]) sector = i;
+        }
+        FLASH->CR = FLASH_CR_SER | (sector << 3);
+        FLASH->CR |= FLASH_CR_STRT;
+        if (!flash_wait()) return false;
+        FLASH->CR &= ~FLASH_CR_SER;
+        addr = kFlashBase + kSectorOffsets[sector + 1u];
+    }
+#endif
+    return true;
+}
+bool flash_program(uint32_t addr, const void* data, uint32_t len) noexcept {
+    if (data == nullptr || addr < kFlashBase) return false;
+    if ((addr - kFlashBase) + len > kFlashCapacity) return false;
+#if defined(MCFRAME_SOC_STM32G4)
+    const auto* src = static_cast<const uint8_t*>(data);
+    uint32_t done = 0u;
+    while (done < len) {
+        uint64_t word = 0xFFFFFFFFFFFFFFFFull;
+        for (uint32_t i = 0u; i < 8u && done + i < len; ++i) {
+            word &= ~(0xFFull << (8u * i));
+            word |= uint64_t(src[done + i]) << (8u * i);
+        }
+        FLASH->CR |= FLASH_CR_PG;
+        *reinterpret_cast<volatile uint64_t*>(addr + done) = word;
+        if (!flash_wait()) return false;
+        FLASH->CR &= ~FLASH_CR_PG;
+        done += 8u;
+    }
+#else
+    const auto* src = static_cast<const uint8_t*>(data);
+    FLASH->CR |= FLASH_CR_PG;
+    for (uint32_t i = 0u; i < len; ++i) {
+        *reinterpret_cast<volatile uint8_t*>(addr + i) = src[i];
+        if (!flash_wait()) return false;
+    }
+    FLASH->CR &= ~FLASH_CR_PG;
+#endif
+    return true;
+}
 bool flash_read(uint32_t addr, void* data, uint32_t len) noexcept {
-    if (data == nullptr) return false;
+    if (data == nullptr || addr < kFlashBase) return false;
     const auto* src = reinterpret_cast<const uint8_t*>(addr);
     auto* dst = static_cast<uint8_t*>(data);
     for (uint32_t i = 0u; i < len; ++i) dst[i] = src[i];
@@ -130,10 +220,32 @@ const FlashOps kFlashOps{&flash_caps, &flash_base, &flash_capacity,
                          &flash_page, &flash_gran, &flash_unlock, &flash_lock,
                          &flash_erase, &flash_program, &flash_read};
 
-uint32_t boot_image_base() noexcept { return 0u; }
-bool boot_plausible(uint32_t, uint32_t) noexcept { return false; }
-bool boot_jump(uint32_t) noexcept { return false; }
-void boot_relocate(uint32_t) noexcept {}
+uint32_t boot_image_base() noexcept {
+    return *reinterpret_cast<volatile uint32_t*>(0xE000ED08u);
+}
+bool boot_plausible(uint32_t addr, uint32_t len) noexcept {
+    if (addr < kFlashBase || len < 8u) return false;
+    if ((addr - kFlashBase) + len > kFlashCapacity) return false;
+    const uint32_t sp = *reinterpret_cast<const volatile uint32_t*>(addr);
+    const uint32_t rv = *reinterpret_cast<const volatile uint32_t*>(addr + 4u);
+    const bool sp_ok = sp > 0x20000000u && sp <= 0x20000000u + 256u * 1024u;
+    const bool rv_ok = (rv & 1u) != 0u && rv >= addr && rv < addr + len;
+    return sp_ok && rv_ok;
+}
+bool boot_jump(uint32_t addr) noexcept {
+    if (!boot_plausible(addr, kFlashCapacity - (addr - kFlashBase))) return false;
+    const uint32_t sp = *reinterpret_cast<const volatile uint32_t*>(addr);
+    const uint32_t rv = *reinterpret_cast<const volatile uint32_t*>(addr + 4u);
+    __asm volatile ("cpsid i" ::: "memory");
+    *reinterpret_cast<volatile uint32_t*>(0xE000ED08u) = addr;
+    __asm volatile ("msr msp, %0" :: "r" (sp) : "memory");
+    using Entry = void (*)();
+    reinterpret_cast<Entry>(rv)();
+    return true;
+}
+void boot_relocate(uint32_t addr) noexcept {
+    *reinterpret_cast<volatile uint32_t*>(0xE000ED08u) = addr;
+}
 const BootOps kBootOps{&boot_image_base, &boot_plausible, &boot_jump,
                        &boot_relocate};
 

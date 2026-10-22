@@ -46,6 +46,10 @@ set(OS_CRYPTO_SOURCES
 set(OS_OTA_SOURCES
     os/ota/ota.cpp)
 
+# ─────────── NVS: key-value поверх ota::Storage ───────────
+set(OS_NVS_SOURCES
+    os/nvs/nvs.cpp)
+
 # ─────────── Загрузчик: что грузить и когда передавать управление ───────────
 # Политика (выбор слота, проверка образа, окно ожидания) не зависит от
 # платформы; сам переход — контракт platform::BootOps (VTOR/MSP/обработчик
@@ -57,7 +61,7 @@ set(OS_BOOT_SOURCES
     os/boot/boot.cpp
     os/boot/boot_app.cpp)
 
-foreach(_f ${OS_CORE_SOURCES} ${OS_CRYPTO_SOURCES} ${OS_OTA_SOURCES} ${OS_BOOT_SOURCES})
+foreach(_f ${OS_CORE_SOURCES} ${OS_CRYPTO_SOURCES} ${OS_OTA_SOURCES} ${OS_NVS_SOURCES} ${OS_BOOT_SOURCES})
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_f}")
         message(FATAL_ERROR "Нет источника ядра/криптографии/OTA: ${_f}")
     endif()
@@ -74,6 +78,7 @@ else()
 endif()
 
 foreach(_extra platform.cpp platform_adc.cpp power_stm32.cpp watchdog_stm32.cpp
+               brownout_stm32.cpp brownout_m4.cpp
                flash_stm32.cpp flash_mock.cpp boot_stm32.cpp boot_mock.cpp)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/platforms/${MCU_TARGET}/${_extra}")
         list(APPEND OS_PLATFORM_SOURCES platforms/${MCU_TARGET}/${_extra})
@@ -131,7 +136,7 @@ if(NOT MCFRAME_OVERRIDE_GLOBAL_ALLOCATOR)
 endif()
 
 add_library(MCFrame STATIC ${_core} ${OS_CRYPTO_SOURCES} ${OS_OTA_SOURCES}
-                          ${OS_BOOT_SOURCES} ${OS_PLATFORM_SOURCES})
+                          ${OS_NVS_SOURCES} ${OS_BOOT_SOURCES} ${OS_PLATFORM_SOURCES})
 add_library(MCFrame::MCFrame ALIAS MCFrame)
 
 # Приложение видит ТОЛЬКО ядро (os/...). Платформенные заголовки — PRIVATE:

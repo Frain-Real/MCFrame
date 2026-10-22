@@ -5,6 +5,9 @@
 - [Phase 1](phase1.md) — HAL, board, kernel facade.
 - [Phase 2](phase2.md) — ARMv7-M, FPU, F407/G431.
 - [Phase 3](phase3.md) — GPIO/SPI/PWM, EXTI, BSP, self-test.
+- [Phase 4](phase4.md) — ESP32-C3, FreeRTOS backend, IDF-проект.
+- [Phase 5](phase5.md) — WiFi/BLE, provisioning, HTTPS OTA.
+- [Phase 6](phase6.md) — NVS, mcflash, rollback, FlashOps.
 - [HAL и board](hal.md) — интерфейсы Phase 1.
 
 ## Architecture Decision Records

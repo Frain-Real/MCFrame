@@ -34,7 +34,7 @@ cmake --build build --parallel
 | `stm32` | armv7m | stm32f1 | mcframe | готово |
 | `stm32f4` | armv7m | stm32f4 | mcframe | Phase 2 (self-test) |
 | `stm32g4` | armv7m | stm32g4 | mcframe | Phase 2 (self-test) |
-| `esp32c3` | riscv32 | esp32c3 | freertos | Phase 4 (stub) |
+| `esp32c3` | riscv32 | esp32c3 | freertos | Phase 6 (NVS/OTA/rollback) |
 
 ```bash
 ./build.sh stm32f4 Release        # Phase 2 self-test (phase2_fw.elf)
@@ -44,8 +44,8 @@ python3 tools/target_plan.py      # проверка матрицы без кр�
 
 `stm32f4`/`stm32g4` уже собирают **self-test ядра** (`phase2_fw.elf`):
 ARMv7-M контекст, SysTick, FPU-фрейм. Полное приложение с периферией — Phase 3.
-C3 пока stub; при отсутствии `riscv32-esp-elf-gcc` он использует
-host-компилятор, реальная IDF-сборка потребует ESP-IDF toolchain.
+C3 — Phase 5 IDF-проект: `firmware/esp32c3/build.sh` (WiFi/BLE/OTA);
+для сборки нужен ESP-IDF 6.x.
 
 Документы Phase 0:
 
@@ -54,6 +54,9 @@ host-компилятор, реальная IDF-сборка потребует 
 - [`docs/phase1.md`](docs/phase1.md) — критерии приёмки Phase 1;
 - [`docs/phase2.md`](docs/phase2.md) — критерии приёмки Phase 2;
 - [`docs/phase3.md`](docs/phase3.md) — критерии приёмки Phase 3;
+- [`docs/phase4.md`](docs/phase4.md) — критерии приёмки Phase 4;
+- [`docs/phase5.md`](docs/phase5.md) — WiFi/BLE/provisioning/OTA;
+- [`docs/phase6.md`](docs/phase6.md) — NVS/mcflash/rollback/FlashOps;
 - [`docs/adr/001-kernel-backends.md`](docs/adr/001-kernel-backends.md) — MCFrame/FreeRTOS backend;
 - [`docs/adr/002-hal-interfaces.md`](docs/adr/002-hal-interfaces.md) — HAL-интерфейсы;
 - [`docs/adr/003-layer-model.md`](docs/adr/003-layer-model.md) — arch/soc/board/kernel;
@@ -122,6 +125,40 @@ EXTI реализован для F103/F407/G431. SPI умеет polling, IRQ и 
 трёх: F103 — DMA1 Ch2/3 через `DmaManager`, F407 — DMA2 Stream0/3, G431 —
 DMA1 + DMAMUX. F4/G4 BSP получил UART1 (polling). Self-test не проверяет
 внешний loopback без HIL.
+
+### Phase 4: ESP32-C3
+
+Добавлен IDF-проект [`firmware/esp32c3`](firmware/esp32c3):
+
+- `components/mcframe` — shell, C3 HAL/BSP;
+- FreeRTOS backend [`backend_freertos/api.hpp`](src/os/kernel/backend_freertos/api.hpp);
+- UART0 console/shell, GPIO, SPI2, LEDC PWM, NVS;
+- task watchdog и `esp_timer` адаптер;
+- `sdkconfig.defaults`, `partitions.csv`.
+
+```bash
+cd firmware/esp32c3
+idf.py set-target esp32c3
+idf.py build
+```
+
+Phase 5 добавляет WiFi AP+STA (WPA2), BLE NimBLE (peripheral GATT,
+observer, broadcaster, central connect), provisioning по BLE/UART и HTTPS OTA с TLS.
+Реальная сборка выполнена на ESP-IDF 6.0.2; `mcframe_c3.bin` занимает
+0xf5dc0 из 1 МБ.
+
+### Phase 6: NVS и OTA-инструменты
+
+- [`src/os/nvs`](src/os/nvs/nvs.hpp) — два банка, CRC32, wear leveling,
+  атомарная компакция; 29 проверок;
+- [`tools/mcflash.py`](tools/mcflash.py) — `pack/flash/verify/monitor`,
+  UART/TCP/TLS, SHA-256, resume;
+- F407/G431 `FlashOps` и загрузчик/два слота (F4 64K+448K+448K+4K,
+  G4 20K+52K+52K+4K);
+- PVD/brown-out F1/F4/G4 (`power::Brownout`);
+- NVS на F4 BSP (16 КБ после OTA-метаданных);
+- C3 `EspPartitionStorage` и bootloader rollback/confirm;
+- `docs/phase6.md` — ограничения (MOLP/TLS на C3, HIL).
 
 ### LTO
 
@@ -2138,8 +2175,8 @@ st-flash write .build/stm32/example_fw.bin    0x08005000   # слот A
   `arch × soc × kernel` для всех целей совместимы;
 * **stm32f4/stm32g4** — Phase 2/3: `phase2_fw.elf` (ядро/FPU) и
   `phase3_fw.elf` (GPIO/SPI/PWM);
-* **esp32c3** — Phase 0 stub (host-fallback при отсутствии RISC-V
-  компилятора); IDF-сборка появится в Phase 4.
+* **esp32c3** — статическая проверка IDF-проекта (`tools/check_project.py`)
+  и Phase 0 stub; полноценная IDF-сборка требует ESP-IDF.
 
 Скрипт можно запускать локально:
 
@@ -2173,6 +2210,7 @@ ctest --test-dir .build/mock --output-on-failure
 .build/mock/tests/mc_tests_stm32watchdog  # IWDG/BKP на модели: 44 проверки
 .build/mock/tests/mc_tests_ota       # OTA: протокол, слоты, выравнивание, продолжение: 290 проверок
 .build/mock/tests/mc_tests_boot      # загрузчик: выбор слота, проверка образа, переход: 96 проверок
+.build/mock/tests/mc_tests_nvs       # Phase 6: NVS, банки, CRC, power-fail: 29 проверок
 .build/mock/tests/mc_tests_fault     # P0: запись об аварии, wait queue, PI, таймаут, стек: 76 проверок
 .build/mock/tests/mc_tests_ipc       # P1: очереди/события/WorkQueue/log/shell/статистика: 98 проверок
 .build/mock/tests/mc_tests_hal       # Phase 1: HAL-интерфейсы, mock, board, kernel, arch-frame: 78 проверок

@@ -29,13 +29,27 @@
 #     уже не хватает. Это осознанный выбор, а не «недоделка».
 # ---------------------------------------------------------------------------
 
-set(MCFRAME_FLASH_BOOT_SIZE "20K" CACHE STRING
+if(MCU_TARGET STREQUAL "stm32f4")
+    set(_layout_boot "64K")
+    set(_layout_slot "448K")
+    set(_layout_total "1M")
+elseif(MCU_TARGET STREQUAL "stm32g4")
+    set(_layout_boot "20K")
+    set(_layout_slot "52K")
+    set(_layout_total "128K")
+else()
+    set(_layout_boot "20K")
+    set(_layout_slot "52K")
+    set(_layout_total "128K")
+endif()
+
+set(MCFRAME_FLASH_BOOT_SIZE "${_layout_boot}" CACHE STRING
     "Размер загрузчика (начало Flash): 0x08000000 + этот размер = слот A")
-set(MCFRAME_FLASH_SLOT_SIZE "52K" CACHE STRING
+set(MCFRAME_FLASH_SLOT_SIZE "${_layout_slot}" CACHE STRING
     "Размер одного слота приложения (кратен странице Flash)")
 set(MCFRAME_FLASH_META_SIZE "4K" CACHE STRING
     "Область метаданных OTA: 4 страницы (две копии записи на каждый слот)")
-set(MCFRAME_FLASH_TOTAL "128K" CACHE STRING
+set(MCFRAME_FLASH_TOTAL "${_layout_total}" CACHE STRING
     "Размер Flash платы: раскладка обязана в него влезать (STM32F103RB — 128K,
      STM32F103RC — 256K)")
 
@@ -141,7 +155,13 @@ math(EXPR MCFRAME_FLASH_SLOT1_ADDR "0x08000000 + ${_slot1_off}")
 math(EXPR MCFRAME_FLASH_BOOT_ADDR "0x08000000")
 
 # Скрипты образов (общая часть — linker_sections.ld).
-set(MCFRAME_LINKER_DIR "${CMAKE_SOURCE_DIR}/src/platforms/stm32" CACHE INTERNAL "")
+if(MCU_TARGET STREQUAL "stm32f4")
+    set(MCFRAME_LINKER_DIR "${CMAKE_SOURCE_DIR}/src/platforms/stm32f4" CACHE INTERNAL "")
+elseif(MCU_TARGET STREQUAL "stm32g4")
+    set(MCFRAME_LINKER_DIR "${CMAKE_SOURCE_DIR}/src/platforms/stm32g4" CACHE INTERNAL "")
+else()
+    set(MCFRAME_LINKER_DIR "${CMAKE_SOURCE_DIR}/src/platforms/stm32" CACHE INTERNAL "")
+endif()
 set(MCFRAME_LINKER_FLAT "${MCFRAME_LINKER_DIR}/linker.ld"        CACHE INTERNAL "Обычная прошивка")
 set(MCFRAME_LINKER_BOOT "${MCFRAME_LINKER_DIR}/linker_boot.ld"   CACHE INTERNAL "Загрузчик")
 set(MCFRAME_LINKER_SLOT "${MCFRAME_LINKER_DIR}/linker_slot.ld"   CACHE INTERNAL "Приложение в слоте")

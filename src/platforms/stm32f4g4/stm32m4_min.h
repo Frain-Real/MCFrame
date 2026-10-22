@@ -149,6 +149,47 @@ typedef struct {
     volatile uint32_t CCMR[4];
 } DMAMUX_TypeDef;
 
+
+typedef struct {
+    volatile uint32_t CR;
+    volatile uint32_t CSR;
+} PWR_TypeDef;
+
+#define PWR ((PWR_TypeDef*)0x40007000UL)
+
+typedef struct {
+    volatile uint32_t ACR;
+    volatile uint32_t KEYR;
+    volatile uint32_t OPTKEYR;
+    volatile uint32_t SR;
+    volatile uint32_t CR;
+    volatile uint32_t OPTCR;
+} FLASH_TypeDef;
+
+#if defined(MCFRAME_SOC_STM32G4)
+#define FLASH ((FLASH_TypeDef*)0x40022000UL)
+constexpr uint32_t FLASH_KEY1 = 0x45670123u;
+constexpr uint32_t FLASH_KEY2 = 0xCDEF89ABu;
+constexpr uint32_t FLASH_SR_BSY = 1u << 16;
+constexpr uint32_t FLASH_SR_EOP = 1u << 0;
+constexpr uint32_t FLASH_CR_PG  = 1u << 0;
+constexpr uint32_t FLASH_CR_PER = 1u << 1;
+constexpr uint32_t FLASH_CR_PNB = 0x7Fu << 3;
+constexpr uint32_t FLASH_CR_STRT = 1u << 16;
+constexpr uint32_t FLASH_CR_LOCK = 1u << 31;
+#else
+#define FLASH ((FLASH_TypeDef*)0x40023C00UL)
+constexpr uint32_t FLASH_KEY1 = 0x45670123u;
+constexpr uint32_t FLASH_KEY2 = 0xCDEF89ABu;
+constexpr uint32_t FLASH_SR_BSY = 1u << 16;
+constexpr uint32_t FLASH_SR_EOP = 1u << 0;
+constexpr uint32_t FLASH_CR_PG  = 1u << 0;
+constexpr uint32_t FLASH_CR_SER = 1u << 1;
+constexpr uint32_t FLASH_CR_SNB = 0xFu << 3;
+constexpr uint32_t FLASH_CR_STRT = 1u << 16;
+constexpr uint32_t FLASH_CR_LOCK = 1u << 31;
+#endif
+
 #define RCC    ((RCC_TypeDef*)0x40023800UL)
 #if defined(MCFRAME_SOC_STM32G4)
 #define DMA1   ((DMA1_TypeDef*)0x40020000UL)

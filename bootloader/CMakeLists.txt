@@ -23,6 +23,12 @@ if(MCU_TARGET STREQUAL "mock")
 else()
     # ─────────────────────── Прошивка ───────────────────────
     add_executable(bootloader_fw ${BOOTLOADER_SOURCES})
+    if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
+        target_sources(bootloader_fw PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/platforms/${MCU_TARGET}/startup_${MCU_TARGET}.s
+            ${CMAKE_SOURCE_DIR}/src/platforms/${MCU_TARGET}/system_${MCU_TARGET}.c)
+        target_link_options(bootloader_fw PRIVATE -nostartfiles -specs=nosys.specs)
+    endif()
     target_link_libraries(bootloader_fw PRIVATE MCFrame::MCFrame)
     target_include_directories(bootloader_fw PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 

@@ -162,6 +162,11 @@ target_include_directories(mc_tests_stm32watchdog PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/platforms/stm32)
 target_compile_definitions(mc_tests_stm32watchdog PRIVATE MCFRAME_STM32_REGS_FAKE=1)
 
+# ─────────── Phase 6: NVS, две копии банка, CRC, power-fail ───────────
+add_executable(mc_tests_nvs test_nvs.cpp)
+target_link_libraries(mc_tests_nvs PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_nvs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
 # ─────────── OTA: приём прошивки, проверка, продолжение, активация ───────────
 #
 # Собирается настоящий os/ota (тот же код, что уходит в прошивку) поверх
@@ -227,6 +232,9 @@ if(BUILD_TESTING)
     add_test(NAME boot COMMAND mc_tests_boot)
     set_tests_properties(boot PROPERTIES
         FAIL_REGULAR_EXPRESSION "FAIL")
+
+    add_test(NAME nvs COMMAND mc_tests_nvs)
+    set_tests_properties(nvs PROPERTIES FAIL_REGULAR_EXPRESSION "FAIL")
 
     add_test(NAME ota COMMAND mc_tests_ota)
     set_tests_properties(ota PROPERTIES
