@@ -16,6 +16,7 @@
 #include "os/power/power.hpp"
 #include "os/watchdog/watchdog.hpp"
 
+#include "board.hpp"
 #include "user_app.hpp"
 
 #ifdef MCFRAME_TARGET_MCU
@@ -95,6 +96,14 @@ int main() {
         platform_log_line("MCFrame: platform contract incomplete");
         return 1;
     }
+
+    // ── 2a. Плата ──
+    // Единственное место, где приложение знает про пины/периферию.
+    // В slot-сборке минимального приложения BSP не тянем: там важен каждый
+    // байт, а LED/консоль не используются.
+#if !MCFRAME_APP_MINIMAL
+    board::init();
+#endif
 
     // ── 3. Энергосбережение платформы (только на МКУ) ──
     //

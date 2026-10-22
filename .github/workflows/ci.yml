@@ -21,6 +21,58 @@ jobs:
       - name: Tests (ASan/UBSan в Debug, LTO в Release)
         run: ctest --test-dir .build/mock --output-on-failure
 
+  target-plan:
+    name: target-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check target matrix
+        run: python3 tools/target_plan.py --check
+
+  stm32-stubs:
+    name: ${{ matrix.target }}-stub
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [stm32f4, stm32g4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Configure + build Phase 0 stub
+        run: ./build.sh ${{ matrix.target }} Release
+
+      - name: Verify stub registration
+        run: |
+          test -f .build/${{ matrix.target }}/CMakeCache.txt
+          grep -q "MCFRAME_PHASE0_STUB:BOOL=ON" .build/${{ matrix.target }}/CMakeCache.txt
+          cmake --build .build/${{ matrix.target }} --target mcframe_target_stub
+
+  esp32c3-stub:
+    name: esp32c3-stub
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check C3 target plan
+        run: python3 tools/target_plan.py --target esp32c3
+
+      - name: Configure + build Phase 0 stub
+        run: ./build.sh esp32c3 Release
+
+      - name: Verify stub registration
+        run: |
+          test -f .build/esp32c3/CMakeCache.txt
+          grep -q "MCFRAME_PHASE0_STUB:BOOL=ON" .build/esp32c3/CMakeCache.txt
+          grep -q "MCFRAME_KERNEL:STRING=freertos" .build/esp32c3/CMakeCache.txt
+
   stm32:
     name: stm32-cross
     runs-on: ubuntu-latest

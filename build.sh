@@ -3,6 +3,9 @@
 #
 #   ./build.sh                 # mock (ПК), конфигурация Debug
 #   ./build.sh stm32           # прошивка STM32F103
+#   ./build.sh stm32f4         # Phase 0 stub (прошивка — Phase 2)
+#   ./build.sh stm32g4         # Phase 0 stub
+#   ./build.sh esp32c3         # Phase 0 stub (нужен ESP-IDF toolchain)
 #   ./build.sh mock Release    # mock, конфигурация Release
 #
 # Третий и последующие аргументы уходят в cmake как есть:
@@ -33,7 +36,7 @@ TOOLCHAIN="$(pwd)/cmake/toolchain-${TARGET}.cmake"
 
 if [[ ! -f "${TOOLCHAIN}" ]]; then
     echo "Неизвестная платформа: ${TARGET}" >&2
-    echo "Доступны: mock, stm32" >&2
+    echo "Доступны: mock, stm32, stm32f4, stm32g4, esp32c3" >&2
     exit 1
 fi
 
@@ -45,15 +48,19 @@ for arg in ${EXTRA_CMAKE_ARGS[@]+"${EXTRA_CMAKE_ARGS[@]}"}; do
     esac
 done
 
-if [[ "${TARGET}" != "mock" ]]; then
+if [[ "${TARGET}" == "esp32c3" ]]; then
+    # Phase 0: при отсутствии RISC-V toolchain CMake возьмёт host-компилятор
+    # только для регистрации stub-цели. Реальная прошивка — Phase 4.
+    command -v riscv32-esp-elf-gcc >/dev/null 2>&1 || {
+        echo "Phase 0: riscv32-esp-elf-gcc не найден — C3 stub на host-компиляторе." >&2; }
+elif [[ "${TARGET}" != "mock" ]]; then
     command -v arm-none-eabi-gcc >/dev/null 2>&1 || {
         echo "Не найден arm-none-eabi-gcc" >&2; exit 1; }
 
-    # В оптимизированных сборках включается LTO, а ему нужен gcc-ar: индекс
-    # символов LTO-объектов строит плагин, и обычный ar даёт на линковке
-    # «plugin needed to handle lto object». Проверяем заранее, чтобы ошибка
-    # была понятной, а не вылезла в середине сборки.
-    if [[ "${BUILD_TYPE}" != "Debug" && "${LTO_DISABLED}" -eq 0 ]]; then
+    # LTO нужен только для реальных ARM-прошивок; Phase 0 stub F4/G4 не
+    # линкуется, поэтому gcc-ar для них пока не требуется.
+    if [[ "${TARGET}" == "stm32" &&
+          "${BUILD_TYPE}" != "Debug" && "${LTO_DISABLED}" -eq 0 ]]; then
         command -v arm-none-eabi-gcc-ar >/dev/null 2>&1 || {
             echo "Не найден arm-none-eabi-gcc-ar — он нужен для LTO." >&2
             echo "Соберите Debug или добавьте аргумент -DMCFRAME_LTO=OFF." >&2
@@ -61,10 +68,16 @@ if [[ "${TARGET}" != "mock" ]]; then
     fi
 fi
 
+STUB_ARGS=()
+case "${TARGET}" in
+    stm32f4|stm32g4|esp32c3) STUB_ARGS+=("-DMCFRAME_PHASE0_STUB:BOOL=ON") ;;
+esac
+
 cmake -S . -B "${BUILD_DIR}" \
       -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
       -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
       -DMCU_TARGET="${TARGET}" \
+      ${STUB_ARGS[@]+"${STUB_ARGS[@]}"} \
       ${EXTRA_CMAKE_ARGS[@]+"${EXTRA_CMAKE_ARGS[@]}"}
 
 cmake --build "${BUILD_DIR}" --parallel
@@ -74,7 +87,7 @@ echo "Сборка завершена: ${BUILD_DIR}"
 if [[ "${TARGET}" == "mock" ]]; then
     echo "Запуск:        ${BUILD_DIR}/example/example_host"
     echo "Загрузчик:     ${BUILD_DIR}/bootloader/bootloader_host"
-else
+elif [[ "${TARGET}" == "stm32" ]]; then
     echo "Загрузчик:     ${BUILD_DIR}/bootloader_fw.hex  (.bin) — прошивается с 0x08000000"
     echo "Приложение:    ${BUILD_DIR}/example_fw.hex     (.bin) — по адресу слота"
     echo
@@ -83,4 +96,8 @@ else
     echo "  st-flash write ${BUILD_DIR}/example_fw.bin    0x08005000   # слот A"
     echo "Дальше образ можно заливать по OTA (в приложении или в загрузчике,"
     echo "если он собран с -DMCFRAME_BOOTLOADER_OTA=ON)."
+else
+    echo "Phase 0 stub: ${TARGET} зарегистрирован."
+    echo "Прошивка/драйверы появятся в Phase 2 (F4/G4) или Phase 4 (C3)."
+    echo "Проверка матрицы: python3 tools/target_plan.py --target ${TARGET}"
 fi

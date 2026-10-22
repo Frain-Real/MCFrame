@@ -23,6 +23,65 @@ cmake --build build --parallel
 `CMakeLists.txt`: это единственный способ, при котором `-mcpu/-mthumb`
 не теряются при любых внешних `-DCMAKE_*_FLAGS`.
 
+### Матрица целей (Phase 0)
+
+`MCU_TARGET` больше не сводится к `mock|stm32`. Phase 0 вводит модель
+`arch × soc × board × kernel` и регистрирует будущие цели как stub:
+
+| target | arch | soc | kernel | Phase |
+|---|---|---|---|---|
+| `mock` | host | host | mcframe | готово |
+| `stm32` | armv7m | stm32f1 | mcframe | готово |
+| `stm32f4` | armv7m | stm32f4 | mcframe | Phase 2 (stub) |
+| `stm32g4` | armv7m | stm32g4 | mcframe | Phase 2 (stub) |
+| `esp32c3` | riscv32 | esp32c3 | freertos | Phase 4 (stub) |
+
+```bash
+./build.sh stm32f4 Release        # Phase 0 stub: configure + target OK
+./build.sh stm32g4 Release        # Phase 0 stub
+python3 tools/target_plan.py      # проверка матрицы без кросс-компилятора
+```
+
+Stub **не собирает прошивку**: он проверяет, что цель, toolchain и
+`arch/soc/kernel` совместимы, и печатает `stub OK`. Реальные порты появятся в
+Phase 2 (F407/G431) и Phase 4 (C3). Для C3 при отсутствии
+`riscv32-esp-elf-gcc` stub использует host-компилятор; реальная IDF-сборка
+потребует ESP-IDF toolchain.
+
+Документы Phase 0:
+
+- [`docs/targets.md`](docs/targets.md) — матрица и CMake-опции;
+- [`docs/phase0.md`](docs/phase0.md) — критерии приёмки Phase 0;
+- [`docs/phase1.md`](docs/phase1.md) — критерии приёмки Phase 1;
+- [`docs/adr/001-kernel-backends.md`](docs/adr/001-kernel-backends.md) — MCFrame/FreeRTOS backend;
+- [`docs/adr/002-hal-interfaces.md`](docs/adr/002-hal-interfaces.md) — HAL-интерфейсы;
+- [`docs/adr/003-layer-model.md`](docs/adr/003-layer-model.md) — arch/soc/board/kernel;
+- [`docs/adr/004-esp32c3.md`](docs/adr/004-esp32c3.md) — C3 на ESP-IDF/FreeRTOS;
+- [`docs/adr/005-fpu.md`](docs/adr/005-fpu.md) — hard-float и FPU-контекст;
+- [`docs/adr/006-testing.md`](docs/adr/006-testing.md) — тестирование без HIL.
+
+### Phase 1: HAL, board и kernel facade
+
+Phase 1 вводит слой, через который приложение больше не зависит от SoC:
+
+- [`src/hal/`](src/hal) — `IGpio`, `ISpi`, `IPwm`, `IUart`, `II2c`, `IAdc`,
+  `IFlash`, `INvs`, `INetwork`, `IBle`, `SpiDevice`;
+- [`src/hal/mock/`](src/hal/mock) — mock-реализации для host-тестов;
+- [`src/os/kernel/`](src/os/kernel) — `kernel_api.hpp` и `backend_mcframe`
+  (backend_freertos — Phase 4);
+- [`src/boards/`](src/boards) — `f103_generic` и `mock_generic`;
+- [`src/board.hpp`](src/board.hpp) — единая точка входа приложения.
+
+Пример больше не включает `uart_stm32.hpp`/`i2c_stm32.hpp`: только
+`board.hpp`, а `board::Uart`/`board::I2c` выбирает BSP. `board::init()` в
+flat/mock конфигурирует LED/консоль; в минимальном slot-образе BSP не
+подключается, чтобы не тратить байты.
+
+На F103 реально работают USART1/I2C1/LED PC13; `board::spi1()` и
+`board::pwm1()` пока возвращают `NotSupported` — это Phase 3.
+`board::console()`, `board::led()`, `board::spi1()`, `board::pwm1()` уже
+проверены через mock (`tests/test_hal.cpp`, 64 проверки).
+
 ### LTO
 
 Межмодульная оптимизация включается автоматически для оптимизированных сборок
@@ -129,9 +188,14 @@ src/os/
   boot/                  загрузчик: выбор слота, проверка образа, переход
   core/memory/           менеджер памяти, аллокатор
   time/                  модуль времени, таймеры, будильники, DeferredTimer
+  kernel/                kernel_api + backend_mcframe/backend_freertos
   interfaces/            CRTP-интерфейсы (UART, I2C, DMA)
   adc/                   драйвер АЦП
   crypto/                криптография: CRC, SHA-2/3, HMAC, AES, 3DES, RSA, ECDH
+src/hal/                 HAL-интерфейсы приложения (Phase 1)
+  mock/                  mock-реализации для host-тестов
+src/boards/              BSP: f103_generic, mock_generic
+src/board.hpp            выбор BSP для приложения
 src/platforms/
   mock/                  реализация для ПК (тесты и отладка)
   stm32/                 реализация для STM32F103
@@ -139,6 +203,10 @@ src/platforms/
 
 Ядро **не содержит** адресов периферии и магических чисел: всё, что
 зависит от платформы, приходит через `embed::platform::ops()`.
+
+Phase 0 добавляет целевую модель `arch × soc × board × kernel` и документы
+[`docs/`](docs/README.md). Каталоги `arch/`, `hal/`, `soc/`, `boards/`
+появятся в Phase 1–4; текущий `src/platforms/stm32/` — реализация F103.
 
 ## Как подключить своё приложение
 
@@ -750,7 +818,7 @@ Size free_words = g_memory_manager.task_stack_high_water(&my_tcb);
 
 Ориентир для STM32F103RB (20 КБ RAM / 128 КБ Flash): пример с двумя задачами,
 АЦП, самотестами, DMA-арбитром, супервизором энергосбережения, сторожевым
-таймером и подсистемой OTA занимает **9.1 КБ RAM (45 %) и 67.3 КБ Flash (53 %)**
+таймером и подсистемой OTA занимает **9.1 КБ RAM (45 %) и 69.6 КБ Flash (54 %)**
 при сборке с LTO (`./build.sh stm32 Release`); без OTA те же подсистемы дают
 5.4 КБ RAM и 34.6 КБ Flash — разницу стоит учитывать при выборе размера
 слота — цифры берутся из отчёта линкера
@@ -1839,7 +1907,7 @@ if (bi.valid && bi.rollback_needed) (void)ota::Service::instance().rollback();
 (`ota::Service::static_bytes()`): буферы приёма и ответа, буфер проверки
 чтением, две записи состояния на слот, контекст SHA-256. В примере включение
 OTA (вместе с SHA-256 и CRC32, которые до этого не линковались) поднимает
-прошивку с 34.6 КБ Flash / 5.4 КБ RAM до **67.3 КБ Flash (53 %) / 9.1 КБ
+прошивку с 34.6 КБ Flash / 5.4 КБ RAM до **69.6 КБ Flash (54 %) / 9.1 КБ
 RAM (45 %)** на STM32F103RB при сборке с LTO — цифры из отчёта линкера, а не
 из оценки.
 
@@ -1930,7 +1998,7 @@ RAM (45 %)** на STM32F103RB при сборке с LTO — цифры из о�
 | Загрузчик без приёма OTA | ≈19.05 КБ | Отведено 20 КБ (95 %) |
 | Загрузчик С приёмом OTA | ≈48 КБ | Тогда слоты придётся уменьшить до ≈38 КБ: на 128 КБ Flash выбирать приходится осознанно |
 | «Минимальное» приложение примера | ≈51 КБ | Влезает в слот 52 КБ (демонстрации выключены: `-DMCFRAME_APP_MINIMAL=ON`) |
-| Полная «витрина» примера | ≈67 КБ | В слот 52 КБ НЕ влезает — это и есть та причина, по которой демонстрации выключаются автоматически при `-DMCFRAME_IMAGE=slot` |
+| Полная «витрина» примера | ≈69.6 КБ | В слот 52 КБ НЕ влезает — это и есть та причина, по которой демонстрации выключаются автоматически при `-DMCFRAME_IMAGE=slot` |
 
 Именно из этих чисел и получилась раскладка: 20 + 52 + 52 + 4 = 128 КБ. На
 плате с 256 КБ (STM32F103RC) приём можно оставить и в загрузчике, и в
@@ -2018,13 +2086,19 @@ st-flash write .build/stm32/example_fw.bin    0x08005000   # слот A
 
 `.github/workflows/ci.yml` проверяет то, что легко сломать незаметно:
 
-* **mock Debug** — сборка с ASan/UBSan и все 14 наборов;
+* **mock Debug** — сборка с ASan/UBSan и все 15 наборов;
 * **mock Release** — LTO-сборка (проверяет, что LTO не ломает таблицы
   векторов/`naked`-функции) и те же наборы;
 * **stm32** — кросс-сборка `flat`, `flat + shell` и `slot`, плюс бюджет
   размера: `tools/check_size.sh` требует, чтобы `bootloader_fw.bin` был
   ≤ 20 КБ, `example_fw.bin` в flat — ≤ 128 КБ, в slot — ≤ 52 КБ. «Собралось,
-  но не влезло» — ошибка CI, а не сюрприз на плате.
+  но не влезло» — ошибка CI, а не сюрприз на плате;
+* **target-matrix** — `tools/target_plan.py --check` проверяет, что
+  `arch × soc × kernel` для всех целей совместимы;
+* **stm32f4/stm32g4** — Phase 0 stub: configure + `mcframe_target_stub`
+  (прошивка появится в Phase 2);
+* **esp32c3** — Phase 0 stub (host-fallback при отсутствии RISC-V
+  компилятора); IDF-сборка появится в Phase 4.
 
 Скрипт можно запускать локально:
 
@@ -2060,12 +2134,13 @@ ctest --test-dir .build/mock --output-on-failure
 .build/mock/tests/mc_tests_boot      # загрузчик: выбор слота, проверка образа, переход: 96 проверок
 .build/mock/tests/mc_tests_fault     # P0: запись об аварии, wait queue, PI, таймаут, стек: 76 проверок
 .build/mock/tests/mc_tests_ipc       # P1: очереди/события/WorkQueue/log/shell/статистика: 98 проверок
+.build/mock/tests/mc_tests_hal       # Phase 1: HAL-интерфейсы, mock, board, kernel: 64 проверки
 ```
 
-`ctest` прогоняет четырнадцать наборов: `core_selftest`, `async_io`, `uart_i2c`,
+`ctest` прогоняет пятнадцать наборов: `core_selftest`, `async_io`, `uart_i2c`,
 `stm32_hal_strategies`, `dma_arbiter`, `power_supervisor`, `stm32_power`,
-`watchdog`, `stm32_watchdog`, `boot`, `ota`, `crypto`, `fault_and_wait` и
-`ipc_shell`.
+`watchdog`, `stm32_watchdog`, `boot`, `ota`, `crypto`, `fault_and_wait`,
+`ipc_shell` и `hal_interfaces`.
 
 Набор `dma_arbiter` (`tests/host/test_dma_arbiter.cpp`) проверяет собственно
 арбитрацию, без драйверов и железа: ожидание занятого канала (USART1_TX и

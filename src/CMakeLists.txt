@@ -92,7 +92,11 @@ if(MCU_TARGET STREQUAL "stm32")
     list(APPEND OS_PLATFORM_SOURCES
         platforms/stm32/startup_stm32f10x_ld.s
         platforms/stm32/system_stm32f10x.c
-        platforms/stm32/core_cm3.c)
+        platforms/stm32/core_cm3.c
+        boards/f103_generic/board.cpp)
+elseif(MCU_TARGET STREQUAL "mock")
+    list(APPEND OS_PLATFORM_SOURCES
+        boards/mock_generic/board.cpp)
 endif()
 
 foreach(_f ${OS_PLATFORM_SOURCES})
@@ -151,6 +155,8 @@ include(GNUInstallDirs)
 install(TARGETS MCFrame mcu_flags EXPORT MCFrameTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY os/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/os
+        FILES_MATCHING PATTERN "*.hpp")
+install(DIRECTORY hal/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/hal
         FILES_MATCHING PATTERN "*.hpp")
 install(EXPORT MCFrameTargets
         NAMESPACE MCFrame::

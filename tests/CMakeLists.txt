@@ -23,6 +23,11 @@ add_executable(mc_tests_ipc test_ipc.cpp)
 target_link_libraries(mc_tests_ipc PRIVATE MCFrame::MCFrame)
 target_include_directories(mc_tests_ipc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
+# Phase 1: HAL-интерфейсы, mock-реализации, SpiDevice, board facade, kernel API.
+add_executable(mc_tests_hal test_hal.cpp)
+target_link_libraries(mc_tests_hal PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_hal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
 add_executable(mc_tests_periph test_uart_i2c.cpp)
 target_link_libraries(mc_tests_periph PRIVATE MCFrame::MCFrame)
 target_include_directories(mc_tests_periph PRIVATE
@@ -219,5 +224,9 @@ if(BUILD_TESTING)
 
     add_test(NAME ipc_shell COMMAND mc_tests_ipc)
     set_tests_properties(ipc_shell PROPERTIES
+        FAIL_REGULAR_EXPRESSION "FAIL")
+
+    add_test(NAME hal_interfaces COMMAND mc_tests_hal)
+    set_tests_properties(hal_interfaces PROPERTIES
         FAIL_REGULAR_EXPRESSION "FAIL")
 endif()

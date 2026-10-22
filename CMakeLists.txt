@@ -6,20 +6,36 @@ cmake_minimum_required(VERSION 3.20)
 # внутри этого файла: компиляторы и CMAKE_SYSTEM_NAME обязаны быть известны
 # ДО project(), иначе CMake конфигурирует проект частично «по-хостяцки».
 # ─────────────────────────────────────────────────────────────────────────────
-set(MCU_TARGET "mock" CACHE STRING "Целевая платформа: mock | stm32")
-set_property(CACHE MCU_TARGET PROPERTY STRINGS mock stm32)
+set(MCU_TARGET "mock" CACHE STRING
+    "Целевая платформа: mock | stm32 (F103) | stm32f4 | stm32g4 | esp32c3")
+set_property(CACHE MCU_TARGET PROPERTY STRINGS
+    mock stm32 stm32f4 stm32g4 esp32c3)
 
 set(_toolchain "${CMAKE_CURRENT_SOURCE_DIR}/cmake/toolchain-${MCU_TARGET}.cmake")
 if(NOT EXISTS "${_toolchain}")
     message(FATAL_ERROR
         "Нет toolchain-файла для MCU_TARGET='${MCU_TARGET}': ${_toolchain}\n"
-        "Доступны: mock, stm32")
+        "Доступны: mock, stm32, stm32f4, stm32g4, esp32c3")
 endif()
 set(CMAKE_TOOLCHAIN_FILE "${_toolchain}" CACHE FILEPATH "Toolchain" FORCE)
 
 project(MCFrame VERSION 0.1.0 LANGUAGES C CXX ASM)
 
-message(STATUS "MCFrame: платформа=${MCU_TARGET}")
+# Модель целей: arch × soc × board × kernel. Phase 0 регистрирует F407/G431/C3
+# как stub-цели без прошивки (см. docs/adr/003-layer-model.md).
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/targets.cmake)
+mcframe_resolve_target()
+
+if(MCFRAME_PHASE0_STUB)
+    message(STATUS
+        "MCFrame: Phase 0 stub для ${MCU_TARGET}/${MCFRAME_SOC}; "
+        "прошивка появится в Phase 2/4")
+    add_custom_target(mcframe_target_stub ALL
+        COMMAND ${CMAKE_COMMAND} -E echo
+            "MCFrame Phase 0: ${MCU_TARGET} arch=${MCFRAME_ARCH} soc=${MCFRAME_SOC} kernel=${MCFRAME_KERNEL} board=${MCFRAME_BOARD} — stub OK"
+        COMMENT "Phase 0 target stub")
+    return()
+endif()
 
 # Какой образ собирает пример: flat (вся Flash) или slot (слот A).
 # Опция живёт здесь, а не только в example/: от неё зависит бюджет
@@ -52,6 +68,10 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mcu_flags.cmake)
+
+# Compile definitions целевой матрицы для ядра и приложения:
+# MCFRAME_ARCH_*, MCFRAME_SOC_*, MCFRAME_KERNEL_*, MCFRAME_BOARD_*.
+mcframe_apply_target_definitions(mcu_flags)
 
 # Раскладка Flash (загрузчик + слоты + метаданные) и функция подключения
 # линкер-скрипта к конкретной прошивке. Один источник чисел на загрузчик,

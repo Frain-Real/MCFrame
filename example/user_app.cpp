@@ -33,15 +33,9 @@
   #include "os/shell/shell_watchdog.hpp"
 #endif
 
-// Драйверы UART/I2C для текущей платформы. На STM32 это регистровые
-// драйверы, на mock — эмуляция; прикладной код ниже ОДИНАКОВ для обеих.
-#ifdef MCFRAME_TARGET_MCU
-  #include "uart_stm32.hpp"
-  #include "i2c_stm32.hpp"
-#else
-  #include "uart_mock.hpp"
-  #include "i2c_mock.hpp"
-#endif
+// Плата — единственное место, где известны USART/I2C/пины. Приложение
+// больше не включает uart_stm32.hpp/i2c_stm32.hpp напрямую.
+#include "board.hpp"
 #include "os/core/memory/memory_manager.hpp"
 #include "os/core/primitives/types.hpp"   // embed::atomic_t — аналог std::atomic
 
@@ -243,15 +237,9 @@ embed::Status user_app_adc_demo() noexcept {
 
 namespace {
 
-// Выбор драйверов по платформе: на STM32 — USART1/I2C1 (реальные регистры),
-// на mock — эмулятор, прогоняющий тот же код без платы.
-#ifdef MCFRAME_TARGET_MCU
-using UartDriver = embed::stm32::UartDriver1;
-using I2cDriver  = embed::stm32::I2cDriver1;
-#else
-using UartDriver = embed::mock::UartMockDma;
-using I2cDriver  = embed::mock::I2cMockDma;
-#endif
+// Драйверы выбирает board.hpp: на STM32 — USART1/I2C1, на mock — эмуляция.
+using UartDriver = board::Uart;
+using I2cDriver  = board::I2c;
 
 embed::async::UartPort<UartDriver> g_uart;
 embed::async::I2cPort<I2cDriver>   g_i2c;
@@ -406,11 +394,7 @@ constexpr uint32_t kFirmwareVersion = 0x00010000u;
 
 embed::ota::InternalFlashStorage g_ota_flash;
 
-#ifdef MCFRAME_TARGET_MCU
-using OtaUart = embed::stm32::UartDriver1;
-#else
-using OtaUart = embed::mock::UartMockPolling;
-#endif
+using OtaUart = board::Uart;
 
 /// Транспорт: интерфейс приёма. Порт берётся у драйвера, стратегия
 /// (Polling/Async/Dma) — его дело; для OTA это невидимо.
