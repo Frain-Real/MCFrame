@@ -30,8 +30,8 @@ jobs:
       - name: Check target matrix
         run: python3 tools/target_plan.py --check
 
-  stm32-stubs:
-    name: ${{ matrix.target }}-stub
+  stm32-phase2:
+    name: ${{ matrix.target }}-phase2
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -46,14 +46,16 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
 
-      - name: Configure + build Phase 0 stub
+      - name: Configure + build Phase 2 self-test
         run: ./build.sh ${{ matrix.target }} Release
 
-      - name: Verify stub registration
+      - name: Verify Phase 2/3 images
         run: |
-          test -f .build/${{ matrix.target }}/CMakeCache.txt
-          grep -q "MCFRAME_PHASE0_STUB:BOOL=ON" .build/${{ matrix.target }}/CMakeCache.txt
-          cmake --build .build/${{ matrix.target }} --target mcframe_target_stub
+          test -f .build/${{ matrix.target }}/firmware/phase2/phase2_fw.elf
+          test -f .build/${{ matrix.target }}/firmware/phase3/phase3_fw.elf
+          grep -q "MCFRAME_PHASE0_STUB:BOOL=OFF" .build/${{ matrix.target }}/CMakeCache.txt
+          arm-none-eabi-size .build/${{ matrix.target }}/firmware/phase2/phase2_fw.elf
+          arm-none-eabi-size .build/${{ matrix.target }}/firmware/phase3/phase3_fw.elf
 
   esp32c3-stub:
     name: esp32c3-stub

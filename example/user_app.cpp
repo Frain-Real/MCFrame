@@ -31,6 +31,7 @@
   #include "os/shell/shell.hpp"
   #include "os/shell/shell_ota.hpp"
   #include "os/shell/shell_watchdog.hpp"
+  #include "boards/common/shell_board.hpp"
 #endif
 
 // Плата — единственное место, где известны USART/I2C/пины. Приложение
@@ -481,10 +482,11 @@ embed::Status user_app_shell_register(embed::scheduler& sched) noexcept {
 
     g_shell.init(&shell_write, nullptr);
 #if !MCFRAME_APP_MINIMAL
-    // В слоте 52 КБ команды wd/ota стоят дополнительного места; в «полной»
-    // сборке они есть. ps/free/stats/log/reboot остаются всегда.
+    // В слоте 52 КБ команды wd/ota/board стоят дополнительного места; в
+    // «полной» сборке они есть. ps/free/stats/log/reboot остаются всегда.
     shell::add_watchdog_commands(g_shell);
     shell::add_ota_commands(g_shell);
+    board_shell::add_board_commands(g_shell);
 #endif
 
     const Status st = g_shell_tcb.init(&shell_task, nullptr, "shell",

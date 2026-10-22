@@ -14,6 +14,7 @@
 
 #include "uart_stm32.hpp"
 #include "i2c_stm32.hpp"
+#include "stm32_periph.hpp"
 
 namespace board {
 
@@ -28,6 +29,7 @@ using Gpio    = embed::hal::IGpioPin;
 Uart& uart1() noexcept;
 Console& console() noexcept;
 Gpio& led() noexcept;
+Gpio& spi_cs() noexcept;
 Spi& spi1() noexcept;
 Pwm& pwm1() noexcept;
 

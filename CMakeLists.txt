@@ -83,6 +83,13 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/firmware_layout.cmake)
 include(CTest)
 
 add_subdirectory(src)
-add_subdirectory(example)
-add_subdirectory(bootloader)
-add_subdirectory(tests)
+
+if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
+    # Phase 2: пока только self-test ядра/FPU. Полное приложение — Phase 3.
+    add_subdirectory(firmware/phase2)
+    add_subdirectory(firmware/phase3)
+else()
+    add_subdirectory(example)
+    add_subdirectory(bootloader)
+    add_subdirectory(tests)
+endif()

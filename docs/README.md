@@ -3,6 +3,8 @@
 - [Матрица целей](targets.md) — arch × soc × board × kernel.
 - [Phase 0](phase0.md) — что сделано и как проверить.
 - [Phase 1](phase1.md) — HAL, board, kernel facade.
+- [Phase 2](phase2.md) — ARMv7-M, FPU, F407/G431.
+- [Phase 3](phase3.md) — GPIO/SPI/PWM, EXTI, BSP, self-test.
 - [HAL и board](hal.md) — интерфейсы Phase 1.
 
 ## Architecture Decision Records

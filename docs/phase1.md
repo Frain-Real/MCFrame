@@ -12,7 +12,7 @@
 - [x] `board::Uart/I2c/Spi/Pwm/Gpio/Console`, `board::init()`
 - [x] пример использует `board.hpp`, а не `uart_stm32.hpp`
 - [x] mock-реализации HAL (`hal/mock/mock_hal.hpp`)
-- [x] тест `tests/test_hal.cpp` — 64 проверки
+- [x] тест `tests/test_hal.cpp` — 78 проверок
 
 ## Проверка
 

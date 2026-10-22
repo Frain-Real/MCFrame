@@ -16,7 +16,7 @@ set(CMAKE_OBJCOPY arm-none-eabi-objcopy    CACHE FILEPATH "")
 set(CMAKE_SIZE    arm-none-eabi-size       CACHE FILEPATH "")
 
 set(MCU_ARCH_FLAGS -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard)
-set(MCU_DEFINES -DSTM32F40_41xxx -DMCFRAME_TARGET_MCU)
+set(MCU_DEFINES -DSTM32F40_41xxx -DMCFRAME_TARGET_MCU -DMCFRAME_ARCH_FPU=1)
 set(MCU_C_FLAGS
     -Wall -Wextra
     -ffunction-sections -fdata-sections -fmerge-all-constants

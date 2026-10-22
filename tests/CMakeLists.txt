@@ -28,6 +28,27 @@ add_executable(mc_tests_hal test_hal.cpp)
 target_link_libraries(mc_tests_hal PRIVATE MCFrame::MCFrame)
 target_include_directories(mc_tests_hal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
+# Phase 2: host-модели регистров F4/G4 (пока без драйверов).
+add_executable(mc_tests_f4regs host/test_stm32f4_regs.cpp)
+target_link_libraries(mc_tests_f4regs PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_f4regs PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/host)
+
+# Phase 3: F1 GPIO/SPI/PWM на модели регистров.
+add_executable(mc_tests_stm32periph
+    host/test_stm32_periph.cpp
+    host/stm32_regs_fake.cpp
+    host/fake_dma.cpp)
+target_link_libraries(mc_tests_stm32periph PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_stm32periph PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/host
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/platforms/stm32)
+target_compile_definitions(mc_tests_stm32periph PRIVATE
+    MCFRAME_STM32_REGS_FAKE=1
+    STM32F10X_MD=1)
+
 add_executable(mc_tests_periph test_uart_i2c.cpp)
 target_link_libraries(mc_tests_periph PRIVATE MCFrame::MCFrame)
 target_include_directories(mc_tests_periph PRIVATE
@@ -228,5 +249,13 @@ if(BUILD_TESTING)
 
     add_test(NAME hal_interfaces COMMAND mc_tests_hal)
     set_tests_properties(hal_interfaces PROPERTIES
+        FAIL_REGULAR_EXPRESSION "FAIL")
+
+    add_test(NAME f4_regs COMMAND mc_tests_f4regs)
+    set_tests_properties(f4_regs PROPERTIES
+        FAIL_REGULAR_EXPRESSION "FAIL")
+
+    add_test(NAME stm32_periph COMMAND mc_tests_stm32periph)
+    set_tests_properties(stm32_periph PROPERTIES
         FAIL_REGULAR_EXPRESSION "FAIL")
 endif()

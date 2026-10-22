@@ -36,12 +36,12 @@ function(mcframe_resolve_target)
         set(_arch "armv7m")
         set(_soc  "stm32f4")
         set(_kernel "mcframe")
-        set(_stub ON)
+        set(_stub OFF)
     elseif(_target STREQUAL "stm32g4")
         set(_arch "armv7m")
         set(_soc  "stm32g4")
         set(_kernel "mcframe")
-        set(_stub ON)
+        set(_stub OFF)
     elseif(_target STREQUAL "esp32c3")
         set(_arch "riscv32")
         set(_soc  "esp32c3")
@@ -92,25 +92,10 @@ function(mcframe_resolve_target)
             "пока используется generic-конфигурация")
     endif()
 
-    if(NOT DEFINED MCFRAME_PHASE0_STUB)
-        set(MCFRAME_PHASE0_STUB "${_stub}" CACHE BOOL
-            "Phase 0: регистрировать цель без прошивки" FORCE)
-    else()
-        # Командная строка могла дать UNINITIALIZED; нормализуем тип, чтобы
-        # CMakeCache и CI-grep видели BOOL.
-        set(MCFRAME_PHASE0_STUB "${MCFRAME_PHASE0_STUB}" CACHE BOOL
-            "Phase 0: регистрировать цель без прошивки" FORCE)
-    endif()
-
-    if(MCFRAME_PHASE0_STUB AND NOT ${_stub})
-        message(FATAL_ERROR
-            "MCFrame: MCFRAME_PHASE0_STUB=ON, но '${_target}' уже собирается.")
-    endif()
-    if(NOT MCFRAME_PHASE0_STUB AND ${_stub})
-        message(FATAL_ERROR
-            "MCFrame: '${_target}' появится в Phase 2/4. "
-            "Для Phase 0 оставьте MCFRAME_PHASE0_STUB=ON.")
-    endif()
+    # Phase 0 stub — производная величина цели, а не пользовательская опция:
+    # старый кэш (Phase 0) не должен ломать переход на Phase 2.
+    set(MCFRAME_PHASE0_STUB "${_stub}" CACHE BOOL
+        "Phase 0: регистрировать цель без прошивки" FORCE)
 
     message(STATUS "MCFrame: target=${_target} arch=${MCFRAME_ARCH} "
                    "soc=${MCFRAME_SOC} board=${MCFRAME_BOARD} "

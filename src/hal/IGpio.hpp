@@ -18,6 +18,7 @@ struct GpioConfig {
     GpioPull  pull  = GpioPull::None;
     GpioSpeed speed = GpioSpeed::Low;
     bool      initial = false;   // для Output
+    uint8_t   alternate = 0u;    // AF-номер для Alternate (F4/G4)
 };
 
 using GpioIrqCallback = void (*)(void*);

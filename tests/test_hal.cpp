@@ -8,6 +8,7 @@
 #include "hal/SpiDevice.hpp"
 #include "hal/mock/mock_hal.hpp"
 #include "os/kernel/kernel_api.hpp"
+#include "arch/armv7m/frame.hpp"
 
 #include <cstdio>
 #include <type_traits>
@@ -196,6 +197,34 @@ void test_network_ble() {
     check("ble event", bctx.notified == 1 && ble.last_conn() == 1u && ble.last_attr() == 2u);
 }
 
+void frame_fn(void*) noexcept {}
+
+void test_arch_frame() {
+    (void)std::puts("arch frame:");
+    uint32_t stack[64]{};
+    static int marker = 0;
+    void (*fn)(void*) = &frame_fn;
+    uint32_t* base = &stack[64];
+
+    uint32_t* sp = embed::arch::armv7m::build_task_frame(base, fn, &marker, true);
+    check("FPU frame size", (base - sp) == 50u);
+    check("FPU R4", sp[0] == 0x04040404u);
+    check("FPU R11", sp[7] == 0x11111111u);
+    check("FPU S16..S31 zero", sp[8] == 0u && sp[23] == 0u);
+    check("FPU S0..S15 zero", sp[24] == 0u && sp[39] == 0u);
+    check("FPU FPSCR/reserved", sp[40] == 0u && sp[41] == 0u);
+    check("FPU R0 ctx", sp[42] == static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&marker)));
+    check("FPU PC", sp[48] == static_cast<uint32_t>(reinterpret_cast<uintptr_t>(fn)));
+    check("FPU xPSR Thumb", sp[49] == 0x01000000u);
+
+    uint32_t* np = embed::arch::armv7m::build_task_frame(base, fn, &marker, false);
+    check("no-FPU frame size", (base - np) == 16u);
+    check("no-FPU R4", np[0] == 0x04040404u);
+    check("no-FPU R0 ctx", np[8] == static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&marker)));
+    check("no-FPU PC", np[14] == static_cast<uint32_t>(reinterpret_cast<uintptr_t>(fn)));
+    check("no-FPU xPSR", np[15] == 0x01000000u);
+}
+
 void test_board_and_kernel() {
     (void)std::puts("board/kernel:");
     board::init();
@@ -232,6 +261,7 @@ int main() {
     test_uart_i2c_adc();
     test_storage();
     test_network_ble();
+    test_arch_frame();
     test_board_and_kernel();
     (void)std::printf("\n%d/%d проверок пройдено", g_total - g_failed, g_total);
     if (g_failed == 0) (void)std::printf(" — все тесты пройдены\n");

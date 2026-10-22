@@ -714,6 +714,19 @@ void fakeResetKeepBackup() noexcept;
 #undef USART1
 #undef I2C1
 #undef RCC
+#undef GPIOA
+#undef SPI1
+#undef TIM2
+
+// Phase 3: простые модели GPIO/SPI/TIM. Они не воспроизводят обмен, но
+// позволяют проверить раскладку конфигурационных регистров драйверов.
+static ::GPIO_TypeDef g_gpio_a{};
+static ::SPI_TypeDef  g_spi1{};
+static ::TIM_TypeDef  g_tim2{};
+
+#define GPIOA (&::g_gpio_a)
+#define SPI1  (&::g_spi1)
+#define TIM2  (&::g_tim2)
 #undef NVIC
 #undef PWR
 #undef RTC

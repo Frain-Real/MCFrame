@@ -33,12 +33,12 @@ TARGETS = {
     "stm32f4": {
         "arch": "armv7m", "soc": "stm32f4", "kernel": "mcframe",
         "board": "generic", "toolchain": "stm32f4",
-        "phase": "Phase 2", "build": False,
+        "phase": "Phase 2", "build": True,
     },
     "stm32g4": {
         "arch": "armv7m", "soc": "stm32g4", "kernel": "mcframe",
         "board": "generic", "toolchain": "stm32g4",
-        "phase": "Phase 2", "build": False,
+        "phase": "Phase 2", "build": True,
     },
     "esp32c3": {
         "arch": "riscv32", "soc": "esp32c3", "kernel": "freertos",

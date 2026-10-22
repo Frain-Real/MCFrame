@@ -67,8 +67,11 @@ endforeach()
 # platform_ops.cpp реализует контракт embed::platform::Ops — обязателен для
 # ЛЮБОЙ платформы. platform.cpp содержит периферию (DMA/ADC) и присутствует
 # только там, где она реально нужна.
-set(OS_PLATFORM_SOURCES
-    platforms/${MCU_TARGET}/platform_ops.cpp)
+if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
+    set(OS_PLATFORM_SOURCES platforms/stm32f4g4/platform_ops.cpp)
+else()
+    set(OS_PLATFORM_SOURCES platforms/${MCU_TARGET}/platform_ops.cpp)
+endif()
 
 foreach(_extra platform.cpp platform_adc.cpp power_stm32.cpp watchdog_stm32.cpp
                flash_stm32.cpp flash_mock.cpp boot_stm32.cpp boot_mock.cpp)
@@ -93,10 +96,21 @@ if(MCU_TARGET STREQUAL "stm32")
         platforms/stm32/startup_stm32f10x_ld.s
         platforms/stm32/system_stm32f10x.c
         platforms/stm32/core_cm3.c
+        platforms/stm32/exti_stm32.cpp
+        arch/armv7m/context.cpp
         boards/f103_generic/board.cpp)
 elseif(MCU_TARGET STREQUAL "mock")
     list(APPEND OS_PLATFORM_SOURCES
         boards/mock_generic/board.cpp)
+elseif(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
+    if(MCU_TARGET STREQUAL "stm32f4")
+        list(APPEND OS_PLATFORM_SOURCES boards/f407_generic/board.cpp)
+    else()
+        list(APPEND OS_PLATFORM_SOURCES boards/g431_generic/board.cpp)
+    endif()
+    list(APPEND OS_PLATFORM_SOURCES
+        arch/armv7m/context.cpp
+        platforms/stm32f4g4/exti_m4.cpp)
 endif()
 
 foreach(_f ${OS_PLATFORM_SOURCES})
@@ -135,6 +149,11 @@ target_include_directories(MCFrame
 # Публичные требования: флаги через INTERFACE-таргет (устойчивы к внешним
 # CMAKE_*_FLAGS) плюс include-путь к CMSIS у STM32.
 target_link_libraries(MCFrame PUBLIC mcu_flags)
+
+if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
+    target_include_directories(MCFrame PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/platforms/stm32f4g4>)
+endif()
 
 # Бюджет диагностики аварии: полный отчёт или «тихий» захват записи.
 # Значение приходит из корневого CMakeLists (MCFRAME_FAULT_REPORT).

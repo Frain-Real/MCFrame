@@ -9,6 +9,10 @@
   #include "boards/f103_generic/board.hpp"
 #elif defined(MCFRAME_SOC_HOST)
   #include "boards/mock_generic/board.hpp"
+#elif defined(MCFRAME_SOC_STM32F4)
+  #include "boards/f407_generic/board.hpp"
+#elif defined(MCFRAME_SOC_STM32G4)
+  #include "boards/g431_generic/board.hpp"
 #else
   #error "MCFrame: board.hpp не знает MCFRAME_SOC (Phase 2/4)"
 #endif

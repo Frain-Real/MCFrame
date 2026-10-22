@@ -13,6 +13,7 @@ struct SpiConfig {
     uint8_t  mode      = 0u;      // 0..3
     bool     msb_first = true;
     bool     dma       = false;
+    bool     irq       = false;
 };
 
 enum SpiCaps : uint32_t {

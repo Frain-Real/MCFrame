@@ -4,8 +4,8 @@
 |---|---|---|---|---|---|---|
 | `mock` | host | host | generic | mcframe | done | host-тесты |
 | `stm32` | armv7m | stm32f1 | generic | mcframe | done | F103 |
-| `stm32f4` | armv7m | stm32f4 | generic | mcframe | Phase 2 | stub |
-| `stm32g4` | armv7m | stm32g4 | generic | mcframe | Phase 2 | stub |
+| `stm32f4` | armv7m | stm32f4 | generic | mcframe | Phase 2 | self-test |
+| `stm32g4` | armv7m | stm32g4 | generic | mcframe | Phase 2 | self-test |
 | `esp32c3` | riscv32 | esp32c3 | generic | freertos | Phase 4 | stub |
 
 ## Команды
@@ -13,8 +13,8 @@
 ```bash
 ./build.sh mock Debug
 ./build.sh stm32 Release
-./build.sh stm32f4 Release        # Phase 0 stub
-./build.sh stm32g4 Release        # Phase 0 stub
+./build.sh stm32f4 Release        # Phase 2 self-test
+./build.sh stm32g4 Release        # Phase 2 self-test
 python3 tools/target_plan.py      # проверка матрицы
 ```
 
@@ -25,12 +25,12 @@ python3 tools/target_plan.py      # проверка матрицы
 - `MCFRAME_SOC` — `host|stm32f1|stm32f4|stm32g4|esp32c3`;
 - `MCFRAME_BOARD` — `generic` или имя `boards/<board>`;
 - `MCFRAME_KERNEL` — `mcframe|freertos`;
-- `MCFRAME_PHASE0_STUB` — регистрация без прошивки.
+- `MCFRAME_PHASE0_STUB` — производная: C3 stub, F407/G431 self-test.
 
 Несовместимая комбинация падает на configure с понятным сообщением.
 
 ## Правила
 
 - `esp32c3` требует `kernel=freertos` (ADR-004).
-- `stm32f4/g4` пока stub; реальная прошивка — Phase 2.
+- `stm32f4/g4` собирают `phase2_fw.elf` (ядро/FPU); периферия — Phase 3.
 - C3 stub может использовать host-fallback; реальная IDF-сборка требует ESP-IDF toolchain.

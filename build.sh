@@ -70,7 +70,7 @@ fi
 
 STUB_ARGS=()
 case "${TARGET}" in
-    stm32f4|stm32g4|esp32c3) STUB_ARGS+=("-DMCFRAME_PHASE0_STUB:BOOL=ON") ;;
+    esp32c3) STUB_ARGS+=("-DMCFRAME_PHASE0_STUB:BOOL=ON") ;;
 esac
 
 cmake -S . -B "${BUILD_DIR}" \
@@ -96,8 +96,11 @@ elif [[ "${TARGET}" == "stm32" ]]; then
     echo "  st-flash write ${BUILD_DIR}/example_fw.bin    0x08005000   # слот A"
     echo "Дальше образ можно заливать по OTA (в приложении или в загрузчике,"
     echo "если он собран с -DMCFRAME_BOOTLOADER_OTA=ON)."
+elif [[ "${TARGET}" == "stm32f4" || "${TARGET}" == "stm32g4" ]]; then
+    echo "Phase 2 self-test: ${BUILD_DIR}/phase2_fw.elf"
+    echo "Ядро/SysTick/FPU; периферия — Phase 3."
 else
     echo "Phase 0 stub: ${TARGET} зарегистрирован."
-    echo "Прошивка/драйверы появятся в Phase 2 (F4/G4) или Phase 4 (C3)."
+    echo "Прошивка/драйверы появятся в Phase 4 (C3)."
     echo "Проверка матрицы: python3 tools/target_plan.py --target ${TARGET}"
 fi

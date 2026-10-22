@@ -32,27 +32,28 @@ cmake --build build --parallel
 |---|---|---|---|---|
 | `mock` | host | host | mcframe | готово |
 | `stm32` | armv7m | stm32f1 | mcframe | готово |
-| `stm32f4` | armv7m | stm32f4 | mcframe | Phase 2 (stub) |
-| `stm32g4` | armv7m | stm32g4 | mcframe | Phase 2 (stub) |
+| `stm32f4` | armv7m | stm32f4 | mcframe | Phase 2 (self-test) |
+| `stm32g4` | armv7m | stm32g4 | mcframe | Phase 2 (self-test) |
 | `esp32c3` | riscv32 | esp32c3 | freertos | Phase 4 (stub) |
 
 ```bash
-./build.sh stm32f4 Release        # Phase 0 stub: configure + target OK
-./build.sh stm32g4 Release        # Phase 0 stub
+./build.sh stm32f4 Release        # Phase 2 self-test (phase2_fw.elf)
+./build.sh stm32g4 Release        # Phase 2 self-test
 python3 tools/target_plan.py      # проверка матрицы без кросс-компилятора
 ```
 
-Stub **не собирает прошивку**: он проверяет, что цель, toolchain и
-`arch/soc/kernel` совместимы, и печатает `stub OK`. Реальные порты появятся в
-Phase 2 (F407/G431) и Phase 4 (C3). Для C3 при отсутствии
-`riscv32-esp-elf-gcc` stub использует host-компилятор; реальная IDF-сборка
-потребует ESP-IDF toolchain.
+`stm32f4`/`stm32g4` уже собирают **self-test ядра** (`phase2_fw.elf`):
+ARMv7-M контекст, SysTick, FPU-фрейм. Полное приложение с периферией — Phase 3.
+C3 пока stub; при отсутствии `riscv32-esp-elf-gcc` он использует
+host-компилятор, реальная IDF-сборка потребует ESP-IDF toolchain.
 
 Документы Phase 0:
 
 - [`docs/targets.md`](docs/targets.md) — матрица и CMake-опции;
 - [`docs/phase0.md`](docs/phase0.md) — критерии приёмки Phase 0;
 - [`docs/phase1.md`](docs/phase1.md) — критерии приёмки Phase 1;
+- [`docs/phase2.md`](docs/phase2.md) — критерии приёмки Phase 2;
+- [`docs/phase3.md`](docs/phase3.md) — критерии приёмки Phase 3;
 - [`docs/adr/001-kernel-backends.md`](docs/adr/001-kernel-backends.md) — MCFrame/FreeRTOS backend;
 - [`docs/adr/002-hal-interfaces.md`](docs/adr/002-hal-interfaces.md) — HAL-интерфейсы;
 - [`docs/adr/003-layer-model.md`](docs/adr/003-layer-model.md) — arch/soc/board/kernel;
@@ -77,10 +78,50 @@ Phase 1 вводит слой, через который приложение б
 flat/mock конфигурирует LED/консоль; в минимальном slot-образе BSP не
 подключается, чтобы не тратить байты.
 
-На F103 реально работают USART1/I2C1/LED PC13; `board::spi1()` и
-`board::pwm1()` пока возвращают `NotSupported` — это Phase 3.
-`board::console()`, `board::led()`, `board::spi1()`, `board::pwm1()` уже
-проверены через mock (`tests/test_hal.cpp`, 64 проверки).
+На F103 работают USART1, I2C1, LED PC13, SPI1 (PA5/6/7, CS PA4) и
+TIM2_CH1 PWM (PA0) — драйверы Phase 3. `board::console()`, `board::led()`,
+`board::spi1()`, `board::pwm1()` проверены через mock
+(`tests/test_hal.cpp`, 78 проверок).
+
+### Phase 2: ARMv7-M, FPU и F407/G431
+
+Добавлен общий порт [`src/arch/armv7m/`](src/arch/armv7m):
+
+- критические секции, PendSV/SVC, запуск первой задачи;
+- `src/arch/armv7m/frame.hpp` — раскладка стартового фрейма, проверяемая
+  host-тестом;
+- FPU-контекст для M4F: фиксированный FPU-фрейм (`S0–S15`, `S16–S31`,
+  `FPSCR`), `CPACR`, `FPCCR.ASPEN/LSPEN`;
+- F103 переведён на тот же arch-порт (без FPU).
+
+F407/G431:
+
+- toolchain с `-mfpu=fpv4-sp-d16 -mfloat-abi=hard`;
+- startup, linker (1 МБ/128 КБ у F4, 128 КБ/32 КБ у G4), `SystemInit` (HSI
+  16 МГц);
+- минимальный `platform::Ops` и `firmware/phase2/phase2_main.cpp`:
+  две float-задачи + проверяющая задача;
+- собирается `phase2_fw.elf`; QEMU-цель `phase2_qemu.elf` есть, но
+  эмулятор QEMU не моделирует FPU exception frame корректно — FPU-контекст
+  нужно проверять на железе/стенде.
+
+Периферия и полноценный BSP для F4/G4 — Phase 3.
+
+### Phase 3: GPIO/SPI/PWM и BSP
+
+Добавлены реальные драйверы:
+
+- [`stm32_periph.hpp`](src/platforms/stm32/stm32_periph.hpp) — F103 GPIO/SPI/PWM;
+- [`stm32_periph_m4.hpp`](src/platforms/stm32f4g4/stm32_periph_m4.hpp) — F407/G431;
+- BSP [`f103_generic`](src/boards/f103_generic), [`f407_generic`](src/boards/f407_generic), [`g431_generic`](src/boards/g431_generic);
+- `board::spi_cs()` — CS для `SpiDevice`;
+- shell-команды `gpio/spi/pwm` в [`shell_board.hpp`](src/boards/common/shell_board.hpp);
+- self-test [`phase3_main.cpp`](firmware/phase3/phase3_main.cpp): LED, SPI transfer, PWM.
+
+EXTI реализован для F103/F407/G431. SPI умеет polling, IRQ и DMA на всех
+трёх: F103 — DMA1 Ch2/3 через `DmaManager`, F407 — DMA2 Stream0/3, G431 —
+DMA1 + DMAMUX. F4/G4 BSP получил UART1 (polling). Self-test не проверяет
+внешний loopback без HIL.
 
 ### LTO
 
@@ -818,7 +859,7 @@ Size free_words = g_memory_manager.task_stack_high_water(&my_tcb);
 
 Ориентир для STM32F103RB (20 КБ RAM / 128 КБ Flash): пример с двумя задачами,
 АЦП, самотестами, DMA-арбитром, супервизором энергосбережения, сторожевым
-таймером и подсистемой OTA занимает **9.1 КБ RAM (45 %) и 69.6 КБ Flash (54 %)**
+таймером и подсистемой OTA занимает **9.4 КБ RAM (47 %) и 73.6 КБ Flash (57 %)**
 при сборке с LTO (`./build.sh stm32 Release`); без OTA те же подсистемы дают
 5.4 КБ RAM и 34.6 КБ Flash — разницу стоит учитывать при выборе размера
 слота — цифры берутся из отчёта линкера
@@ -1907,8 +1948,8 @@ if (bi.valid && bi.rollback_needed) (void)ota::Service::instance().rollback();
 (`ota::Service::static_bytes()`): буферы приёма и ответа, буфер проверки
 чтением, две записи состояния на слот, контекст SHA-256. В примере включение
 OTA (вместе с SHA-256 и CRC32, которые до этого не линковались) поднимает
-прошивку с 34.6 КБ Flash / 5.4 КБ RAM до **69.6 КБ Flash (54 %) / 9.1 КБ
-RAM (45 %)** на STM32F103RB при сборке с LTO — цифры из отчёта линкера, а не
+прошивку с 34.6 КБ Flash / 5.4 КБ RAM до **73.6 КБ Flash (57 %) / 9.4 КБ
+RAM (47 %)** на STM32F103RB при сборке с LTO — цифры из отчёта линкера, а не
 из оценки.
 
 ### Ограничения, о которых нужно знать
@@ -1970,7 +2011,7 @@ RAM (45 %)** на STM32F103RB при сборке с LTO — цифры из о�
 
 ```
 0x08000000 ┌────────────────────────────┐
-           │ загрузчик (bootloader_fw)  │  20 КБ  (занято ≈19.05 КБ)
+           │ загрузчик (bootloader_fw)  │  20 КБ  (занято ≈19.06 КБ)
 0x08005000 ├────────────────────────────┤
            │ слот A (example_fw)        │  52 КБ  (занято ≈51 КБ)
 0x08012000 ├────────────────────────────┤
@@ -1995,10 +2036,10 @@ RAM (45 %)** на STM32F103RB при сборке с LTO — цифры из о�
 
 | Что | Размер | Комментарий |
 |---|---|---|
-| Загрузчик без приёма OTA | ≈19.05 КБ | Отведено 20 КБ (95 %) |
+| Загрузчик без приёма OTA | ≈19.06 КБ | Отведено 20 КБ (95 %) |
 | Загрузчик С приёмом OTA | ≈48 КБ | Тогда слоты придётся уменьшить до ≈38 КБ: на 128 КБ Flash выбирать приходится осознанно |
 | «Минимальное» приложение примера | ≈51 КБ | Влезает в слот 52 КБ (демонстрации выключены: `-DMCFRAME_APP_MINIMAL=ON`) |
-| Полная «витрина» примера | ≈69.6 КБ | В слот 52 КБ НЕ влезает — это и есть та причина, по которой демонстрации выключаются автоматически при `-DMCFRAME_IMAGE=slot` |
+| Полная «витрина» примера | ≈73.6 КБ | В слот 52 КБ НЕ влезает — это и есть та причина, по которой демонстрации выключаются автоматически при `-DMCFRAME_IMAGE=slot` |
 
 Именно из этих чисел и получилась раскладка: 20 + 52 + 52 + 4 = 128 КБ. На
 плате с 256 КБ (STM32F103RC) приём можно оставить и в загрузчике, и в
@@ -2086,7 +2127,7 @@ st-flash write .build/stm32/example_fw.bin    0x08005000   # слот A
 
 `.github/workflows/ci.yml` проверяет то, что легко сломать незаметно:
 
-* **mock Debug** — сборка с ASan/UBSan и все 15 наборов;
+* **mock Debug** — сборка с ASan/UBSan и все 17 наборов;
 * **mock Release** — LTO-сборка (проверяет, что LTO не ломает таблицы
   векторов/`naked`-функции) и те же наборы;
 * **stm32** — кросс-сборка `flat`, `flat + shell` и `slot`, плюс бюджет
@@ -2095,8 +2136,8 @@ st-flash write .build/stm32/example_fw.bin    0x08005000   # слот A
   но не влезло» — ошибка CI, а не сюрприз на плате;
 * **target-matrix** — `tools/target_plan.py --check` проверяет, что
   `arch × soc × kernel` для всех целей совместимы;
-* **stm32f4/stm32g4** — Phase 0 stub: configure + `mcframe_target_stub`
-  (прошивка появится в Phase 2);
+* **stm32f4/stm32g4** — Phase 2/3: `phase2_fw.elf` (ядро/FPU) и
+  `phase3_fw.elf` (GPIO/SPI/PWM);
 * **esp32c3** — Phase 0 stub (host-fallback при отсутствии RISC-V
   компилятора); IDF-сборка появится в Phase 4.
 
@@ -2134,13 +2175,15 @@ ctest --test-dir .build/mock --output-on-failure
 .build/mock/tests/mc_tests_boot      # загрузчик: выбор слота, проверка образа, переход: 96 проверок
 .build/mock/tests/mc_tests_fault     # P0: запись об аварии, wait queue, PI, таймаут, стек: 76 проверок
 .build/mock/tests/mc_tests_ipc       # P1: очереди/события/WorkQueue/log/shell/статистика: 98 проверок
-.build/mock/tests/mc_tests_hal       # Phase 1: HAL-интерфейсы, mock, board, kernel: 64 проверки
+.build/mock/tests/mc_tests_hal       # Phase 1: HAL-интерфейсы, mock, board, kernel, arch-frame: 78 проверок
+.build/mock/tests/mc_tests_f4regs    # Phase 2: host-модели RCC/GPIO/SPI/TIM F4/G4: 9 проверок
+.build/mock/tests/mc_tests_stm32periph # Phase 3: F1 GPIO/SPI/PWM на модели: 14 проверок
 ```
 
-`ctest` прогоняет пятнадцать наборов: `core_selftest`, `async_io`, `uart_i2c`,
+`ctest` прогоняет семнадцать наборов: `core_selftest`, `async_io`, `uart_i2c`,
 `stm32_hal_strategies`, `dma_arbiter`, `power_supervisor`, `stm32_power`,
 `watchdog`, `stm32_watchdog`, `boot`, `ota`, `crypto`, `fault_and_wait`,
-`ipc_shell` и `hal_interfaces`.
+`ipc_shell`, `hal_interfaces`, `f4_regs` и `stm32_periph`.
 
 Набор `dma_arbiter` (`tests/host/test_dma_arbiter.cpp`) проверяет собственно
 арбитрацию, без драйверов и железа: ожидание занятого канала (USART1_TX и
