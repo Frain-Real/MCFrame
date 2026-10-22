@@ -12,6 +12,7 @@
 #include "os/config/time_config.hpp"
 #include "os/core/memory/memory_manager.hpp"
 #include "os/core/task/sheduler.hpp"
+#include "os/fault/fault.hpp"
 #include "os/power/power.hpp"
 #include "os/watchdog/watchdog.hpp"
 
@@ -183,6 +184,16 @@ int main() {
         platform_log_line("MCFrame: scheduler init failed");
         return 1;
     }
+
+    // Если прошлый запуск упал в Fault/panic, запись уже загружена init().
+    // Печатаем её до старта задач: это самое полезное, что можно сделать
+    // после сброса, и лучше сделать это, пока лог гарантированно работает.
+#if MCFRAME_FAULT_REPORT
+    if (fault::was_fault_reset()) {
+        fault::report();
+        fault::clear();
+    }
+#endif
 
     // Хуки регистрируем ДО старта тика. Порядок важен: супервизор должен
     // увидеть, что исполнялось в момент прерывания, ДО того как планировщик

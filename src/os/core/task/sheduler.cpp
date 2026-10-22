@@ -2,6 +2,7 @@
 #include "sheduler.hpp"
 #include "../memory/memory_manager.hpp"
 #include "../../power/power.hpp"
+#include "../../fault/fault.hpp"
 
 namespace embed {
 
@@ -13,6 +14,15 @@ inline const platform::Ops& P() noexcept { return platform::ops(); }
 
 Status scheduler::init() noexcept {
     if (initialized_) return Status::AlreadyExists;
+
+    // Загружаем посмертную запись (если прошлый запуск упал). Печать — дело
+    // приложения: до старта UART/ITM лог может быть ещё не готов.
+#if !defined(MCFRAME_FAULT_REPORT) || (MCFRAME_FAULT_REPORT)
+    (void)fault::init();
+#endif
+    // Даже в «тихом» режиме отдельные Fault-исключения должны попадать в
+    // свои обработчики, а не только в HardFault.
+    if (P().fault_enable) P().fault_enable();
 
     uint32_t cores = P().core_count ? P().core_count() : 1u;
     if (cores == 0u) cores = 1u;
@@ -126,6 +136,8 @@ Status scheduler::remove_task(TaskHandler t) noexcept {
         }
     }
     sleep_list_.remove(t);
+    if (t->wait_queue_ != nullptr) (void)t->wait_queue_->remove(t);
+    t->clear_wake_pending();
 
     // Освобождаем ресурсы мониторинга: раньше записи утекали (их всего 32).
     // Пул стеков не трогаем: статический массив освобождать не нужно, а регион
@@ -290,34 +302,119 @@ Status scheduler::sleep_for(uint32_t ticks) noexcept {
 Status scheduler::block_on(void* obj, uint32_t ticks) noexcept {
     Lock lock;
     const uint32_t core = P().current_core();
-    if (core >= core_count_) return Status::Fault;
+    if (core >= core_count_) { unlock_early(lock); return Status::Fault; }
 
     TaskHandler cur = cores_[core].current;
-    if (!cur) return Status::NotFound;
+    if (!cur) { unlock_early(lock); return Status::NotFound; }
 
-    if (!cur->block_on(obj, ticks)) return Status::Fault;
+    // Новый вызов — новый дедлайн: старый флаг не должен «просочиться».
+    cur->timed_out_ = false;
+
+    // Пробуждение пришло, пока задача ещё running (см. wake_pending_):
+    // засыпать нельзя, иначе оно потеряется.
+    if (cur->wake_pending()) {
+        cur->clear_wake_pending();
+        unlock_early(lock);
+        return Status::Ok;
+    }
+
+    if (!cur->block_on(obj, ticks)) { unlock_early(lock); return Status::Fault; }
 
     if (ticks > 0u) {
         if (!sleep_list_.push_back(cur)) {
             cur->unblock();
+            unlock_early(lock);
             return Status::AlreadyExists;
         }
     }
     unlock_early(lock);
     yield();
+
+    if (cur->timed_out()) {
+        cur->timed_out_ = false;
+        return Status::Timeout;
+    }
     return Status::Ok;
+}
+
+Status scheduler::block_on_locked(Lock& lock, wait_queue& q, void* obj,
+                                  uint32_t ticks) noexcept {
+    const uint32_t core = P().current_core();
+    if (core >= core_count_) { unlock_early(lock); return Status::Fault; }
+
+    TaskHandler cur = cores_[core].current;
+    if (!cur) { unlock_early(lock); return Status::NotFound; }
+
+    // Новый вызов — новый дедлайн.
+    cur->timed_out_ = false;
+
+    // Проверка и постановка в очередь — под ТЕМ ЖЕ Lock, который держит
+    // вызывающий. Именно это закрывает окно потерянного пробуждения.
+    if (cur->wake_pending()) {
+        cur->clear_wake_pending();
+        unlock_early(lock);
+        return Status::Ok;
+    }
+
+    if (!cur->block_on(obj, ticks)) { unlock_early(lock); return Status::Fault; }
+    if (!q.push(cur)) {
+        cur->unblock();
+        unlock_early(lock);
+        return Status::AlreadyExists;
+    }
+
+    if (ticks > 0u) {
+        if (!sleep_list_.push_back(cur)) {
+            (void)q.remove(cur);
+            cur->unblock();
+            unlock_early(lock);
+            return Status::AlreadyExists;
+        }
+    }
+
+    unlock_early(lock);
+    yield();
+
+    if (cur->timed_out()) {
+        cur->timed_out_ = false;
+        return Status::Timeout;
+    }
+    return Status::Ok;
+}
+
+bool scheduler::unblock_one(wait_queue& q) noexcept {
+    Lock lock;
+
+    TaskHandler t = q.pop_highest();
+    if (!t) return false;
+
+    // Снимаем с таймаута: задача проснулась по событию, а не по сроку.
+    sleep_list_.remove(t);
+    t->timed_out_ = false;
+    t->clear_wake_pending();
+    if (!t->unblock()) return false;
+
+    const uint32_t core = t->is_pinned() ? t->core() : find_least_loaded_core();
+    if (core >= core_count_) return false;
+    if (!ready_push(cores_[core], t)) return false;
+    check_preempt(cores_[core]);
+    return true;
 }
 
 bool scheduler::unblock_one(void* obj) noexcept {
     Lock lock;
 
-    // Ищем ждущего на этом объекте.
+    // Совместимость: блокировка без очереди (async) и старый API.
+    // Для примитивов используется очередь ожидания — там порядок задан
+    // приоритетом, а не порядком регистрации задач.
     for (auto it = all_tasks_.begin(); !it.done(); it.advance()) {
         TaskHandler t = it.get();
-        if (t->wait_obj() != obj) continue;
-        if (!t->is_blocked() && !t->is_sleeping()) continue;
+        if (!t->is_waiting_on(obj)) continue;
 
+        if (t->wait_queue_ != nullptr) (void)t->wait_queue_->remove(t);
         sleep_list_.remove(t);
+        t->timed_out_ = false;
+        t->clear_wake_pending();
         t->unblock();
 
         const uint32_t core = t->is_pinned() ? t->core() : find_least_loaded_core();
@@ -335,19 +432,32 @@ Status scheduler::wakeup(TaskHandler t, uint32_t core_id) noexcept {
     Lock lock;
     if (!all_tasks_.contains(t) && t != &idle_tcb_) return Status::NotFound;
 
-    if (t->state() != task_state::suspended &&
-        t->state() != task_state::blocked &&
+    // Задача ЕЩЁ выполняется: запоминаем пробуждение. Следующий block_on()
+    // увидит флаг и вернётся, не засыпая. Без этого async-модуль терял
+    // завершение, пришедшее между park() и block_on().
+    if (t->state() == task_state::running) {
+        t->set_wake_pending();
+        return Status::Ok;
+    }
+
+    if (t->state() == task_state::suspended) {
+        // Вытесненная задача уже стоит в очереди готовых: resume() — всё,
+        // что нужно. Повторный ready_push() вернул бы AlreadyExists.
+        t->resume();
+        return Status::Ok;
+    }
+
+    if (t->state() != task_state::blocked &&
         t->state() != task_state::sleeping) {
         return Status::Busy;
     }
 
+    if (t->wait_queue_ != nullptr) (void)t->wait_queue_->remove(t);
     sleep_list_.remove(t);
+    t->timed_out_ = false;
+    t->clear_wake_pending();
 
-    // unblock() покрывает blocked/sleeping, suspend()+resume() — вытесненную.
-    if (!t->unblock()) {
-        if (t->state() != task_state::suspended) return Status::Busy;
-        t->resume();
-    }
+    if (!t->unblock()) return Status::Busy;
 
     const uint32_t core = (core_id < core_count_)
         ? core_id : (t->is_pinned() ? t->core() : find_least_loaded_core());
@@ -356,6 +466,57 @@ Status scheduler::wakeup(TaskHandler t, uint32_t core_id) noexcept {
     if (!ready_push(cores_[core], t)) return Status::AlreadyExists;
     check_preempt(cores_[core]);
     return Status::Ok;
+}
+
+Status scheduler::set_priority_locked(TaskHandler t, uint32_t priority,
+                                      bool update_base) noexcept {
+    if (!t) return Status::InvalidArg;
+    if (!all_tasks_.contains(t) && t != &idle_tcb_) return Status::NotFound;
+    if (priority >= kMaxPriority) priority = kMaxPriority - 1u;
+
+    if (update_base) t->base_priority_ = priority;
+    if (t->priority_ == priority) return Status::Ok;
+
+    // Если задача в очереди готовых — переставить её в другую очередь.
+    // ready_remove() смотрит на СТАРЫЙ priority_, поэтому порядок важен.
+    bool requeued = false;
+    for (uint32_t i = 0; i < core_count_; ++i) {
+        const uint32_t old = (t->priority_ < kMaxPriority)
+            ? t->priority_ : (kMaxPriority - 1u);
+        if (!cores_[i].ready[old].contains(t)) continue;
+
+        ready_remove(cores_[i], t);
+        t->priority_ = priority;
+        if (!ready_push(cores_[i], t)) {
+            // Вернуть как было, чтобы не потерять задачу из очереди.
+            t->priority_ = old;
+            (void)ready_push(cores_[i], t);
+            return Status::Fault;
+        }
+        requeued = true;
+        if (i == P().current_core()) check_preempt(cores_[i]);
+        break;
+    }
+
+    if (!requeued) {
+        t->priority_ = priority;
+        // Выполняющаяся задача могла стать ниже — уступаем более приоритетной.
+        const uint32_t core = P().current_core();
+        if (core < core_count_ && cores_[core].current == t) {
+            check_preempt(cores_[core]);
+        }
+    }
+    return Status::Ok;
+}
+
+Status scheduler::set_priority(TaskHandler t, uint32_t priority) noexcept {
+    Lock lock;
+    return set_priority_locked(t, priority, true);
+}
+
+Status scheduler::set_effective_priority(TaskHandler t, uint32_t priority) noexcept {
+    Lock lock;
+    return set_priority_locked(t, priority, false);
 }
 
 Status scheduler::exit() noexcept {
@@ -453,7 +614,19 @@ void scheduler::process_sleep_list(uint32_t ticks_step) noexcept {
         if (!t->advance_delay(ticks_step)) continue;   // ещё спит
 
         sleep_list_.remove(t);
+
+        // Задача с таймаутом стоит ещё и в очереди ожидания объекта:
+        // снимаем её оттуда, иначе unblock_one() разбудил бы её позже
+        // «по событию» уже после истечения срока.
+        if (t->wait_queue_ != nullptr) (void)t->wait_queue_->remove(t);
+
+        // timed_out_ — только для block_on(t != 0), а не для sleep_for:
+        // иначе обычный сон оставлял бы флаг, и следующий block_on()
+        // вернул бы Timeout, не проспав ни тика.
+        if (t->deadline_armed_) t->timed_out_ = true;
+
         t->wake_from_sleep();
+        t->wait_obj_ = nullptr;
         if (!woken.push_back(t)) t->unblock();   // не удалось — просто разбудим
     }
 
@@ -475,6 +648,11 @@ void scheduler::check_preempt(core_state& core) noexcept {
 
 // ─────────────────────────── Смена контекста ────────────────────────────────
 
+bool scheduler::stack_guard_ok(TaskHandler t) const noexcept {
+    if (t == nullptr || t->stack_base_ == nullptr) return true;
+    return t->stack_base_[0] == kStackGuardMagic;
+}
+
 uint32_t* scheduler::prepare_context_switch(uint32_t* saved_sp) noexcept {
     const uint32_t core_id = P().current_core();
     // Ядро не зарегистрировано: переключаться некуда — продолжаем прежний
@@ -484,6 +662,11 @@ uint32_t* scheduler::prepare_context_switch(uint32_t* saved_sp) noexcept {
     core_state& c = cores_[core_id];
 
     if (c.current) {
+        // Дно стека — до сохранения контекста: если оно затёрто, сохранять
+        // уже некуда, а отчёт должен назвать именно эту задачу.
+        if (!stack_guard_ok(c.current)) {
+            fault::stack_overflow(c.current->name());
+        }
         if (saved_sp) c.current->save_sp(saved_sp);
 
         // Возвращаем в ready ТОЛЬКО если задача не заблокировала себя сама
@@ -517,6 +700,14 @@ void scheduler::context_switch() noexcept {
     if (next_sp != nullptr && P().load_context) P().load_context(next_sp);
 }
 
+// Сильная реализация слабого хука из os/fault: пока планировщик слинкован,
+// отчёт об аварии знает имя задачи. В загрузчике (без планировщика)
+// остаётся слабая заглушка, и образ не разрастается.
+extern "C" const char* mcframe_fault_task_name() noexcept {
+    TaskHandler t = scheduler::instance().current_task();
+    return (t != nullptr) ? t->name() : nullptr;
+}
+
 } // namespace embed
 
 // ─────────────── Мост для примитивов (mutex/semaphore) ──────────────────────
@@ -529,8 +720,21 @@ TaskHandler current() noexcept {
     return scheduler::instance().current_task();
 }
 
+uint64_t now_ticks() noexcept {
+    return scheduler::instance().now_ticks();
+}
+
 Status block_on(void* obj, uint32_t ticks) noexcept {
     return scheduler::instance().block_on(obj, ticks == 0u ? 0u : ticks);
+}
+
+Status block_on_locked(Lock& lock, wait_queue& q, void* obj,
+                       uint32_t ticks) noexcept {
+    return scheduler::instance().block_on_locked(lock, q, obj, ticks);
+}
+
+bool unblock_one(wait_queue& q) noexcept {
+    return scheduler::instance().unblock_one(q);
 }
 
 bool unblock_one(void* obj) noexcept {
@@ -541,6 +745,14 @@ bool wake(TaskHandler t) noexcept {
     // Принимаем и sleeping, и blocked, и suspended — задача могла уйти
     // в любой из этих состояний к моменту завершения операции.
     return scheduler::instance().wakeup(t) == Status::Ok;
+}
+
+Status set_priority(TaskHandler t, uint32_t priority) noexcept {
+    return scheduler::instance().set_priority(t, priority);
+}
+
+Status set_effective_priority(TaskHandler t, uint32_t priority) noexcept {
+    return scheduler::instance().set_effective_priority(t, priority);
 }
 
 void yield() noexcept {

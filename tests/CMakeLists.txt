@@ -13,6 +13,11 @@ add_executable(mc_tests_async test_async.cpp)
 target_link_libraries(mc_tests_async PRIVATE MCFrame::MCFrame)
 target_include_directories(mc_tests_async PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
+# P0: запись об аварии, очередь ожидания, PI, таймаут, сторожевой маркер.
+add_executable(mc_tests_fault test_fault.cpp)
+target_link_libraries(mc_tests_fault PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_fault PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
 add_executable(mc_tests_periph test_uart_i2c.cpp)
 target_link_libraries(mc_tests_periph PRIVATE MCFrame::MCFrame)
 target_include_directories(mc_tests_periph PRIVATE
@@ -202,4 +207,8 @@ if(BUILD_TESTING)
     set_tests_properties(crypto PROPERTIES
         FAIL_REGULAR_EXPRESSION "FAIL"
         TIMEOUT 300)
+
+    add_test(NAME fault_and_wait COMMAND mc_tests_fault)
+    set_tests_properties(fault_and_wait PROPERTIES
+        FAIL_REGULAR_EXPRESSION "FAIL")
 endif()

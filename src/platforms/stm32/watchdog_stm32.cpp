@@ -211,6 +211,9 @@ bool note_write(uint32_t index, uint16_t value) noexcept {
 
 uint16_t note_read(uint32_t index) noexcept {
     if (index >= kNoteRegs) return 0u;
+    // Чтение тоже требует включённых PWR/BKP: иначе вернётся 0 и посмертная
+    // метка «исчезнет» ровно в том месте, где на неё рассчитывают.
+    (void)enable_backup_access();
     return note_read_reg(index);
 }
 

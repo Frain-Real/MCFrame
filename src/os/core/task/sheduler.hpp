@@ -79,12 +79,47 @@ public:
     /// действительно покинула ядро.
     Status exit() noexcept;
 
-    /// Заблокировать текущую задачу на объекте (семафор/мьютекс).
-    /// ticks == 0 — без таймаута.
+    /// Сколько тиков прошло с запуска планировщика (монотонно).
+    /// База для АБСОЛЮТНЫХ таймаутов: примитивы считают deadline один раз,
+    /// а не перезапускают ожидание после каждого ложного пробуждения.
+    uint64_t now_ticks() const noexcept { return tick_count_; }
+
+    /// Заблокировать текущую задачу БЕЗ очереди ожидания (совместимость).
+    /// ticks == 0 — без таймаута. Используется async-модулем, который будит
+    /// задачу адресно через wakeup(); примитивы обязаны использовать
+    /// block_on_locked() — иначе остаётся окно потерянного пробуждения.
     Status block_on(void* obj, uint32_t ticks = 0) noexcept;
-    /// Разбудить задачу, ждущую на объекте obj. Возвращает true, если
-    /// кто-то был разбужен.
-    bool   unblock_one(void* obj) noexcept;
+
+    /// Заблокировать текущую задачу, УЖЕ стоя под Lock и проверив предикат.
+    ///
+    /// Почему так: проверка «ресурс свободен?» и постановка в очередь
+    /// ожидания обязаны быть одной критической секцией. Иначе прерывание
+    /// между ними сигналит, unblock_one() не находит ещё не заблокированную
+    /// задачу, и она засыпает навсегда (ticks == 0).
+    ///
+    /// Владение lock переходит сюда: функция сама делает unlock_early()
+    /// перед yield(), поэтому деструктор Lock у вызывающего — no-op.
+    /// Возврат: Ok (разбудили), Timeout (истёк ticks), Fault/NotFound/
+    /// AlreadyExists. При AlreadyExists/Fault задача остаётся running.
+    Status block_on_locked(Lock& lock, wait_queue& q, void* obj,
+                           uint32_t ticks = 0) noexcept;
+
+    /// Разбудить самую приоритетную задачу из очереди q.
+    /// Возвращает true, если кто-то был разбужен.
+    bool unblock_one(wait_queue& q) noexcept;
+
+    /// Совместимость: разбудить первую задачу, ждущую на объекте obj
+    /// (линейный поиск). Новый код должен использовать unblock_one(q).
+    bool unblock_one(void* obj) noexcept;
+
+    /// Изменить приоритет задачи (назначенный и действующий).
+    /// Если задача в очереди готовых — она переставляется; если выполняется —
+    /// новый приоритет учтётся при следующем вытеснении.
+    Status set_priority(TaskHandler t, uint32_t priority) noexcept;
+
+    /// Изменить ТОЛЬКО действующий приоритет (для PI/ceiling): база,
+    /// назначенная приложением, не меняется.
+    Status set_effective_priority(TaskHandler t, uint32_t priority) noexcept;
 
     // ──────────── Тик и переключение ────────────
     void tick() noexcept;
@@ -141,6 +176,14 @@ public:
         return cores_[core].current == &idle_tcb_;
     }
 
+    /// Цело дно стека задачи (сторожевой маркер kStackGuardMagic)?
+    ///
+    /// Проверка дешёвая (одно чтение), поэтому вызывается в переключении
+    /// контекста для УХОДЯЩЕЙ задачи. Без MPU она не предотвращает порчу
+    /// соседней памяти, но превращает молчаливое повреждение в аварийный
+    /// отчёт с именем задачи и адресом.
+    bool stack_guard_ok(TaskHandler t) const noexcept;
+
     /// Сколько тиков осталось ближайшей спящей задаче (kNoDeadline — таких нет).
     /// Основа для «горизонта сна»: просыпаться раньше срока задачи нельзя.
     uint32_t next_sleep_ticks() const noexcept;
@@ -194,6 +237,8 @@ private:
     TaskHandler pick_next(core_state& core) const noexcept;
     bool ready_push(core_state& core, TaskHandler t) noexcept;   // false, если уже в очереди
     void ready_remove(core_state& core, TaskHandler t) noexcept;
+    Status set_priority_locked(TaskHandler t, uint32_t priority,
+                               bool update_base) noexcept;
     void check_preempt(core_state& core) noexcept;
     /// ticks_step == 1 — обычный тик; больше — «догон» после скачка времени.
     void process_sleep_list(uint32_t ticks_step) noexcept;

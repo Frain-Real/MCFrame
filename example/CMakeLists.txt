@@ -46,6 +46,12 @@ else()
     endif()
     if(MCFRAME_APP_MINIMAL)
         target_compile_definitions(example_fw PRIVATE MCFRAME_APP_MINIMAL=1)
+        # Слот 52 КБ: минимальному приложению важнее размер, чем -O2.
+        # Отдельный INTERFACE-таргет добавлен ПОСЛЕ MCFrame, поэтому -Os
+        # оказывается позже -O2 из mcu_flags (иначе -O2 победил бы).
+        add_library(app_size_flags INTERFACE)
+        target_compile_options(app_size_flags INTERFACE -Os)
+        target_link_libraries(example_fw PRIVATE app_size_flags)
     else()
         target_compile_definitions(example_fw PRIVATE MCFRAME_APP_MINIMAL=0)
     endif()

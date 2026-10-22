@@ -82,6 +82,14 @@ namespace embed {
     /// подставлять в min, не складывать.
     inline constexpr uint32_t kNoDeadline = 0xFFFFFFFFu;
 
+    /// Маркер дна стека задачи.
+    ///
+    /// Его ставит platform_stack_paint(), а planning-переключение проверяет
+    /// перед сохранением контекста. Значение обязано совпадать у платформы
+    /// и ядра: иначе проверка «переполнения» срабатывала бы на исправной
+    /// задаче (или не срабатывала вовсе).
+    inline constexpr uint32_t kStackGuardMagic = 0xDEADBEEFu;
+
     using task_func = void (*)(void* ctx);
 
     enum class Access : unsigned char

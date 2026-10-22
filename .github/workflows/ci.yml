@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  mock:
+    name: mock-${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure + build
+        run: ./build.sh mock ${{ matrix.build_type }}
+
+      - name: Tests (ASan/UBSan в Debug, LTO в Release)
+        run: ctest --test-dir .build/mock --output-on-failure
+
+  stm32:
+    name: stm32-cross
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Flat image
+        run: ./build.sh stm32 Release
+
+      - name: "Size budget (flat: вся Flash 128 КБ)"
+        run: |
+          tools/check_size.sh .build/stm32/bootloader_fw.bin 20480 "bootloader"
+          tools/check_size.sh .build/stm32/example_fw.bin 131072 "example flat"
+          arm-none-eabi-size .build/stm32/example/example_fw
+
+      - name: Slot image
+        run: |
+          rm -rf .build/stm32
+          ./build.sh stm32 Release -DMCFRAME_IMAGE=slot
+
+      - name: "Size budget (slot: 52 КБ + загрузчик 20 КБ)"
+        run: |
+          tools/check_size.sh .build/stm32/bootloader_fw.bin 20480 "bootloader"
+          tools/check_size.sh .build/stm32/example_fw.bin 53248 "example slot"
+          arm-none-eabi-size .build/stm32/example/example_fw
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: stm32-slot-firmware
+          path: |
+            .build/stm32/bootloader_fw.bin
+            .build/stm32/bootloader_fw.hex
+            .build/stm32/example_fw.bin
+            .build/stm32/example_fw.hex

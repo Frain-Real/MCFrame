@@ -21,6 +21,23 @@ project(MCFrame VERSION 0.1.0 LANGUAGES C CXX ASM)
 
 message(STATUS "MCFrame: платформа=${MCU_TARGET}")
 
+# Какой образ собирает пример: flat (вся Flash) или slot (слот A).
+# Опция живёт здесь, а не только в example/: от неё зависит бюджет
+# диагностики — см. MCFRAME_FAULT_REPORT ниже.
+set(MCFRAME_IMAGE "flat" CACHE STRING "Образ example_fw: flat | slot")
+set_property(CACHE MCFRAME_IMAGE PROPERTY STRINGS flat slot)
+
+# Печатать отчёт об аварии (Fault/panic) через платформенный лог.
+#
+# По умолчанию ON. OFF экономит ~400 Б Flash: запись об аварии (.noinit +
+# BKP) и перезагрузка остаются, печать — нет. Это нужно, если приложение
+# переполняет слот 52 КБ; приложение может само вызвать fault::last().
+if(NOT DEFINED MCFRAME_FAULT_REPORT)
+    set(MCFRAME_FAULT_REPORT ON CACHE BOOL
+        "Печатать отчёт об аварии (OFF экономит ~400 Б Flash)")
+endif()
+message(STATUS "MCFrame: отчёт об аварии=${MCFRAME_FAULT_REPORT}")
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "" FORCE)
 endif()

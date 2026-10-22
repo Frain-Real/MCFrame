@@ -14,6 +14,7 @@
 #include "watchdog_stm32.hpp"                // сторожевой таймер (IWDG), причина сброса
 #include "boot_stm32.hpp"                    // переход к образу прошивки (загрузчик)
 #include "flash_stm32.hpp"                   // встроенная Flash: слот OTA и записи
+#include "../../os/fault/fault.hpp"         // запись об аварии и отчёт
 
 #include "stm32f10x.h"
 #include "core_cm3.h"
@@ -307,7 +308,7 @@ bool platform_ext_rom_erase(uint32_t, uint32_t) noexcept { return false; }
 void platform_stack_paint(uint32_t* stack, uint32_t words) noexcept {
     if (!stack || words == 0u) return;
     // Дно — магическое значение для детекции переполнения.
-    stack[0] = 0xDEADBEEFu;
+    stack[0] = kStackGuardMagic;
     for (uint32_t i = 1u; i < words; ++i) stack[i] = 0xA5A5A5A5u;
 }
 
@@ -317,6 +318,87 @@ static void task_exit_handler() noexcept {
     // отладчик показал точное место, а не свалился в HardFault.
     for (;;) __asm volatile("nop");
 }
+
+// ───────────────────────────── Аварийный сброс ──────────────────────────────
+// NVIC_SystemReset() выставляет SYSRESETREQ и ждёт. Возврата не предполагается;
+// если он всё же случится (отладчик/модель), fault::panic останется в цикле.
+static void platform_reset() OS_PLATFORM_FN {
+    NVIC_SystemReset();
+}
+
+static void platform_fault_enable() OS_PLATFORM_FN {
+    // Без этих битов MemManage/BusFault/UsageFault уходят в HardFault.
+    SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk |
+                  SCB_SHCSR_BUSFAULTENA_Msk |
+                  SCB_SHCSR_USGFAULTENA_Msk;
+    __DSB();
+    __ISB();
+}
+
+// ───────────────────────────── Fault-обработчики ────────────────────────────
+// Определения ЖИВУТ ЗДЕСЬ, а не в отдельном fault_stm32.cpp: startup-файл
+// содержит СЛАБЫЕ алиасы HardFault_Handler -> Default_Handler, и линкер не
+// тянет сильное определение из архива только ради перекрытия слабого (оно
+// уже «определено»). platform_ops.o линкуется всегда (нужен ops()), поэтому
+// именно здесь сильные обработчики гарантированно попадут в образ и
+// перекроют слабые.
+// Общий C-обработчик. Определён ЗДЕСЬ, а не в отдельном объекте: иначе
+// LTO/архив может не вытянуть его ради inline-asm ветки `b fault_c`.
+extern "C" __attribute__((used)) void fault_c(uint32_t* frame,
+                                              uint32_t exc_return,
+                                              uint32_t kind) {
+    (void)exc_return;   // стек уже выбран ассемблером
+
+    embed::fault::Info info{};
+    info.kind = static_cast<embed::fault::Kind>(kind + 1u);
+    info.pc   = frame[6];
+    info.lr   = frame[5];
+    info.cfsr = SCB->CFSR;
+
+#if !defined(MCFRAME_FAULT_REPORT) || (MCFRAME_FAULT_REPORT)
+    // В тихом режиме эти поля не нужны отчёту — не тратим на них Flash/RAM.
+    info.psr   = frame[7];
+    info.r0    = frame[0];
+    info.r1    = frame[1];
+    info.r2    = frame[2];
+    info.r3    = frame[3];
+    info.r12   = frame[4];
+    info.sp    = static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(frame));
+    info.hfsr  = SCB->HFSR;
+    info.mmfar = SCB->MMFAR;
+    info.bfar  = SCB->BFAR;
+#endif
+
+    embed::fault::capture(info);
+    embed::fault::report();
+
+    const embed::platform::Ops& ops = embed::platform::ops();
+    if (ops.reset != nullptr) ops.reset();
+    for (;;) {
+        __asm volatile("" ::: "memory");
+    }
+}
+
+#define MCFRAME_FAULT_WRAPPER(name, kind_value)                                \
+    extern "C" void name(void) __attribute__((naked, used));                   \
+    extern "C" void name(void) {                                               \
+        __asm volatile(                                                        \
+            "tst lr, #4          \n"                                          \
+            "ite eq              \n"                                          \
+            "mrseq r0, msp       \n"                                          \
+            "mrsne r0, psp       \n"                                          \
+            "mov r1, lr          \n"                                          \
+            "movs r2, #" #kind_value " \n"                                    \
+            "b fault_c           \n");                                        \
+    }
+
+MCFRAME_FAULT_WRAPPER(HardFault_Handler, 0)
+MCFRAME_FAULT_WRAPPER(MemManage_Handler, 1)
+MCFRAME_FAULT_WRAPPER(BusFault_Handler, 2)
+MCFRAME_FAULT_WRAPPER(UsageFault_Handler, 3)
+
+#undef MCFRAME_FAULT_WRAPPER
 
 uint32_t* platform_stack_init_frame(uint32_t* sp, void (*fn)(void*), void* ctx) noexcept {
     if (!sp || !fn) return nullptr;
@@ -464,17 +546,30 @@ static void platform_i2c_bind(void (*on_ev)() noexcept,
 // ───────────────────────────────── Лог ──────────────────────────────────────
 // Вывод в ITM (SWO): не требует UART и не тянет newlib-форматтер.
 // Если отладчик не подключён, запись просто игнорируется ядром.
+/// Готов ли ITM-порт, но НЕ бесконечно: без подключённого отладчика
+/// ITM->PORT[0].u32 не становится ненулевым, и прежний `while (...) {}`
+/// вешал ядро прямо в логе. Для обычного лога это «просто нет вывода», а для
+/// Fault-обработчика — несостоявшийся reset. Ждём ограниченно и бросаем
+/// символ, а не задачу.
+static bool itm_tx_ready() OS_PLATFORM_FN {
+    constexpr uint32_t kSpinLimit = 10000u;
+    for (uint32_t i = 0u; i < kSpinLimit; ++i) {
+        if (ITM->PORT[0].u32 != 0u) return true;
+    }
+    return false;
+}
+
 static void platform_log(const char* str) OS_PLATFORM_FN {
     if (!str) return;
     while (*str != '\0') {
         if (*str == '\n') {
-            while (ITM->PORT[0].u32 == 0u) { }
+            if (!itm_tx_ready()) return;
             ITM->PORT[0].u8 = static_cast<uint8_t>('\r');
         }
-        while (ITM->PORT[0].u32 == 0u) { }
+        if (!itm_tx_ready()) return;
         ITM->PORT[0].u8 = static_cast<uint8_t>(*str++);
     }
-    while (ITM->PORT[0].u32 == 0u) { }
+    if (!itm_tx_ready()) return;
     ITM->PORT[0].u8 = static_cast<uint8_t>('\n');
 }
 
@@ -515,6 +610,8 @@ static const Ops kOps{
     /* watchdog              */ &kWatchdogOps,
     /* boot                  */ &embed::stm32::boot::ops(),
     /* flash                 */ &embed::stm32::flash::ops(),
+    /* reset                 */ &platform_reset,
+    /* fault_enable          */ &platform_fault_enable,
 };
 
 const Ops& ops() noexcept { return kOps; }
@@ -561,6 +658,10 @@ bool validate() noexcept {
     if (kOps.flash->erase == nullptr) return false;
     if (kOps.flash->program == nullptr) return false;
     if (kOps.flash->read == nullptr) return false;
+
+    // Аварийный сброс: без него panic()/Fault не смогли бы завершиться.
+    if (kOps.reset == nullptr) return false;
+    if (kOps.fault_enable == nullptr) return false;
     return true;
 }
 

@@ -7,6 +7,7 @@
 # ─────────── Ядро ОС (не зависит от платформы) ───────────
 set(OS_CORE_SOURCES
     os/random.cpp
+    os/fault/fault.cpp
     os/core/memory/memory_manager.cpp
     os/core/memory/global_allocator.cpp
     os/core/task/sheduler.cpp
@@ -127,6 +128,11 @@ target_include_directories(MCFrame
 # Публичные требования: флаги через INTERFACE-таргет (устойчивы к внешним
 # CMAKE_*_FLAGS) плюс include-путь к CMSIS у STM32.
 target_link_libraries(MCFrame PUBLIC mcu_flags)
+
+# Бюджет диагностики аварии: полный отчёт или «тихий» захват записи.
+# Значение приходит из корневого CMakeLists (MCFRAME_FAULT_REPORT).
+target_compile_definitions(MCFrame PUBLIC
+    MCFRAME_FAULT_REPORT=$<BOOL:${MCFRAME_FAULT_REPORT}>)
 
 # CMSIS нужен и приложению: драйверы STM32 включают stm32f10x.h.
 if(MCU_TARGET STREQUAL "stm32")

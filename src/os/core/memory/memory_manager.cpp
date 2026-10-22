@@ -259,7 +259,7 @@ bool embed::memory_manager::task_stack_overflow(TaskHandler t) noexcept {
     if (!info || info->stack_base == nullptr) return false;
     // Дно стека (младший адрес) хранит магическое значение; если оно затёрто —
     // стек дорос до самого низа.
-    return info->stack_base[0] != 0xDEADBEEFu;
+    return info->stack_base[0] != kStackGuardMagic;
 }
 
 void embed::memory_manager::task_update_high_water(TaskHandler t) noexcept {
@@ -347,6 +347,7 @@ uint32_t* embed::memory_manager::task_stack_init(TaskHandler t, uint32_t* stack,
     info->stack_base  = stack;
     info->stack_words = words;
     info->high_water  = words;
+    t->set_stack_base(stack);
 
     uint32_t* sp = stack + words;
     if (p.stack_init_frame) sp = p.stack_init_frame(sp, t->fn(), t->ctx());

@@ -22,6 +22,7 @@ namespace embed {
     };
 
     class task;
+    class wait_queue;
     using TaskHandler = task*;
 
     /// Любое ядро — задача может выполняться на любом ядре.
@@ -57,6 +58,39 @@ namespace embed {
         uint32_t    core_        = kAnyCore;  // привязка к ядру (affinity)
         void*       wait_obj_    = nullptr;   // объект, на котором задача ждёт
 
+        // ── Очередь ожидания объекта (семафор/мьютекс) ──
+        //
+        // Узел ОТДЕЛЬНЫЙ от list_node<task>: задача с таймаутом одновременно
+        // стоит в очереди ожидания объекта и в sleep_list_ планировщика.
+        // Один узел не может принадлежать двум спискам — на этом уже
+        // обжигались с реестром задач.
+        TaskHandler wait_next_ = nullptr;
+        TaskHandler wait_prev_ = nullptr;
+        wait_queue* wait_queue_ = nullptr;    // очередь, в которой стоим
+        Size        wait_depth_ = 0;          // для проверок/диагностики
+
+        // ── Таймаут и «отложенное пробуждение» ──
+        // timed_out_ — задача проснулась ИМЕННО по таймауту; block_on()
+        // возвращает Timeout только по нему. deadline_armed_ отличает
+        // «block_on(t != 0)» от sleep_for(t): у первого истечение срока —
+        // это событие API, у второго — обычное пробуждение.
+        bool        timed_out_      = false;
+        bool        deadline_armed_ = false;
+        // wake_pending_ закрывает гонку «разбудили, пока задача ещё running,
+        // до входа в block_on»: пробуждение не теряется, а block_on()
+        // возвращается сразу, не засыпая.
+        bool        wake_pending_   = false;
+
+        // ── Приоритеты ──
+        // priority_ — действующий (его видят очереди), base_priority_ —
+        // назначенный приложением. PI/ceiling меняют только действующий.
+        uint32_t    base_priority_ = 0;
+
+        // ── Стек ──
+        // Нужен сторожевой проверке в переключении контекста: дно стека
+        // хранит kStackGuardMagic (см. platform_stack_paint).
+        uint32_t*   stack_base_ = nullptr;
+
         task() noexcept = default;
         task(const task&)            = delete;
         task& operator=(const task&) = delete;
@@ -78,11 +112,20 @@ namespace embed {
             name_        = name;
             stack_words_ = stack_words;
             priority_    = priority;
+            base_priority_ = priority;
             type_        = type;
             core_        = core;
             state_       = task_state::idle;
             delay_ticks_ = 0;
             wait_obj_    = nullptr;
+            wait_next_   = nullptr;
+            wait_prev_   = nullptr;
+            wait_queue_  = nullptr;
+            wait_depth_  = 0u;
+            timed_out_   = false;
+            deadline_armed_ = false;
+            wake_pending_   = false;
+            stack_base_  = nullptr;
             return Status::Ok;
         }
 
@@ -95,12 +138,21 @@ namespace embed {
             name_        = nullptr;
             stack_words_ = 0;
             priority_    = 0;
+            base_priority_ = 0;
             type_        = task_type::static_task;
             state_       = task_state::idle;
             ctx_         = nullptr;
             delay_ticks_ = 0;
             core_        = kAnyCore;
             wait_obj_    = nullptr;
+            wait_next_   = nullptr;
+            wait_prev_   = nullptr;
+            wait_queue_  = nullptr;
+            wait_depth_  = 0u;
+            timed_out_   = false;
+            deadline_armed_ = false;
+            wake_pending_   = false;
+            stack_base_  = nullptr;
         }
 
         void save_sp(uint32_t* sp) noexcept { sp_ = sp; }
@@ -115,6 +167,9 @@ namespace embed {
             if (state_ != task_state::idle && state_ != task_state::done) return false;
             delay_ticks_ = 0;
             state_       = task_state::ready;
+            timed_out_   = false;
+            deadline_armed_ = false;
+            wake_pending_   = false;
             return true;
         }
 
@@ -132,6 +187,8 @@ namespace embed {
             if (state_ != task_state::running || ticks == 0u) return false;
             state_       = task_state::sleeping;
             delay_ticks_ = ticks;
+            timed_out_   = false;
+            deadline_armed_ = false;   // это сон, а не таймаут API
             return true;
         }
 
@@ -139,14 +196,22 @@ namespace embed {
             if (state_ != task_state::sleeping) return false;
             state_       = task_state::ready;
             delay_ticks_ = 0;
+            deadline_armed_ = false;
             return true;
         }
 
         /// Блокировка на объекте. ticks == 0 — без таймаута (blocked).
+        ///
+        /// Только ПОДГОТОВКА состояния: постановку в очередь ожидания и
+        /// снятие с процессора делает планировщик (block_on/block_on_locked),
+        /// причём в ТОЙ ЖЕ критической секции, где проверен предикат. Иначе
+        /// между «проверили» и «уснули» теряется пробуждение.
         bool block_on(void* obj, uint32_t ticks) noexcept {
             if (state_ != task_state::running) return false;
             wait_obj_    = obj;
             delay_ticks_ = ticks;
+            timed_out_   = false;
+            deadline_armed_ = (ticks != 0u);
             state_       = (ticks == 0u) ? task_state::blocked : task_state::sleeping;
             return true;
         }
@@ -156,7 +221,13 @@ namespace embed {
             wait_obj_    = nullptr;
             state_       = task_state::ready;
             delay_ticks_ = 0;
+            deadline_armed_ = false;
             return true;
+        }
+
+        /// Действительно ли задача ждёт на объекте (для wait_queue).
+        bool is_waiting_on(void* obj) const noexcept {
+            return wait_obj_ == obj && (is_blocked() || is_sleeping());
         }
 
         // ── Время ──
@@ -192,10 +263,18 @@ namespace embed {
         void*       ctx()         const noexcept { return ctx_; }
         const char* name()        const noexcept { return name_; }
         uint32_t    priority()    const noexcept { return priority_; }
+        uint32_t    base_priority() const noexcept { return base_priority_; }
         uint32_t    stack_words() const noexcept { return stack_words_; }
         task_type   type()        const noexcept { return type_; }
         task_state  state()       const noexcept { return state_; }
         void*       wait_obj()    const noexcept { return wait_obj_; }
+        uint32_t*   stack_base()  const noexcept { return stack_base_; }
+        bool        timed_out()   const noexcept { return timed_out_; }
+        bool        wake_pending() const noexcept { return wake_pending_; }
+
+        void set_stack_base(uint32_t* base) noexcept { stack_base_ = base; }
+        void set_wake_pending() noexcept { wake_pending_ = true; }
+        void clear_wake_pending() noexcept { wake_pending_ = false; }
 
         uint32_t    core()        const noexcept { return core_; }
         bool        is_pinned()   const noexcept { return core_ != kAnyCore; }
@@ -207,6 +286,97 @@ namespace embed {
         bool is_done()     const noexcept { return state_ == task_state::done; }
         bool is_stopped()  const noexcept {
             return state_ == task_state::done || state_ == task_state::idle;
+        }
+    };
+
+    /// Очередь ожидания ОБЪЕКТА (семафор, мьютекс, очередь сообщений).
+    ///
+    /// Отдельный тип, а не intrusive_list<task>: у задачи уже занят
+    /// унаследованный узел очередями готовых/sleep, а задача с таймаутом
+    /// должна стоять ещё и в sleep_list_. Поэтому у task есть ПАРА
+    /// собственных указателей wait_next_/wait_prev_, а очередь хранит
+    /// голову и счётчик.
+    ///
+    /// Порядок — по приоритету (0 — высший), внутри одного приоритета FIFO.
+    /// Именно это делает unblock_one() детерминированным и не даёт
+    /// низкоприоритетной задаче «перехватить» ресурс у высокоприоритетной.
+    class wait_queue {
+        TaskHandler head_  = nullptr;
+        Size        count_ = 0u;
+
+    public:
+        wait_queue() noexcept = default;
+        wait_queue(const wait_queue&)            = delete;
+        wait_queue& operator=(const wait_queue&) = delete;
+
+        bool empty() const noexcept { return head_ == nullptr; }
+        Size size()  const noexcept { return count_; }
+        TaskHandler front() const noexcept { return head_; }
+
+        /// Поставить задачу в очередь. false — задача уже стоит в другой
+        /// очереди (двойная постановка разрушила бы оба списка).
+        bool push(TaskHandler t) noexcept {
+            if (t == nullptr || t->wait_queue_ != nullptr) return false;
+
+            // Ищем первое место, где приоритет ожидающего НИЖЕ нашего
+            // (больше число). Равные приоритеты не обгоняют друг друга:
+            // вставка идёт ПОСЛЕ них, то есть FIFO.
+            TaskHandler* link = &head_;
+            TaskHandler  prev = nullptr;
+            while (*link != nullptr && (*link)->priority() <= t->priority()) {
+                prev  = *link;
+                link  = &(*link)->wait_next_;
+            }
+
+            t->wait_prev_  = prev;
+            t->wait_next_  = *link;
+            if (*link != nullptr) (*link)->wait_prev_ = t;
+            *link = t;
+            t->wait_queue_ = this;
+            t->wait_depth_ = count_ + 1u;
+            ++count_;
+            return true;
+        }
+
+        /// Снять задачу из очереди. false — она не в этой очереди.
+        bool remove(TaskHandler t) noexcept {
+            if (t == nullptr || t->wait_queue_ != this) return false;
+
+            if (t->wait_prev_ != nullptr) t->wait_prev_->wait_next_ = t->wait_next_;
+            else                          head_ = t->wait_next_;
+            if (t->wait_next_ != nullptr) t->wait_next_->wait_prev_ = t->wait_prev_;
+
+            t->wait_next_  = nullptr;
+            t->wait_prev_  = nullptr;
+            t->wait_queue_ = nullptr;
+            t->wait_depth_ = 0u;
+            if (count_ > 0u) --count_;
+            return true;
+        }
+
+        /// Снять и вернуть самую приоритетную задачу.
+        TaskHandler pop_highest() noexcept {
+            TaskHandler t = head_;
+            if (t != nullptr) (void)remove(t);
+            return t;
+        }
+
+        bool contains(const TaskHandler t) const noexcept {
+            return t != nullptr && t->wait_queue_ == this;
+        }
+
+        void clear() noexcept {
+            TaskHandler t = head_;
+            while (t != nullptr) {
+                TaskHandler next = t->wait_next_;
+                t->wait_next_  = nullptr;
+                t->wait_prev_  = nullptr;
+                t->wait_queue_ = nullptr;
+                t->wait_depth_ = 0u;
+                t = next;
+            }
+            head_  = nullptr;
+            count_ = 0u;
         }
     };
 

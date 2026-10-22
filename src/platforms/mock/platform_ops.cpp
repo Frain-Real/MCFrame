@@ -59,6 +59,14 @@ static void mock_trigger_context_switch() OS_PLATFORM_FN {}
 static uint32_t* mock_save_context() OS_PLATFORM_FN { return nullptr; }
 static void mock_load_context(uint32_t* /*sp*/) OS_PLATFORM_FN {}
 
+// ───────────────────────────── Аварийный сброс ──────────────────────────────
+// На стенде «сброс» — только счётчик: тест не должен уходить в бесконечный
+// цикл. panic() после возврата из reset() остаётся в аварийном цикле, поэтому
+// тесты аварий вызывают capture()/report(), а не panic().
+static uint32_t g_reset_calls = 0u;
+static void mock_reset() OS_PLATFORM_FN { ++g_reset_calls; }
+static void mock_fault_enable() OS_PLATFORM_FN {}
+
 // ───────────────────────────────── Время ────────────────────────────────────
 static void mock_timer_init() OS_PLATFORM_FN {}
 static bool mock_timer_can_period_ms(uint32_t period_ms) OS_PLATFORM_FN {
@@ -98,7 +106,7 @@ static void mock_stack_paint(uint32_t* stack, uint32_t words) OS_PLATFORM_FN {
     if (!stack || words == 0u) return;
     // Дно хранит магическое значение (детекция переполнения),
     // остальное — паттерн для расчёта high-water mark.
-    stack[0] = 0xDEADBEEFu;
+    stack[0] = kStackGuardMagic;
     for (uint32_t i = 1u; i < words; ++i) stack[i] = 0xA5A5A5A5u;
 }
 
@@ -178,6 +186,8 @@ static const Ops kOps{
     /* watchdog              */ &mock_watchdog_ops(),
     /* boot                  */ &mock_platform::mock_boot_ops(),
     /* flash                 */ &mock_platform::mock_flash_ops(),
+    /* reset                 */ &mock_reset,
+    /* fault_enable          */ &mock_fault_enable,
 };
 
 const Ops& ops() OS_PLATFORM_FN { return kOps; }
@@ -227,6 +237,10 @@ bool validate() OS_PLATFORM_FN {
     if (kOps.flash->erase == nullptr) return false;
     if (kOps.flash->program == nullptr) return false;
     if (kOps.flash->read == nullptr) return false;
+
+    // Аварийный сброс: без него panic()/Fault не смогли бы завершиться.
+    if (kOps.reset == nullptr) return false;
+    if (kOps.fault_enable == nullptr) return false;
     return true;
 }
 
