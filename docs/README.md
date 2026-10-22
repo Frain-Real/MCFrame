@@ -8,6 +8,7 @@
 - [Phase 4](phase4.md) — ESP32-C3, FreeRTOS backend, IDF-проект.
 - [Phase 5](phase5.md) — WiFi/BLE, provisioning, HTTPS OTA.
 - [Phase 6](phase6.md) — NVS, mcflash, rollback, FlashOps.
+- [Phase 7](phase7.md) — power, security, diagnostics, sanitizers.
 - [HAL и board](hal.md) — интерфейсы Phase 1.
 
 ## Architecture Decision Records

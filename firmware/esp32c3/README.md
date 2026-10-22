@@ -38,6 +38,10 @@ reboot
 wifi <ssid> <password>     # UART-provisioning (приоритетная задача)
 ble scan|adv|stop
 ota <https-url>            # HTTPS + TLS, запись в ota_0/ota_1
+heap                       # свободная/минимальная куча
+tasks                      # задачи, приоритеты, запас стека
+reset                      # причина сброса (включая brown-out)
+power                      # DFS/light sleep
 gpio/spi/pwm ...
 ```
 
@@ -58,5 +62,5 @@ GATT-сервис `6d636672-...`:
   встроенный provisioning-сервис работает.
 - BLE pairing/security отключён, чтобы уложиться в 1 МБ.
 - TLS 1.2, common CA bundle; TLS 1.3/IPv6 отключены.
-- `mcframe_c3.bin` занимает ~0xf5dc0 из 1 МБ (~41.5 КБ, 4% запаса).
+- `mcframe_c3.bin` занимает ~0xee670 из 1 МБ (~72.0 КБ, 7% запаса).
 - На реальной плате WiFi/BLE/OTA не проверялись.

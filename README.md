@@ -34,7 +34,7 @@ cmake --build build --parallel
 | `stm32` | armv7m | stm32f1 | mcframe | готово |
 | `stm32f4` | armv7m | stm32f4 | mcframe | Phase 2 (self-test) |
 | `stm32g4` | armv7m | stm32g4 | mcframe | Phase 2 (self-test) |
-| `esp32c3` | riscv32 | esp32c3 | freertos | Phase 6 (NVS/OTA/rollback) |
+| `esp32c3` | riscv32 | esp32c3 | freertos | Phase 7 (hardening) |
 
 ```bash
 ./build.sh stm32f4 Release        # Phase 2 self-test (phase2_fw.elf)
@@ -57,6 +57,7 @@ C3 — Phase 5 IDF-проект: `firmware/esp32c3/build.sh` (WiFi/BLE/OTA);
 - [`docs/phase4.md`](docs/phase4.md) — критерии приёмки Phase 4;
 - [`docs/phase5.md`](docs/phase5.md) — WiFi/BLE/provisioning/OTA;
 - [`docs/phase6.md`](docs/phase6.md) — NVS/mcflash/rollback/FlashOps;
+- [`docs/phase7.md`](docs/phase7.md) — power/security/diagnostics/sanitizers;
 - [`docs/adr/001-kernel-backends.md`](docs/adr/001-kernel-backends.md) — MCFrame/FreeRTOS backend;
 - [`docs/adr/002-hal-interfaces.md`](docs/adr/002-hal-interfaces.md) — HAL-интерфейсы;
 - [`docs/adr/003-layer-model.md`](docs/adr/003-layer-model.md) — arch/soc/board/kernel;
@@ -145,7 +146,7 @@ idf.py build
 Phase 5 добавляет WiFi AP+STA (WPA2), BLE NimBLE (peripheral GATT,
 observer, broadcaster, central connect), provisioning по BLE/UART и HTTPS OTA с TLS.
 Реальная сборка выполнена на ESP-IDF 6.0.2; `mcframe_c3.bin` занимает
-0xf5dc0 из 1 МБ.
+0xee670 из 1 МБ.
 
 ### Phase 6: NVS и OTA-инструменты
 
@@ -159,6 +160,13 @@ observer, broadcaster, central connect), provisioning по BLE/UART и HTTPS OTA
 - NVS на F4 BSP (16 КБ после OTA-метаданных);
 - C3 `EspPartitionStorage` и bootloader rollback/confirm;
 - `docs/phase6.md` — ограничения (MOLP/TLS на C3, HIL).
+
+### Phase 7: production hardening
+
+- C3: DFS/light sleep, brown-out detector, BLE encryption, shell `heap/tasks/reset/power`;
+- STM32: PVD (`power::Brownout`), F4/G4 bootloader + два слота, NVS на F4;
+- ASan/UBSan: `-DMCFRAME_SANITIZE=ON`, CI job `sanitizers`;
+- C3 `mcframe_c3.bin` = 0xee670, свободно ~72 КБ (7%).
 
 ### LTO
 

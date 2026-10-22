@@ -57,6 +57,18 @@ jobs:
           arm-none-eabi-size .build/${{ matrix.target }}/firmware/phase2/phase2_fw.elf
           arm-none-eabi-size .build/${{ matrix.target }}/firmware/phase3/phase3_fw.elf
 
+  sanitizers:
+    name: sanitizers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ASan/UBSan host tests
+        run: |
+          cmake -S . -B .build/san -DMCU_TARGET=mock -DCMAKE_BUILD_TYPE=Debug -DMCFRAME_SANITIZE=ON
+          cmake --build .build/san -j2
+          ctest --test-dir .build/san --output-on-failure
+
   esp32c3-idf:
     name: esp32c3-idf-build
     runs-on: ubuntu-latest

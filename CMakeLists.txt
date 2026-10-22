@@ -67,6 +67,15 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "" FORCE)
 endif()
 
+option(MCFRAME_SANITIZE "ASan/UBSan для host-тестов (mock)" OFF)
+if(MCFRAME_SANITIZE)
+    if(NOT MCU_TARGET STREQUAL "mock")
+        message(FATAL_ERROR "MCFRAME_SANITIZE поддерживается только для mock")
+    endif()
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mcu_flags.cmake)
 
 # Compile definitions целевой матрицы для ядра и приложения:

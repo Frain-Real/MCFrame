@@ -73,7 +73,6 @@ Status BleEsp::init(const BleConfig& cfg) noexcept {
     ble_hs_cfg.sync_cb = &BleEsp::on_sync;
     ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
     ble_hs_cfg.sm_sc = 1;
-    ble_hs_cfg.sm_legacy = 1;
     ble_hs_cfg.sm_mitm = 0;
     ble_svc_gap_init();
     ble_svc_gatt_init();

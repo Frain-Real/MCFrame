@@ -3,6 +3,7 @@
 #include "board.hpp"
 #include "esp_system.h"
 #include "esp_pm.h"
+#include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <cstring>
 

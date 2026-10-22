@@ -6,7 +6,7 @@
 | `stm32` | armv7m | stm32f1 | generic | mcframe | done | F103 |
 | `stm32f4` | armv7m | stm32f4 | generic | mcframe | Phase 2 | self-test |
 | `stm32g4` | armv7m | stm32g4 | generic | mcframe | Phase 2 | self-test |
-| `esp32c3` | riscv32 | esp32c3 | generic | freertos | Phase 6 | IDF project |
+| `esp32c3` | riscv32 | esp32c3 | generic | freertos | Phase 7 | IDF project |
 
 ## Команды
 
