@@ -91,6 +91,12 @@ namespace embed {
         // хранит kStackGuardMagic (см. platform_stack_paint).
         uint32_t*   stack_base_ = nullptr;
 
+        // ── Статистика (для shell/ps и поиска «кто съел CPU») ──
+        // runtime_ticks_ — сколько тиков задача была current; switches_ —
+        // сколько раз её выбирали на исполнение (диспетчеризаций).
+        uint64_t    runtime_ticks_ = 0;
+        uint32_t    switches_      = 0;
+
         task() noexcept = default;
         task(const task&)            = delete;
         task& operator=(const task&) = delete;
@@ -126,6 +132,8 @@ namespace embed {
             deadline_armed_ = false;
             wake_pending_   = false;
             stack_base_  = nullptr;
+            runtime_ticks_ = 0u;
+            switches_      = 0u;
             return Status::Ok;
         }
 
@@ -153,6 +161,8 @@ namespace embed {
             deadline_armed_ = false;
             wake_pending_   = false;
             stack_base_  = nullptr;
+            runtime_ticks_ = 0u;
+            switches_      = 0u;
         }
 
         void save_sp(uint32_t* sp) noexcept { sp_ = sp; }
@@ -271,6 +281,9 @@ namespace embed {
         uint32_t*   stack_base()  const noexcept { return stack_base_; }
         bool        timed_out()   const noexcept { return timed_out_; }
         bool        wake_pending() const noexcept { return wake_pending_; }
+        uint64_t    runtime_ticks() const noexcept { return runtime_ticks_; }
+        uint32_t    switches()    const noexcept { return switches_; }
+        void        reset_stats() noexcept { runtime_ticks_ = 0u; switches_ = 0u; }
 
         void set_stack_base(uint32_t* base) noexcept { stack_base_ = base; }
         void set_wake_pending() noexcept { wake_pending_ = true; }

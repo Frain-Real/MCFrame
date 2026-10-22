@@ -108,6 +108,10 @@ public:
     /// Возвращает true, если кто-то был разбужен.
     bool unblock_one(wait_queue& q) noexcept;
 
+    /// Разбудить ВСЕХ из очереди q (EventFlags: каждый перепроверит маску).
+    /// Возвращает число разбуженных.
+    Size unblock_all(wait_queue& q) noexcept;
+
     /// Совместимость: разбудить первую задачу, ждущую на объекте obj
     /// (линейный поиск). Новый код должен использовать unblock_one(q).
     bool unblock_one(void* obj) noexcept;
@@ -123,6 +127,12 @@ public:
 
     // ──────────── Тик и переключение ────────────
     void tick() noexcept;
+
+    /// Квант round-robin для задач одного приоритета, тиков.
+    /// 0 — выключить (строго приоритетное планирование). Включается на ходу
+    /// и не влияет на задачи разных приоритетов.
+    void     set_time_slice(uint32_t ticks) noexcept { time_slice_ticks_ = ticks; }
+    uint32_t time_slice() const noexcept { return time_slice_ticks_; }
 
     /// Сменить контекст: сохранить SP уходящей задачи, выбрать следующую и
     /// загрузить её контекст. На МКУ эту работу делает обработчик PendSV,
@@ -188,6 +198,12 @@ public:
     /// Основа для «горизонта сна»: просыпаться раньше срока задачи нельзя.
     uint32_t next_sleep_ticks() const noexcept;
     Size     task_count()  const noexcept { return all_tasks_.size(); }
+
+    /// Снимок указателей на задачи (включая idle) без блокировки на время
+    /// обхода: shell/ps не должен держать Lock, пока печатает.
+    /// Возвращает число записей; порядок — реестр + idle последним.
+    Size     task_snapshot(TaskHandler* out, Size max) noexcept;
+
     uint32_t core_count()  const noexcept { return core_count_; }
     uint32_t ready_count(uint32_t core_id) const noexcept {
         if (core_id >= core_count_) return 0u;
@@ -231,6 +247,7 @@ private:
     bool                 started_    = false;
     bool                 initialized_ = false;
     uint64_t             tick_count_ = 0;
+    uint32_t             time_slice_ticks_ = config::kTimeSliceTicks;
     Size                 switch_requests_ = 0;   // диагностика (см. switch_requests)
 
     uint32_t find_least_loaded_core() const noexcept;

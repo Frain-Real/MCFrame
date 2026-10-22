@@ -30,6 +30,15 @@
 #define MCFRAME_MAX_PRIORITIES 8u
 #endif
 
+/// Квант round-robin для задач ОДНОГО приоритета, тиков. 0 — выключено.
+///
+/// По умолчанию выключено: планировщик остаётся строго приоритетным, и
+/// поведение не меняется от сборки к сборке. Включайте, если приложение
+/// состоит из равноправных задач, которые не блокируются сами.
+#ifndef MCFRAME_TIME_SLICE_TICKS
+#define MCFRAME_TIME_SLICE_TICKS 0u
+#endif
+
 namespace embed::config {
 
     /// Максимальное число ядер (compile-time).
@@ -37,6 +46,9 @@ namespace embed::config {
 
     /// Максимальное число приоритетов (compile-time).
     inline constexpr unsigned kMaxPriority = MCFRAME_MAX_PRIORITIES;
+
+    /// Квант round-robin (0 = выключен).
+    inline constexpr uint32_t kTimeSliceTicks = MCFRAME_TIME_SLICE_TICKS;
 
     static_assert(kMaxCores >= 1u, "MCFRAME_MAX_CORES должен быть >= 1");
     static_assert(kMaxCores <= 16u, "MCFRAME_MAX_CORES разумно ограничить 16");

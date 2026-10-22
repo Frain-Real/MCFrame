@@ -27,6 +27,15 @@ message(STATUS "MCFrame: платформа=${MCU_TARGET}")
 set(MCFRAME_IMAGE "flat" CACHE STRING "Образ example_fw: flat | slot")
 set_property(CACHE MCFRAME_IMAGE PROPERTY STRINGS flat slot)
 
+# Квант round-robin для задач одного приоритета, тиков (0 — выключен).
+# Включайте, если задачи равного приоритета не блокируются сами.
+set(MCFRAME_TIME_SLICE_TICKS "0" CACHE STRING
+    "Квант round-robin в тиках (0 = выключен)")
+
+# Логи: сколько записей хранить и какой уровень компилировать.
+set(MCFRAME_LOG_ENTRIES "8" CACHE STRING "Записей в кольце логов")
+set(MCFRAME_LOG_LEVEL "3" CACHE STRING "Порог логов: 0 Error .. 3 Debug")
+
 # Печатать отчёт об аварии (Fault/panic) через платформенный лог.
 #
 # По умолчанию ON. OFF экономит ~400 Б Flash: запись об аварии (.noinit +

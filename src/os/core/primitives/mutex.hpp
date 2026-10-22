@@ -35,6 +35,9 @@ namespace sched_api {
     /// Разбудить самую приоритетную задачу из очереди q.
     bool unblock_one(wait_queue& q) noexcept;
 
+    /// Разбудить всех из q (EventFlags: каждый перепроверит маску).
+    Size unblock_all(wait_queue& q) noexcept;
+
     /// Совместимость: разбудить первую задачу, ждущую на obj.
     bool unblock_one(void* obj) noexcept;
 

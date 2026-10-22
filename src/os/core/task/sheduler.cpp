@@ -211,6 +211,7 @@ void scheduler::switch_to(core_state& core, TaskHandler next) noexcept {
     if (next == nullptr || next == core.current) return;
     ready_remove(core, next);
     next->set_running();
+    ++next->switches_;
     core.current = next;
 }
 
@@ -401,6 +402,28 @@ bool scheduler::unblock_one(wait_queue& q) noexcept {
     return true;
 }
 
+Size scheduler::unblock_all(wait_queue& q) noexcept {
+    Lock lock;
+    Size woken = 0u;
+
+    for (;;) {
+        TaskHandler t = q.pop_highest();
+        if (t == nullptr) break;
+
+        sleep_list_.remove(t);
+        t->timed_out_ = false;
+        t->clear_wake_pending();
+        if (!t->unblock()) continue;
+
+        const uint32_t core = t->is_pinned() ? t->core() : find_least_loaded_core();
+        if (core >= core_count_) continue;
+        if (!ready_push(cores_[core], t)) continue;
+        check_preempt(cores_[core]);
+        ++woken;
+    }
+    return woken;
+}
+
 bool scheduler::unblock_one(void* obj) noexcept {
     Lock lock;
 
@@ -560,6 +583,16 @@ void scheduler::tick() noexcept {
     Lock lock;
     ++tick_count_;
 
+    const uint32_t core = P().current_core();
+
+    // Учёт CPU по задачам: один указатель и одно 64-битное сложение за тик.
+    // tick() уже в прерывании, поэтому Lock не нужен — current не меняется
+    // между чтением и инкрементом.
+    if (core < core_count_) {
+        TaskHandler running = cores_[core].current;
+        if (running != nullptr) ++running->runtime_ticks_;
+    }
+
     // Сэмплируем глубину стеков по тику. Делается в прерывании, потому что
     // значения стека валидны именно в момент вытеснения; в простое этим
     // занимается idle-задача. Измерение не влияет на планирование.
@@ -567,8 +600,26 @@ void scheduler::tick() noexcept {
 
     process_sleep_list(1u);
 
-    const uint32_t core = P().current_core();
     if (core >= core_count_) return;
+
+    // Round-robin: только внутри ОДНОГО приоритета. Если в очереди того же
+    // приоритета есть готовая задача, текущая уходит в её хвост. Более
+    // приоритетные задачи и так вытеснят её через check_preempt().
+    if (time_slice_ticks_ != 0u && (tick_count_ % time_slice_ticks_) == 0u) {
+        TaskHandler cur = cores_[core].current;
+        if (cur != nullptr && cur != &idle_tcb_ && cur->is_running()) {
+            const uint32_t prio = (cur->priority() < kMaxPriority)
+                ? cur->priority() : (kMaxPriority - 1u);
+            if (!cores_[core].ready[prio].empty()) {
+                cur->suspend();
+                if (ready_push(cores_[core], cur)) {
+                    request_context_switch();
+                } else {
+                    cur->resume();   // не потерять задачу при сбое очереди
+                }
+            }
+        }
+    }
 
     // Вытеснение ТОЛЬКО ЗАПРАШИВАЕТСЯ, но не выполняется здесь.
     //
@@ -638,6 +689,18 @@ void scheduler::process_sleep_list(uint32_t ticks_step) noexcept {
     }
 }
 
+Size scheduler::task_snapshot(TaskHandler* out, Size max) noexcept {
+    if (out == nullptr || max == 0u) return 0u;
+
+    Lock lock;
+    Size n = 0u;
+    for (auto it = all_tasks_.begin(); !it.done() && n < max; it.advance()) {
+        out[n++] = it.get();
+    }
+    if (n < max) out[n++] = &idle_tcb_;
+    return n;
+}
+
 void scheduler::check_preempt(core_state& core) noexcept {
     if (!core.current || !core.current->is_running()) return;
     TaskHandler next = pick_next(core);
@@ -690,6 +753,7 @@ uint32_t* scheduler::prepare_context_switch(uint32_t* saved_sp) noexcept {
 
     ready_remove(c, next);
     next->set_running();
+    ++next->switches_;
     c.current = next;
     return next->load_sp();
 }
@@ -735,6 +799,10 @@ Status block_on_locked(Lock& lock, wait_queue& q, void* obj,
 
 bool unblock_one(wait_queue& q) noexcept {
     return scheduler::instance().unblock_one(q);
+}
+
+Size unblock_all(wait_queue& q) noexcept {
+    return scheduler::instance().unblock_all(q);
 }
 
 bool unblock_one(void* obj) noexcept {

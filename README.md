@@ -117,10 +117,14 @@ src/os/
   common.hpp             Status, Lock, общие типы
   config/                конфигурация таймеров и DMA
   core/primitives/       atomic_t, списки, очереди, кольцевой буфер, mutex, semaphore
-  core/task/             задача и планировщик
+  core/ipc/              MessageQueue, Mailbox, EventFlags (статические, ISR-safe)
+  core/work/             WorkQueue: отложенная обработка прерываний
+  core/task/             задача, планировщик, очередь ожидания, статистика
   power/                 супервизор энергосбережения: сон и статистика нагрузки
   watchdog/              сторожевой таймер: слежение за участниками и посмертная запись
   fault/                 диагностика аварий: Fault, crash record, panic/assert
+  log/                   уровни, кольцевой буфер, запись из ISR
+  shell/                 консоль: help/ps/free/stats/log/reboot + wd/ota
   ota/                   обновление прошивки: приём, проверка, активация слотов
   boot/                  загрузчик: выбор слота, проверка образа, переход
   core/memory/           менеджер памяти, аллокатор
@@ -208,6 +212,14 @@ target_link_libraries(my_app PRIVATE MCFrame::MCFrame)
 | Смена контекста | Обработчики `PendSV_Handler`/`SVC_Handler` уже определены платформой; своих с этими именами не заводить — см. «Смена контекста: PendSV и SVC» |
 | Критическая секция | `embed::Lock` (сохраняет/восстанавливает PRIMASK) |
 | Ожидание события | `semaphore::wait()` / `mutex::lock()` — блокируют задачу, а не крутят CPU; таймаут абсолютный, очередь ожидания — по приоритету |
+| Очередь сообщений | `MessageQueue<T,N>` — статическая, `push/pop` с таймаутом, `push_from_isr/pop_from_isr` |
+| Почтовый ящик | `Mailbox<T>` — одно место, `post()` перезаписывает последнее значение |
+| Группа событий | `EventFlags` — 32 бита, `wait(mask, all, clear_on_exit)` |
+| Отложенная работа | `WorkQueue<N>` — ISR/таймер делает `post()`, задача исполняет; колбэки не работают в прерывании |
+| Статистика задач | `task::runtime_ticks()/switches()`, `scheduler::task_snapshot()` |
+| Round-robin | `scheduler::set_time_slice(ticks)` или `-DMCFRAME_TIME_SLICE_TICKS=N` (0 — выкл.) |
+| Логи | `MCFRAME_LOG_INFO(tag, msg)`, `log::from_isr()`, `log::pop()` — кольцо для shell |
+| Shell | `shell::Console` + `add_watchdog_commands()` / `add_ota_commands()` |
 | Авария | `MCFRAME_ASSERT(cond)`, `MCFRAME_PANIC(kind)`, `fault::last()/report()`; запись переживает reset — см. «Диагностика отказов» |
 | Переполнение стека | Маркер дна проверяется в переключении контекста; приложение может спросить `scheduler::stack_guard_ok(t)` |
 | Из прерывания | `semaphore::signal_from_isr()`, `task::*_from_isr`-пути, без `Lock` |
@@ -311,6 +323,95 @@ PI/ceiling).
   внутри критической секции; для долгоживущих систем добавьте внешний
   watchdog-контроль владельца.
 * `try_lock()` не блокируется и не поднимает приоритет владельца.
+
+## Очереди сообщений, почтовый ящик, события
+
+Три примитива над `wait_queue`, без динамической памяти и с ISR-вариантами.
+
+```cpp
+#include "os/core/ipc/message_queue.hpp"
+#include "os/core/ipc/mailbox.hpp"
+#include "os/core/ipc/event_flags.hpp"
+
+embed::MessageQueue<MyMsg, 8> q;       // 8 сообщений, память в объекте
+MyMsg m{};
+q.push(m);                              // без таймаута
+q.push(m, 100);                         // ждать до 100 тиков -> Status::Timeout
+q.push_from_isr(m);                     // из прерывания, не блокируется
+q.pop(m, 50);
+
+embed::Mailbox<uint32_t> latest;        // одно место, последнее важнее
+latest.post(42);                        // перезаписывает, не блокируется
+latest.pend(v, 100);                    // ждёт появления
+latest.post_from_isr(43);
+
+embed::EventFlags events;
+events.set(0x01);                       // из задачи
+events.set_from_isr(0x02);              // из прерывания
+events.wait(0x03, /*all*/ true, /*clear*/ true);
+```
+
+Правила те же, что у семафора/мьютекса:
+
+* проверка места/данных и постановка в очередь — **одна критическая секция**,
+  поэтому сигнал из ISR не теряется;
+* очередь ожидания — по приоритету, внутри приоритета FIFO;
+* таймаут абсолютный;
+* `pop` будит ожидающего писателя, `push` — ожидающего читателя;
+* `T` в `MessageQueue<T,N>` должен быть default-constructible (буфер — массив
+  `T[N]`; для нетривиальных типов используйте `Mailbox`/свою обёртку).
+
+`EventFlags::set()` будит **всех** ожидающих: каждый перепроверяет свою маску
+под Lock и либо забирает событие, либо снова засыпает. Это дороже «разбудить
+одного», но единственно корректно для «любое из»/«все из».
+
+## Отложенная обработка: WorkQueue
+
+Колбэки таймеров (`TimerModule`) и обработчики прерываний выполняются в
+контексте исключения: в них нельзя ждать, брать мьютекс или делать долгую
+работу. `WorkQueue` переносит работу в обычную задачу:
+
+```cpp
+#include "os/core/work/work_queue.hpp"
+
+embed::WorkQueue<8> jobs;
+static uint32_t jobs_stack[128];
+
+void handle_sample(void*) noexcept;
+
+void on_timer(void*) noexcept {           // контекст ISR
+    jobs.post_from_isr(&handle_sample, nullptr);
+}
+
+int main() {
+    (void)jobs.start("jobs", jobs_stack, 128, /*priority*/ 5);
+    // ...
+}
+
+void handle_sample(void*) noexcept {      // обычный контекст задачи
+    // здесь можно ждать, брать мьютекс, писать во Flash
+}
+```
+
+`post()` можно вызывать до `start()` — работа не потеряется, задача заберёт её
+при первом запуске. Если очередь заполнена, `post()` возвращает `false`, а не
+блокируется. Стек задачи передаёт приложение: WorkQueue не выделяет память.
+
+## Round-robin
+
+По умолчанию планировщик строго приоритетный: задача одного приоритета
+владеет CPU, пока не заблокируется. Если в приложении есть равноправные
+задачи, включите квант:
+
+```cpp
+embed::scheduler::instance().set_time_slice(10);   // 10 тиков
+// или на этапе сборки: -DMCFRAME_TIME_SLICE_TICKS=10
+```
+
+Раз в квант текущая задача уходит в хвост очереди **своего** приоритета, и
+ядро выбирает следующую. Задачи более высокого приоритета вытесняют её как
+обычно; на разные приоритеты квант не влияет. `0` (по умолчанию) выключает
+round-robin полностью, сохраняя детерминизм.
 
 ## Смена контекста: PendSV и SVC
 
@@ -594,6 +695,10 @@ void   pollOnIrq() noexcept;                         // опрос (для Polli
 | Предел подписи OTA | `-DMCFRAME_OTA_SIGNATURE_MAX=N` | 80 байт |
 | Запись об аварии | `.noinit`, `fault::Record` | 96 Б (всегда) |
 | Отчёт об аварии | `-DMCFRAME_FAULT_REPORT=ON/OFF` | ON (OFF экономит ~400 Б) |
+| Кольцо логов | `-DMCFRAME_LOG_ENTRIES=N` | 8 записей (~0.5 КБ) |
+| Уровень логов | `-DMCFRAME_LOG_LEVEL=0..3` | 3 (Debug) |
+| Статистика задачи | `task::runtime_ticks_`, `switches_` | +12 Б на TCB |
+| Квант round-robin | `-DMCFRAME_TIME_SLICE_TICKS=N` | 0 (выключен) |
 | Куча ОС | `-DMCU_OS_HEAP_BYTES=N` | 512 (0 = выключена) |
 | Пул стеков задач | `-DMCU_OS_STACK_POOL_WORDS=N` | 0 (выключен) |
 | Стек MSP | `-DMCU_MSP_STACK_BYTES=N` | 1K |
@@ -1073,6 +1178,66 @@ medium-density его нет), а дешёвая канарейка: она фи
   после Fault состояние ядра не определено.
 * Тесты на стенде проверяют запись и отчёт на синтетическом кадре; сам переход
   в исключение проверяется только на железе.
+
+## Логирование
+
+`os/log/` — уровни, метка, кольцевой буфер и безопасная запись из ISR:
+
+```cpp
+#include "os/log/log.hpp"
+
+MCFRAME_LOG_INFO("APP", "started");
+embed::log::write_u32(embed::log::Level::Warn, "OTA", "offset", 4096u);
+
+// Из прерывания: только в кольцо, без вывода (ITM/UART могут ждать)
+embed::log::from_isr(embed::log::Level::Error, "UART", "overrun");
+```
+
+| Настройка | Где | По умолчанию |
+|---|---|---|
+| Размер кольца | `-DMCFRAME_LOG_ENTRIES=N` | 8 записей |
+| Компиляторный порог | `-DMCFRAME_LOG_LEVEL=0..3` | 3 (Debug) |
+| Уровень на ходу | `log::set_level()` | Info |
+
+`log::pop()` отдаёт записи по одной; shell-команда `log` печатает кольцо.
+`from_isr()` не вызывает `platform_log_line`, потому что вывод в ITM/UART может
+ждать отладчик/линию — в прерывании это недопустимо.
+
+## Shell и статистика задач
+
+`os/shell/` — консоль, не знающая про UART: приложение кормит её символами и
+задаёт writer. Встроенные команды: `help`, `ps`, `free`, `stats`, `log`,
+`reboot`.
+
+```cpp
+#include "os/shell/shell.hpp"
+#include "os/shell/shell_watchdog.hpp"   // опционально: команда wd
+#include "os/shell/shell_ota.hpp"        // опционально: команда ota
+
+static void shell_out(void* ctx, const char* s) noexcept {
+    auto* uart = static_cast<UartPort*>(ctx);
+    (void)uart->write(s);                 // или platform_log_line
+}
+
+embed::shell::Console sh;
+sh.init(&shell_out, &uart);
+embed::shell::add_watchdog_commands(sh);  // тянет watchdog только если вызвано
+embed::shell::add_ota_commands(sh);       // то же для OTA
+
+// в задаче:
+uint8_t b;
+if (uart.read(&b, 1u, 10u) == Status::Ok) sh.feed(static_cast<char>(b));
+```
+
+`ps` печатает имя, состояние, приоритет/base, `runtime_ticks`, долю CPU,
+число диспетчеризаций и свободные слова стека. Для этого у `task` есть
+`runtime_ticks()`/`switches()`, а у планировщика — `task_snapshot()`: снимок
+указателей делается под Lock, а печать идёт уже без него, поэтому shell не
+блокирует планировщик на время вывода.
+
+`wd`/`ota` вынесены в отдельные заголовки: приложение, которому они не нужны,
+не тянет их код в образ. `ps/free/stats/log/reboot` живут в ядре и всегда
+доступны, если shell слинкован.
 
 ## Криптография
 
@@ -1816,7 +1981,7 @@ st-flash write .build/stm32/example_fw.bin    0x08005000   # слот A
 
 `.github/workflows/ci.yml` проверяет то, что легко сломать незаметно:
 
-* **mock Debug** — сборка с ASan/UBSan и все 13 наборов;
+* **mock Debug** — сборка с ASan/UBSan и все 14 наборов;
 * **mock Release** — LTO-сборка (проверяет, что LTO не ломает таблицы
   векторов/`naked`-функции) и те же наборы;
 * **stm32** — кросс-сборка `flat` и `slot`, плюс бюджет размера:
@@ -1857,11 +2022,13 @@ ctest --test-dir .build/mock --output-on-failure
 .build/mock/tests/mc_tests_ota       # OTA: протокол, слоты, выравнивание, продолжение: 290 проверок
 .build/mock/tests/mc_tests_boot      # загрузчик: выбор слота, проверка образа, переход: 96 проверок
 .build/mock/tests/mc_tests_fault     # P0: запись об аварии, wait queue, PI, таймаут, стек: 76 проверок
+.build/mock/tests/mc_tests_ipc       # P1: очереди/события/WorkQueue/log/shell/статистика: 84 проверки
 ```
 
-`ctest` прогоняет тринадцать наборов: `core_selftest`, `async_io`, `uart_i2c`,
+`ctest` прогоняет четырнадцать наборов: `core_selftest`, `async_io`, `uart_i2c`,
 `stm32_hal_strategies`, `dma_arbiter`, `power_supervisor`, `stm32_power`,
-`watchdog`, `stm32_watchdog`, `boot`, `ota`, `crypto` и `fault_and_wait`.
+`watchdog`, `stm32_watchdog`, `boot`, `ota`, `crypto`, `fault_and_wait` и
+`ipc_shell`.
 
 Набор `dma_arbiter` (`tests/host/test_dma_arbiter.cpp`) проверяет собственно
 арбитрацию, без драйверов и железа: ожидание занятого канала (USART1_TX и
@@ -1980,6 +2147,21 @@ STOP (`CoreModel::stuck_in_stop`), а запись в регистры RTC вн�
 
 На mock нет реального переключения контекста, поэтому проверяется учётная
 часть — именно она на железе решает, кого разбудят и с каким приоритетом.
+
+### IPC, shell, статистика (`ipc_shell`)
+
+`tests/test_ipc.cpp` проверяет P1-механизмы на учётной части планировщика:
+
+* `MessageQueue`: push/pop, заполнение/опустошение, `try_*`, ISR-варианты;
+* `Mailbox`: перезапись последнего значения, `pend/try_pend/peek/clear`;
+* `EventFlags`: `any/all`, автоочистка, `set_from_isr`, `wait(0)`;
+* `WorkQueue`: постановка до `start`, запуск задачи, `run_one/drain`,
+  переполнение;
+* `log`: уровни, кольцо, `from_isr`, фильтрация, `pop`;
+* shell: `help/ps/free/stats/log`, неизвестная команда, ввод через `feed`,
+  опциональные `wd`/`ota`;
+* статистика и round-robin: `runtime_ticks`, `switches`, снимок задач,
+  переключение равноприоритетных задач по кванту.
 
 mock-сборка компилируется с `-Wall -Wextra -Wconversion -Wshadow` и
 запускается под ASan/UBSan (`-DMCFRAME_SANITIZE=ON`, включено по умолчанию) —

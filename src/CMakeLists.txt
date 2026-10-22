@@ -8,6 +8,9 @@
 set(OS_CORE_SOURCES
     os/random.cpp
     os/fault/fault.cpp
+    os/log/log.cpp
+    os/shell/shell.cpp
+    os/shell/shell_builtins.cpp
     os/core/memory/memory_manager.cpp
     os/core/memory/global_allocator.cpp
     os/core/task/sheduler.cpp
@@ -132,7 +135,10 @@ target_link_libraries(MCFrame PUBLIC mcu_flags)
 # Бюджет диагностики аварии: полный отчёт или «тихий» захват записи.
 # Значение приходит из корневого CMakeLists (MCFRAME_FAULT_REPORT).
 target_compile_definitions(MCFrame PUBLIC
-    MCFRAME_FAULT_REPORT=$<BOOL:${MCFRAME_FAULT_REPORT}>)
+    MCFRAME_FAULT_REPORT=$<BOOL:${MCFRAME_FAULT_REPORT}>
+    MCFRAME_TIME_SLICE_TICKS=${MCFRAME_TIME_SLICE_TICKS}
+    MCFRAME_LOG_ENTRIES=${MCFRAME_LOG_ENTRIES}
+    MCFRAME_LOG_LEVEL=${MCFRAME_LOG_LEVEL})
 
 # CMSIS нужен и приложению: драйверы STM32 включают stm32f10x.h.
 if(MCU_TARGET STREQUAL "stm32")
