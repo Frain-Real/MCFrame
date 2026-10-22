@@ -11,6 +11,10 @@
 // ---------------------------------------------------------------------------
 #include "user_app.hpp"
 
+#ifndef MCFRAME_APP_SHELL
+#define MCFRAME_APP_SHELL 0
+#endif
+
 #include "os/adc/adc.hpp"
 #include "os/async/async_hal.hpp"
 #include "os/async/async_port.hpp"
@@ -21,6 +25,13 @@
 #include "os/ota/ota_transport.hpp"
 #include "os/power/power.hpp"
 #include "os/watchdog/watchdog.hpp"
+
+#if MCFRAME_APP_SHELL
+  #include "os/log/log.hpp"
+  #include "os/shell/shell.hpp"
+  #include "os/shell/shell_ota.hpp"
+  #include "os/shell/shell_watchdog.hpp"
+#endif
 
 // Драйверы UART/I2C для текущей платформы. На STM32 это регистровые
 // драйверы, на mock — эмуляция; прикладной код ниже ОДИНАКОВ для обеих.
@@ -35,6 +46,10 @@
 #include "os/core/primitives/types.hpp"   // embed::atomic_t — аналог std::atomic
 
 namespace {
+
+#if MCFRAME_APP_SHELL
+embed::Status user_app_shell_register(embed::scheduler& sched) noexcept;
+#endif
 
 // ── Размеры стеков задач ──
 //
@@ -131,6 +146,11 @@ embed::Status user_app_register(embed::scheduler& sched) noexcept {
     // настройке OTA (см. user_app_ota_init).
     st = user_app_ota_register(sched);
     if (st != embed::Status::Ok) return st;
+
+#if MCFRAME_APP_SHELL
+    st = user_app_shell_register(sched);
+    if (st != embed::Status::Ok) return st;
+#endif
 
     return embed::Status::Ok;
 }
@@ -394,7 +414,7 @@ using OtaUart = embed::mock::UartMockPolling;
 
 /// Транспорт: интерфейс приёма. Порт берётся у драйвера, стратегия
 /// (Polling/Async/Dma) — его дело; для OTA это невидимо.
-embed::ota::StreamTransport<OtaUart> g_ota_transport{
+[[maybe_unused]] embed::ota::StreamTransport<OtaUart> g_ota_transport{
     OtaUart::instance(), embed::ota::proto::Iface::Uart, 0u, "ota-uart"};
 
 /// Участник сторожевого таймера: задача приёма обязана отмечаться.
@@ -433,6 +453,67 @@ void ota_task(void* /*ctx*/) noexcept {
     }
 }
 
+#if MCFRAME_APP_SHELL
+// ─────────────────────────── Shell над UART ────────────────────────────────
+// Один UART1 используется shell'ом, а не приёмом OTA: два читателя одного
+// потока байт не могут корректно делить кадры. При MCFRAME_APP_SHELL=ON
+// OTA-транспорт отключается (см. user_app_ota_init), OTA остаётся для
+// проверки/активации уже лежащего образа.
+embed::shell::Console g_shell;
+embed::task           g_shell_tcb;
+constexpr uint32_t    kShellStackWords = 192u;
+uint32_t              g_shell_stack[kShellStackWords];
+
+void shell_write(void* /*ctx*/, const char* text) noexcept {
+    if (text == nullptr) return;
+    embed::Size len = 0u;
+    while (text[len] != '\0') ++len;
+    embed::Size written = 0u;
+    (void)OtaUart::instance().write(text, len, written);
+}
+
+void shell_task(void* /*ctx*/) noexcept {
+    embed::scheduler& sched = embed::scheduler::instance();
+    for (;;) {
+        char c = '\0';
+        embed::Size n = 0u;
+        const embed::Status st = OtaUart::instance().read(&c, 1u, n, 10u);
+        if (st == embed::Status::Ok && n == 1u) {
+            g_shell.feed(c);
+        } else {
+            (void)sched.sleep_for(5u);
+        }
+    }
+}
+
+embed::Status user_app_shell_register(embed::scheduler& sched) noexcept {
+    using namespace embed;
+
+    OtaUart::Config cfg{};
+    cfg.baudRate = 115200u;
+    cfg.strategy = async::Strategy::Polling;
+    if (OtaUart::instance().configure(cfg) != Status::Ok) return Status::HardwareError;
+    if (OtaUart::instance().open() != Status::Ok) return Status::HardwareError;
+
+    g_shell.init(&shell_write, nullptr);
+#if !MCFRAME_APP_MINIMAL
+    // В слоте 52 КБ команды wd/ota стоят дополнительного места; в «полной»
+    // сборке они есть. ps/free/stats/log/reboot остаются всегда.
+    shell::add_watchdog_commands(g_shell);
+    shell::add_ota_commands(g_shell);
+#endif
+
+    const Status st = g_shell_tcb.init(&shell_task, nullptr, "shell",
+                                       kShellStackWords, /*priority*/ 3u);
+    if (st != Status::Ok) return st;
+    if (!sched.add_task(&g_shell_tcb, g_shell_stack, kShellStackWords)) {
+        return Status::NoMemory;
+    }
+    g_shell.prompt();
+    return Status::Ok;
+}
+#endif
+
 } // namespace
 
 // ─────────────────────────── Регистрация и инициализация ───────────────────
@@ -469,7 +550,11 @@ embed::Status user_app_ota_init() noexcept {
     }
     if (fst != Status::Ok) return fst;
 
+#if MCFRAME_APP_SHELL
+    cfg.transport        = nullptr;             // UART занят shell'ом
+#else
     cfg.transport        = &g_ota_transport;   // ПО ЧЕМУ принимается
+#endif
     cfg.fw_version       = kFirmwareVersion;
 
     // Приложение занято обменом и датчиками: обновление не должно мешать

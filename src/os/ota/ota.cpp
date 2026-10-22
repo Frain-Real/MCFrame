@@ -19,6 +19,7 @@
 // меньшего смещения. Обратный порядок дал бы дыру в образе.
 // ---------------------------------------------------------------------------
 #include "ota.hpp"
+#include "../log/log.hpp"
 
 #include "../async/async_kernel.hpp"   // yield при пустом чтении интерфейса
 
@@ -195,6 +196,7 @@ Status Service::init(const Config& cfg) noexcept {
 
     last_frame_ms_ = now_ms();
     inited_ = true;
+    log::write(log::Level::Info, "OTA", "init ok");
     return Status::Ok;
 }
 
@@ -673,6 +675,7 @@ void Service::on_end(const proto::Frame& f) noexcept {
         sha_.finalize(digest);
         if (!bytes_equal(digest, end.sha256, 32u) || !bytes_equal(digest, sha_expected_, 32u)) {
             ++stats_.verify_fail;
+            log::write(log::Level::Error, "OTA", "image hash mismatch");
             fail_session(proto::Code::Verify, 1u, slot_);
             return;
         }
@@ -745,6 +748,7 @@ void Service::on_end(const proto::Frame& f) noexcept {
     proto::Response r{};
     make_response(r);
     reply_ack(r);
+    log::write_u32(log::Level::Info, "OTA", "verified slot", slot_);
     emit(Event::ImageVerified);
 }
 
@@ -838,6 +842,7 @@ void Service::on_sign(const proto::Frame& f) noexcept {
         return;
     }
     verified_slot_ = kSlotNone;   // подпись принята: слот больше не «ожидает»
+    log::write_u32(log::Level::Info, "OTA", "signature ok, slot", slot);
 
     proto::Response r{};
     make_response(r);
@@ -1703,6 +1708,7 @@ Status Service::confirm_running() noexcept {
     if (st != Status::Ok) return st;
 
     ++stats_.confirms;
+    log::write_u32(log::Level::Info, "OTA", "confirmed slot", slot);
     boot_slot_ = slot;
     if (slot_ == slot) state_ = proto::State::Running;
     else if (cfg_.active_slot == slot) state_ = proto::State::Running;
@@ -1759,6 +1765,7 @@ Status Service::activate(uint8_t slot) noexcept {
     state_ = proto::State::Activated;
     boot_slot_ = slot;
     ++stats_.activations;
+    log::write_u32(log::Level::Info, "OTA", "activated slot", slot);
     note_reset(slot, 0u, rec.state);
     emit(Event::Activated);
     return Status::Ok;

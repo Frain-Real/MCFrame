@@ -1,4 +1,7 @@
 // shell_builtins.cpp
+#if defined(__GNUC__)
+#pragma GCC optimize("Os")
+#endif
 #include "shell.hpp"
 
 #include "../core/memory/memory_manager.hpp"

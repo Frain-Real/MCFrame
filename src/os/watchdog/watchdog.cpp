@@ -6,6 +6,7 @@
 // проверяется на ПК на модельной платформе (tests/test_watchdog.cpp).
 // ---------------------------------------------------------------------------
 #include "watchdog.hpp"
+#include "../log/log.hpp"
 
 #include "../power/power.hpp"   // ограничение длительности глубокого сна
 
@@ -380,6 +381,8 @@ void Service::on_tick() noexcept {
     // Кормление прекращается: устройство сбросит аппаратный таймер.
     ++misses_;
     if (worst_late > max_late_ms_) max_late_ms_ = worst_late;
+    // Из прерывания — только в кольцо, без вывода в ITM/UART.
+    log::from_isr(log::Level::Error, "WD", "participant missed");
 
     if (!warned_) {
         warned_ = true;

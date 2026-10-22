@@ -12,6 +12,7 @@
 #include "os/log/log.hpp"
 #include "os/shell/shell.hpp"
 #include "os/shell/shell_ota.hpp"
+#include "os/time/deferred_timer.hpp"
 #include "os/shell/shell_watchdog.hpp"
 
 #include <cstdio>
@@ -45,6 +46,27 @@ bool contains(const char* hay, const char* needle) {
 }
 
 void body(void*) noexcept {}
+
+#if MCFRAME_TEST_HOOKS
+struct BlockCtx {
+    embed::MessageQueue<uint32_t, 2>* q = nullptr;
+    embed::EventFlags* ef = nullptr;
+    embed::Mailbox<uint32_t>* mb = nullptr;
+    embed::scheduler* s = nullptr;
+    uint32_t mode = 0u;
+};
+
+void block_hook(void* arg) noexcept {
+    auto* c = static_cast<BlockCtx*>(arg);
+    switch (c->mode) {
+        case 0u: (void)c->q->push_from_isr(42u); break;
+        case 1u: c->s->advance_ticks(1u); break;
+        case 2u: c->ef->set_from_isr(0x1u); break;
+        case 3u: c->mb->post_from_isr(7u); break;
+        default: break;
+    }
+}
+#endif
 
 // ─────────────────── статистика и round-robin ───────────────────
 embed::task g_main;
@@ -94,6 +116,73 @@ void test_stats_round_robin() {
     check("main снова текущая", s.current_task() == &g_main);
 }
 
+// ─────────────── блокирующие IPC (детерминированный хук) ───────────────
+void test_blocking_ipc() {
+#if MCFRAME_TEST_HOOKS
+    (void)std::puts("blocking ipc:");
+
+    embed::scheduler& s = embed::scheduler::instance();
+    embed::MessageQueue<uint32_t, 2> q;
+    embed::EventFlags ef;
+    embed::Mailbox<uint32_t> mb;
+
+    BlockCtx ctx{};
+    ctx.q = &q;
+    ctx.ef = &ef;
+    ctx.mb = &mb;
+    ctx.s = &s;
+    s.set_block_hook(&block_hook, &ctx);
+
+    uint32_t v = 0u;
+    ctx.mode = 0u;
+    check("pop просыпается от push из ISR",
+          q.pop(v, 50u) == embed::Status::Ok && v == 42u);
+    // На mock нет реального переключения: после пробуждения задача осталась
+    // ready. Возвращаем её на ядро, иначе следующий block_on() увидит
+    // state != running.
+    s.context_switch();
+
+    ctx.mode = 1u;
+    check("pop возвращает Timeout по абсолютному сроку",
+          q.pop(v, 1u) == embed::Status::Timeout);
+    s.context_switch();
+
+    ctx.mode = 2u;
+    check("EventFlags::wait видит set из ISR",
+          ef.wait(0x1u, false, true, 50u) == embed::Status::Ok);
+    check("... и сбрасывает бит", !ef.any(0x1u));
+    s.context_switch();
+
+    ctx.mode = 3u;
+    check("Mailbox::pend просыпается от post_from_isr",
+          mb.pend(v, 50u) == embed::Status::Ok && v == 7u);
+    s.context_switch();
+
+    s.set_block_hook(nullptr, nullptr);
+    check("хук снят", true);
+#endif
+}
+
+// ─────────────────────── DeferredTimer ───────────────────────
+void timer_cb(void*) noexcept {}
+
+void test_deferred_timer() {
+    (void)std::puts("deferred timer:");
+
+    static embed::WorkQueue<2> wq;
+    static uint32_t stack[64];
+    check("workqueue start", wq.start("dt", stack, 64u, 5u) == embed::Status::Ok);
+
+    embed::config::OsTimer::Config cfg{};
+    check("timer init", embed::config::OsTimer::Init(cfg) == embed::Status::Ok);
+
+    embed::DeferredTimer<2> dt;
+    check("create", dt.create(wq, 10u, true, &timer_cb) == embed::Status::Ok);
+    check("created", dt.created());
+    check("remove", dt.remove() == embed::Status::Ok);
+    check("removed", !dt.created());
+}
+
 // ─────────────────────────── IPC ───────────────────────────
 void test_message_queue() {
     (void)std::puts("message queue:");
@@ -116,6 +205,18 @@ void test_message_queue() {
     check("push_from_isr", q.push_from_isr(7u));
     check("pop_from_isr", q.pop_from_isr(v) && v == 7u);
     check("empty after ISR", q.empty());
+
+    // T не обязан быть default-constructible: хранилище сырое.
+    struct NoDefault {
+        explicit NoDefault(uint32_t x) noexcept : value(x) {}
+        NoDefault(const NoDefault&) = default;
+        NoDefault& operator=(const NoDefault&) = default;
+        uint32_t value;
+    };
+    MessageQueue<NoDefault, 2> qnd;
+    check("push NoDefault", qnd.push(NoDefault(55u)) == embed::Status::Ok);
+    NoDefault out(0u);
+    check("pop NoDefault", qnd.pop(out) == embed::Status::Ok && out.value == 55u);
 }
 
 void test_mailbox() {
@@ -305,10 +406,12 @@ void test_optional_shell_commands() {
 int main() {
     (void)std::puts("=== MCFrame P1 tests (ipc/shell) ===");
     test_stats_round_robin();
+    test_blocking_ipc();
     test_message_queue();
     test_mailbox();
     test_event_flags();
     test_work_queue();
+    test_deferred_timer();
     test_log_shell();
     test_optional_shell_commands();
 

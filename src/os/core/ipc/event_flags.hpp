@@ -92,10 +92,10 @@ public:
 
     /// Текущие биты. 32-битное чтение атомарно на Cortex-M; для согласованного
     /// снимка с ожиданием используйте wait()/clear().
-    uint32_t value() const noexcept { return flags_; }
-    bool any(uint32_t mask) const noexcept { return (flags_ & mask) != 0u; }
-    bool all(uint32_t mask) const noexcept { return (flags_ & mask) == mask; }
-    Size waiters() const noexcept { return waiters_.size(); }
+    uint32_t value() const noexcept { Lock l; return flags_; }
+    bool any(uint32_t mask) const noexcept { Lock l; return (flags_ & mask) != 0u; }
+    bool all(uint32_t mask) const noexcept { Lock l; return (flags_ & mask) == mask; }
+    Size waiters() const noexcept { Lock l; return waiters_.size(); }
 };
 
 } // namespace embed

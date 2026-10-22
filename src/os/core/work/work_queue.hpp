@@ -141,9 +141,9 @@ public:
         return n;
     }
 
-    Size size()  const noexcept { return count_; }
-    bool empty() const noexcept { return count_ == 0u; }
-    bool full()  const noexcept { return count_ == N; }
+    Size size()  const noexcept { Lock l; return count_; }
+    bool empty() const noexcept { Lock l; return count_ == 0u; }
+    bool full()  const noexcept { Lock l; return count_ == N; }
     bool started() const noexcept { return started_; }
     TaskHandler worker_task() noexcept { return &worker_; }
 };

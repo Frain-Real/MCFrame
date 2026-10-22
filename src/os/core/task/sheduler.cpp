@@ -328,6 +328,9 @@ Status scheduler::block_on(void* obj, uint32_t ticks) noexcept {
             return Status::AlreadyExists;
         }
     }
+#if MCFRAME_TEST_HOOKS
+    if (block_hook_ != nullptr) block_hook_(block_hook_ctx_);
+#endif
     unlock_early(lock);
     yield();
 
@@ -372,6 +375,13 @@ Status scheduler::block_on_locked(Lock& lock, wait_queue& q, void* obj,
             return Status::AlreadyExists;
         }
     }
+
+#if MCFRAME_TEST_HOOKS
+    // Задача уже в очереди объекта и (при таймауте) в sleep_list_.
+    // Хук может сигналить/выставить событие — именно это проверяет тест
+    // потерянного пробуждения.
+    if (block_hook_ != nullptr) block_hook_(block_hook_ctx_);
+#endif
 
     unlock_early(lock);
     yield();

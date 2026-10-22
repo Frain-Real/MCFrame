@@ -42,6 +42,15 @@ jobs:
           tools/check_size.sh .build/stm32/example_fw.bin 131072 "example flat"
           arm-none-eabi-size .build/stm32/example/example_fw
 
+      - name: Flat + shell image
+        run: |
+          rm -rf .build/stm32
+          ./build.sh stm32 Release -DMCFRAME_APP_SHELL=ON
+
+      - name: Size budget (flat + shell)
+        run: |
+          tools/check_size.sh .build/stm32/example_fw.bin 131072 "example flat+shell"
+
       - name: Slot image
         run: |
           rm -rf .build/stm32

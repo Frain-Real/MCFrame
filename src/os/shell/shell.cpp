@@ -1,4 +1,7 @@
 // shell.cpp
+#if defined(__GNUC__)
+#pragma GCC optimize("Os")
+#endif
 #include "shell.hpp"
 
 namespace {

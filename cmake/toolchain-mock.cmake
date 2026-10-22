@@ -7,7 +7,7 @@ set(MCU_ARCH_FLAGS "")
 
 set(MCU_C_FLAGS   -Wall -Wextra -Wshadow -Wconversion -Werror=return-type)
 set(MCU_CXX_FLAGS -Wall -Wextra -Wshadow -Wconversion -Werror=return-type)
-set(MCU_DEFINES   "")
+set(MCU_DEFINES   -DMCFRAME_TEST_HOOKS=1)
 
 # Санитайзеры ловят порчу памяти и UB, которые на MCU проявляются
 # как «загадочные» HardFault.

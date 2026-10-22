@@ -6,6 +6,7 @@
 // на модельной платформе (tests/test_power.cpp).
 // ---------------------------------------------------------------------------
 #include "power.hpp"
+#include "../log/log.hpp"
 
 #include "../core/task/sheduler.hpp"
 
@@ -353,9 +354,15 @@ void Supervisor::on_idle() noexcept {
             account_deep_sleep(slept);
             return;
         }
-        Lock lock;
-        ++deep_failed_;
-        last_mode_ = Mode::Run;
+        {
+            Lock lock;
+            ++deep_failed_;
+            last_mode_ = Mode::Run;
+        }
+        // Лог — уже БЕЗ Lock: platform_log_line может ждать ITM/UART, а
+        // держать из-за этого маску прерываний нельзя.
+        log::write_u32(log::Level::Warn, "PWR", "deep_sleep_failed",
+                       plan.sleep_ms);
     }
 
     if (plan.mode == Mode::Run) return;

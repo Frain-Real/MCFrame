@@ -39,6 +39,13 @@
 #define MCFRAME_TIME_SLICE_TICKS 0u
 #endif
 
+/// Тестовый хук планировщика (только mock): позволяет сигналить ровно в
+/// момент, когда задача уже стоит в очереди ожидания, но ещё не уснула.
+/// В прошивку не попадает.
+#ifndef MCFRAME_TEST_HOOKS
+#define MCFRAME_TEST_HOOKS 0
+#endif
+
 namespace embed::config {
 
     /// Максимальное число ядер (compile-time).

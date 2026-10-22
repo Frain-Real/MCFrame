@@ -87,6 +87,7 @@ public:
     }
 
     bool peek(T& out) const noexcept {
+        Lock l;
         if (!has_) return false;
         out = value_;
         return true;
@@ -97,8 +98,8 @@ public:
         has_ = false;
     }
 
-    bool has_value() const noexcept { return has_; }
-    Size waiters() const noexcept { return waiters_.size(); }
+    bool has_value() const noexcept { Lock l; return has_; }
+    Size waiters() const noexcept { Lock l; return waiters_.size(); }
 };
 
 } // namespace embed

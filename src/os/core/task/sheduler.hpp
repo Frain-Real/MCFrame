@@ -112,6 +112,17 @@ public:
     /// Возвращает число разбуженных.
     Size unblock_all(wait_queue& q) noexcept;
 
+#if MCFRAME_TEST_HOOKS
+    using BlockHook = void (*)(void*);
+    /// Тестовый хук: вызывается в block_on_locked() ПОСЛЕ постановки задачи
+    /// в очередь и до unlock. Именно здесь проверяется, что сигнал из ISR
+    /// видит уже заблокированную задачу.
+    void set_block_hook(BlockHook hook, void* ctx) noexcept {
+        block_hook_ = hook;
+        block_hook_ctx_ = ctx;
+    }
+#endif
+
     /// Совместимость: разбудить первую задачу, ждущую на объекте obj
     /// (линейный поиск). Новый код должен использовать unblock_one(q).
     bool unblock_one(void* obj) noexcept;
@@ -248,6 +259,10 @@ private:
     bool                 initialized_ = false;
     uint64_t             tick_count_ = 0;
     uint32_t             time_slice_ticks_ = config::kTimeSliceTicks;
+#if MCFRAME_TEST_HOOKS
+    BlockHook            block_hook_ = nullptr;
+    void*                block_hook_ctx_ = nullptr;
+#endif
     Size                 switch_requests_ = 0;   // диагностика (см. switch_requests)
 
     uint32_t find_least_loaded_core() const noexcept;

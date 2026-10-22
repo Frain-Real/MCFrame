@@ -30,6 +30,15 @@ else()
     set(MCFRAME_IMAGE "flat" CACHE STRING "Образ example_fw: flat | slot")
     set_property(CACHE MCFRAME_IMAGE PROPERTY STRINGS flat slot)
 
+    # Shell над UART1 вместо приёма OTA. Два читателя одного UART не могут
+    # делить MOLP-кадры, поэтому при ON транспорт OTA отключается.
+    option(MCFRAME_APP_SHELL "Shell over UART1 in example (OTA transport off)" OFF)
+    if(MCFRAME_APP_SHELL AND MCFRAME_IMAGE STREQUAL "slot")
+        message(FATAL_ERROR
+            "MCFrame: shell над UART1 не влезает в слот 52 КБ вместе с OTA. "
+            "Соберите flat: ./build.sh stm32 Release -DMCFRAME_APP_SHELL=ON")
+    endif()
+
     # ── «Минимальное» приложение ──
     #
     # Полная «витрина» примера (АЦП, async-ввод-вывод с UART и I2C, отчёты) в
@@ -44,6 +53,11 @@ else()
             set(MCFRAME_APP_MINIMAL OFF)
         endif()
     endif()
+    if(MCFRAME_APP_SHELL)
+        target_compile_definitions(example_fw PRIVATE MCFRAME_APP_SHELL=1)
+        message(STATUS "example_fw: shell over UART1 (OTA transport disabled)")
+    endif()
+
     if(MCFRAME_APP_MINIMAL)
         target_compile_definitions(example_fw PRIVATE MCFRAME_APP_MINIMAL=1)
         # Слот 52 КБ: минимальному приложению важнее размер, чем -O2.
