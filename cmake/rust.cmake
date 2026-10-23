@@ -17,7 +17,7 @@ endif()
 set(_rust_env "CARGO_HOME=${CMAKE_SOURCE_DIR}/.cargo-home")
 if(MCU_TARGET STREQUAL "mock")
     set(_rust_target "x86_64-unknown-linux-gnu")
-    set(_rust_lib "${CMAKE_SOURCE_DIR}/rust/mcframe_app/target/release/libmcframe_app.a")
+    set(_rust_lib "${CMAKE_SOURCE_DIR}/rust/mcframe_app/target/${_rust_target}/release/libmcframe_app.a")
     set(_rust_build ${MCFRAME_CARGO} build --release --locked --target ${_rust_target})
 elseif(MCU_TARGET STREQUAL "stm32")
     # F1 — Cortex-M3, soft-float ABI.
