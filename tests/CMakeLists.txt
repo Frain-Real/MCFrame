@@ -81,7 +81,24 @@ target_include_directories(mc_tests_stm32hal PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/host
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/platforms/stm32)
-target_compile_definitions(mc_tests_stm32hal PRIVATE MCFRAME_STM32_REGS_FAKE=1)
+target_compile_definitions(mc_tests_stm32hal PRIVATE
+    MCFRAME_STM32_REGS_FAKE=1
+    STM32F10X_MD=1)
+
+
+# ─────────── F1: USART2/USART3 тем же async-автоматом, что USART1 ───────────
+add_executable(mc_tests_uart_multi
+    host/test_uart_multi.cpp
+    host/stm32_regs_fake.cpp
+    host/fake_dma.cpp)
+target_link_libraries(mc_tests_uart_multi PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_uart_multi PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/host
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/platforms/stm32)
+target_compile_definitions(mc_tests_uart_multi PRIVATE
+    MCFRAME_STM32_REGS_FAKE=1
+    STM32F10X_MD=1)
 
 # ─────────── Арбитр каналов DMA: очередь работ (без железа) ───────────
 #
@@ -161,6 +178,32 @@ target_include_directories(mc_tests_stm32watchdog PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/host
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/platforms/stm32)
 target_compile_definitions(mc_tests_stm32watchdog PRIVATE MCFRAME_STM32_REGS_FAKE=1)
+
+
+# ─────────── Декларативная карта пинов: конфликты на этапе компиляции ───────────
+add_executable(mc_tests_board_pins test_board_pins.cpp)
+target_link_libraries(mc_tests_board_pins PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_board_pins PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+
+# ─────────── Типобезопасное время: Duration/TimePoint и округление ───────────
+add_executable(mc_tests_time_units test_time_units.cpp)
+target_link_libraries(mc_tests_time_units PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_time_units PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+
+# ─────────── F4: маршруты DMA и карта пинов (без железа) ───────────
+add_executable(mc_tests_m4_drivers test_m4_drivers.cpp)
+target_link_libraries(mc_tests_m4_drivers PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_m4_drivers PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/platforms/stm32f4g4)
+
+
+# ─────────── OTA meta journal: append вместо стирания сектора ───────────
+add_executable(mc_tests_ota_meta test_ota_meta.cpp)
+target_link_libraries(mc_tests_ota_meta PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_ota_meta PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 # ─────────── Phase 6: NVS, две копии банка, CRC, power-fail ───────────
 add_executable(mc_tests_nvs test_nvs.cpp)
@@ -264,6 +307,24 @@ if(BUILD_TESTING)
         FAIL_REGULAR_EXPRESSION "FAIL")
 
     add_test(NAME stm32_periph COMMAND mc_tests_stm32periph)
+
+    add_test(NAME board_pins COMMAND mc_tests_board_pins)
+
+    add_test(NAME time_units COMMAND mc_tests_time_units)
+
+    add_test(NAME ota_meta COMMAND mc_tests_ota_meta)
+
+    add_test(NAME uart_multi COMMAND mc_tests_uart_multi)
+    set_tests_properties(uart_multi PROPERTIES
+        FAIL_REGULAR_EXPRESSION "FAIL")
+
+    add_test(NAME m4_drivers COMMAND mc_tests_m4_drivers)
+    set_tests_properties(m4_drivers PROPERTIES
+        FAIL_REGULAR_EXPRESSION "FAIL")
+    set_tests_properties(time_units PROPERTIES
+        FAIL_REGULAR_EXPRESSION "FAIL")
+    set_tests_properties(board_pins PROPERTIES
+        FAIL_REGULAR_EXPRESSION "FAIL")
     set_tests_properties(stm32_periph PROPERTIES
         FAIL_REGULAR_EXPRESSION "FAIL")
 endif()

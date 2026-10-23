@@ -7,6 +7,8 @@
 namespace embed::test {
 
 UsartModel   g_usart1{};
+UsartModel   g_usart2{};
+UsartModel   g_usart3{};
 I2cModel     g_i2c1{};
 RccModel     g_rcc{};
 NvicModel    g_nvic{};
@@ -22,6 +24,8 @@ CoreModel    g_core{};
 
 void fakeReset() noexcept {
     g_usart1.reset();
+    g_usart2.reset();
+    g_usart3.reset();
     g_i2c1.reset();
     g_nvic.reset();
     g_rcc.reset();
@@ -40,6 +44,8 @@ void fakeResetKeepBackup() noexcept {
     // Копия fakeReset() БЕЗ g_bkp.reset(): резервные регистры переживают сброс,
     // иначе проверка посмертной отметки ничего не значила бы.
     g_usart1.reset();
+    g_usart2.reset();
+    g_usart3.reset();
     g_i2c1.reset();
     g_nvic.reset();
     g_rcc.reset();

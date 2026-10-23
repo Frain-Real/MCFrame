@@ -48,7 +48,8 @@ set(OS_OTA_SOURCES
 
 # ─────────── NVS: key-value поверх ota::Storage ───────────
 set(OS_NVS_SOURCES
-    os/nvs/nvs.cpp)
+    os/nvs/nvs.cpp
+    os/nvs/nvs_cipher.cpp)
 
 # ─────────── Загрузчик: что грузить и когда передавать управление ───────────
 # Политика (выбор слота, проверка образа, окно ожидания) не зависит от
@@ -98,7 +99,7 @@ endif()
 # Startup-код и clock-инициализация нужны только для реального МКУ.
 if(MCU_TARGET STREQUAL "stm32")
     list(APPEND OS_PLATFORM_SOURCES
-        platforms/stm32/startup_stm32f10x_ld.s
+        platforms/stm32/startup_stm32f10x_md.s
         platforms/stm32/system_stm32f10x.c
         platforms/stm32/core_cm3.c
         platforms/stm32/exti_stm32.cpp
@@ -115,7 +116,8 @@ elseif(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
     endif()
     list(APPEND OS_PLATFORM_SOURCES
         arch/armv7m/context.cpp
-        platforms/stm32f4g4/exti_m4.cpp)
+        platforms/stm32f4g4/exti_m4.cpp
+        platforms/stm32f4g4/periph_m4_instantiate.cpp)
 endif()
 
 foreach(_f ${OS_PLATFORM_SOURCES})
@@ -168,6 +170,17 @@ target_compile_definitions(MCFrame PUBLIC
     MCFRAME_LOG_ENTRIES=${MCFRAME_LOG_ENTRIES}
     MCFRAME_LOG_LEVEL=${MCFRAME_LOG_LEVEL})
 
+# F4-загрузчик обязан влезть в 16 КБ вместе с meta-журналом. SHA-256 образа
+# проверяется при OTA-приёме; в загрузчике остаются CRC32 и проверка вектора.
+
+# Область NVS в конце Flash (см. cmake/firmware_layout.cmake). 0 — плата
+# использует внешнее хранилище или NVS не нужна.
+if(DEFINED MCFRAME_NVS_SIZE)
+    target_compile_definitions(MCFrame PUBLIC
+        MCFRAME_NVS_OFFSET=${MCFRAME_NVS_OFFSET}
+        MCFRAME_NVS_SIZE=${MCFRAME_NVS_SIZE})
+endif()
+
 # CMSIS нужен и приложению: драйверы STM32 включают stm32f10x.h.
 if(MCU_TARGET STREQUAL "stm32")
     target_include_directories(MCFrame PUBLIC
@@ -181,6 +194,9 @@ install(TARGETS MCFrame mcu_flags EXPORT MCFrameTargets
 install(DIRECTORY os/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/os
         FILES_MATCHING PATTERN "*.hpp")
 install(DIRECTORY hal/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/hal
+        FILES_MATCHING PATTERN "*.hpp")
+install(FILES board.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY boards/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/boards
         FILES_MATCHING PATTERN "*.hpp")
 install(EXPORT MCFrameTargets
         NAMESPACE MCFrame::

@@ -39,3 +39,12 @@ if [[ ! -f sdkconfig ]]; then
     idf.py set-target esp32c3
 fi
 idf.py build
+
+# Артефакты — в рабочее дерево, а не только в /tmp: сборочный каталог
+# может быть во временной ФС, и после завершения job его уже не найти.
+OUT="$ROOT/.build/c3"
+mkdir -p "$OUT"
+cp -f build/mcframe_c3.bin "$OUT/" 2>/dev/null || true
+cp -f build/partition_table/partition-table.bin "$OUT/" 2>/dev/null || true
+cp -f build/bootloader/bootloader.bin "$OUT/" 2>/dev/null || true
+echo "C3 artifacts: $OUT"

@@ -121,7 +121,10 @@ uint32_t flash_page() noexcept {
 #if defined(MCFRAME_SOC_STM32G4)
     return 2048u;
 #else
-    return 128u * 1024u;
+    // F4: минимальный сектор — 16K (секторы 0-3). Остальные секторы 64/128K,
+    // но 16K — корректная единица для областей, выровненных по секторам:
+    // flash_erase() всё равно выбирает фактический сектор по адресу.
+    return 16u * 1024u;
 #endif
 }
 uint32_t flash_gran() noexcept {

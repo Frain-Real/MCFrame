@@ -5,6 +5,8 @@
 // ---------------------------------------------------------------------------
 #pragma once
 
+#include "boards/mock_generic/pins.hpp"
+
 #include "hal/IGpio.hpp"
 #include "hal/ISpi.hpp"
 #include "hal/IPwm.hpp"
@@ -29,6 +31,10 @@ Console& console() noexcept;
 Gpio& led() noexcept;
 Spi& spi1() noexcept;
 Pwm& pwm1() noexcept;
+
+using Pins = PinMap<1>;
+
+constexpr const Pins& pins() noexcept { return kPins; }
 
 void init() noexcept;
 

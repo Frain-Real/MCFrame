@@ -1,7 +1,10 @@
+_flash_origin = DEFINED(_flash_origin_override) ? _flash_origin_override : 0x08000000;
+_flash_length = DEFINED(_flash_length_override) ? _flash_length_override : 1024K;
+
 ENTRY(Reset_Handler)
 MEMORY
 {
-    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 1024K
+    FLASH (rx)  : ORIGIN = _flash_origin, LENGTH = _flash_length
     RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = 128K
 }
 _estack = ORIGIN(RAM) + LENGTH(RAM);

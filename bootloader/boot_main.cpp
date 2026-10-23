@@ -152,6 +152,15 @@ Status init_ota(const boot::Config& bcfg) noexcept {
 
 } // namespace
 
+#ifndef MCFRAME_BOOT_LOGS
+#define MCFRAME_BOOT_LOGS 1
+#endif
+#if MCFRAME_BOOT_LOGS
+#define BOOT_LOG(s) platform_log_line(s)
+#else
+#define BOOT_LOG(s) ((void)0)
+#endif
+
 int main() {
     using namespace embed;
 
@@ -163,14 +172,14 @@ int main() {
 
     // ── 1. Контракт платформы ──
     if (!platform::validate()) {
-        platform_log_line("BOOT: platform contract incomplete");
+        BOOT_LOG("BOOT: platform contract incomplete");
         return 1;
     }
 
 #if MCFRAME_BOOTLOADER_OTA
     // ── 2. Время: без него не работают таймауты протокола ──
     if (init_time() != Status::Ok) {
-        platform_log_line("BOOT: timer init failed");
+        BOOT_LOG("BOOT: timer init failed");
         return 1;
     }
 #endif
@@ -191,22 +200,22 @@ int main() {
     if (boot::Loader::instance().init(bcfg) != Status::Ok) {
         // Раскладка неверна — грузить нечего и стирать нельзя: это состояние
         // исправляют прошивкой, а не на бегу. Стоим и сообщаем.
-        platform_log_line("BOOT: layout rejected");
+        BOOT_LOG("BOOT: layout rejected");
         return 1;
     }
 
     // ── 4. Приём обновления (если загрузчик его умеет) ──
 #if MCFRAME_BOOTLOADER_OTA
     if (init_ota(bcfg) != Status::Ok) {
-        platform_log_line("BOOT: ota init failed");
+        BOOT_LOG("BOOT: ota init failed");
         // Без приёма загрузчик всё ещё может загрузить то, что уже лежит.
     }
     init_link();
-    platform_log_line("BOOT: ready");
+    BOOT_LOG("BOOT: ready");
 #else
     // Приём выполняет приложение: у загрузчика для него нет ни Flash, ни места.
     // Загрузчику остаётся решить, кого грузить, — и он это делает сразу.
-    platform_log_line("BOOT: ready (receive in application)");
+    BOOT_LOG("BOOT: ready (receive in application)");
 #endif
 
 #ifndef MCFRAME_TARGET_MCU
@@ -228,7 +237,7 @@ int main() {
         break;      // принимать нечего: решение уже принято
 #endif
     }
-    platform_log_line("BOOT: stand run finished");
+    BOOT_LOG("BOOT: stand run finished");
     return 0;
 #else
     // ── МКУ: цикл до перехода ──
@@ -241,7 +250,7 @@ int main() {
             // Сюда попадаем, только если платформа отказала в переходе:
             // на МКУ управление уже принадлежит загруженному образу.
             (void)jst;
-            platform_log_line("BOOT: jump refused");
+            BOOT_LOG("BOOT: jump refused");
         } else {
 #if MCFRAME_BOOTLOADER_OTA
             // Грузить нечего (или открыто окно): принимаем обновление.

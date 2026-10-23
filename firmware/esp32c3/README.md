@@ -5,7 +5,8 @@ broadcaster), provisioning по BLE/UART и HTTPS OTA с TLS.
 
 ## Сборка
 
-Нужен ESP-IDF 6.x (проверено на 6.0.2).
+Нужен ESP-IDF 6.x (проверено на 6.0.2). Артефакт сборки копируется в
+`.build/c3/` (`mcframe_c3.bin`, partition-table, bootloader).
 
 ```bash
 ./firmware/esp32c3/build.sh
@@ -26,9 +27,9 @@ idf.py -p /dev/ttyUSB0 flash monitor
 | nvs | 16 КБ |
 | otadata | 8 КБ |
 | phy_init | 4 КБ |
-| factory | 1 МБ |
-| ota_0 | 1 МБ |
-| ota_1 | 1 МБ |
+| factory | 1.25 МБ |
+| ota_0 | 1.25 МБ |
+| ota_1 | 1.25 МБ |
 
 ## Shell
 
@@ -60,7 +61,7 @@ GATT-сервис `6d636672-...`:
 - Central BLE: режим и connect() есть; GATT-клиент пока без API.
 - Произвольный GATT-сервис через `add_gatt_service` пока `NotSupported`;
   встроенный provisioning-сервис работает.
-- BLE pairing/security отключён, чтобы уложиться в 1 МБ.
+- BLE pairing/security отключён в текущей конфигурации; размер слота это уже не ограничивает (см. ниже).
 - TLS 1.2, common CA bundle; TLS 1.3/IPv6 отключены.
-- `mcframe_c3.bin` занимает ~0xee670 из 1 МБ (~72.0 КБ, 7% запаса).
+- `mcframe_c3.bin` занимает ~0xee670 из 1.25 МБ (0x51990, ~25% запаса).
 - На реальной плате WiFi/BLE/OTA не проверялись.

@@ -7,11 +7,9 @@ add_executable(phase2_fw
     ${CMAKE_SOURCE_DIR}/src/platforms/${MCU_TARGET}/system_${MCU_TARGET}.c)
 target_link_libraries(phase2_fw PRIVATE MCFrame::MCFrame)
 
-set(_linker "${CMAKE_SOURCE_DIR}/src/platforms/${MCU_TARGET}/linker.ld")
+mcframe_firmware_flat(phase2_fw)
 target_link_options(phase2_fw PRIVATE
-    -T${_linker}
     -Wl,--gc-sections
-    -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/phase2_fw.map
     -nostartfiles
     -specs=nosys.specs)
 

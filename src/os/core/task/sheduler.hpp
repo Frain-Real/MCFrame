@@ -4,6 +4,8 @@
 #include "task.hpp"
 #include "../../iplatform.hpp"
 #include "../../config/os_config.hpp"
+#include "../../config/time_config.hpp"
+#include "../../time/duration.hpp"
 
 namespace embed {
 
@@ -67,7 +69,54 @@ public:
 
     // ──────────── API задачи ────────────
     Status sleep() noexcept;
+    /// Сон в ТИКАХ планировщика (исторический API). Для прикладного кода
+    /// предпочтительны sleep_for_ms()/sleep_for(Duration)/sleep_until().
     Status sleep_for(uint32_t ticks) noexcept;
+
+    /// Сон в миллисекундах с округлением ВВЕРХ до тика. При тике 10 мс
+    /// sleep_for_ms(1) проспит один тик (10 мс), а sleep_for_ms(0) — yield.
+    Status sleep_for_ms(uint32_t ms) noexcept {
+        const uint32_t tick_ms = config::OsTimer::TickMs();
+        return sleep_for(chrono::milliseconds(ms).ticks_ceil(tick_ms));
+    }
+
+    /// Сон на интервал. Длительность больше 2^32 мс разбивается на порции.
+    Status sleep_for(chrono::Duration d) noexcept {
+        uint64_t ms = d.ms_ceil();
+        while (ms > 0xFFFFFFFFu) {
+            const Status st = sleep_for_ms(0xFFFFFFFFu);
+            if (st != Status::Ok) return st;
+            ms -= 0xFFFFFFFFu;
+        }
+        return sleep_for_ms(static_cast<uint32_t>(ms));
+    }
+
+    /// Сон до абсолютного дедлайна (мс). Устойчив к «догоняющему» времени:
+    /// после пробуждения пересчитывает остаток, а не спит фиксированный квант.
+    Status sleep_until_ms(uint64_t deadline_ms) noexcept {
+        for (;;) {
+            const uint64_t now = config::OsTimer::NowMs();
+            if (deadline_ms <= now) return sleep_for(0u);
+            const uint64_t left = deadline_ms - now;
+            const Status st = sleep_for_ms(left > 0xFFFFFFFFu
+                                           ? 0xFFFFFFFFu
+                                           : static_cast<uint32_t>(left));
+            if (st != Status::Ok) return st;
+        }
+    }
+
+    Status sleep_until(chrono::TimePoint tp) noexcept {
+        return sleep_until_ms(tp.ms());
+    }
+
+    /// Текущая абсолютная точка (монотонные миллисекунды OsTimer).
+    chrono::TimePoint now() const noexcept {
+        return chrono::TimePoint::from_ms(config::OsTimer::NowMs());
+    }
+
+    /// Период системного тика, мс (нужен для перевода единиц).
+    static uint32_t tick_ms() noexcept { return config::OsTimer::TickMs(); }
+
     Status wakeup(TaskHandler t, uint32_t core_id = kAnyCore) noexcept;
 
     /// Завершить ТЕКУЩУЮ задачу: снять со всех очередей и ОТДАТЬ ЯДРО.

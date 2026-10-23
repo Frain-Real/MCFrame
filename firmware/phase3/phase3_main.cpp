@@ -22,7 +22,7 @@ void semihost_exit(bool ok) noexcept {
 }
 
 void task(void*) noexcept {
-    board::init();
+    board::init_peripherals();
     board::led().set(true);
 
     embed::hal::SpiConfig sc{};

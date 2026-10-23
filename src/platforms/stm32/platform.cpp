@@ -413,6 +413,14 @@ extern "C" void USART1_IRQHandler(void) {
     embed::stm32::UartDriver1::instance().onIrq();
 }
 
+extern "C" void USART2_IRQHandler(void) {
+    embed::stm32::UartDriver2::instance().onIrq();
+}
+
+extern "C" void USART3_IRQHandler(void) {
+    embed::stm32::UartDriver3::instance().onIrq();
+}
+
 // ── I2C: обработчик не знает про драйвер ──
 //
 // ПОЧЕМУ ЧЕРЕЗ ХУК, А НЕ НАПРЯМУЮ. Обработчик из таблицы векторов существует в

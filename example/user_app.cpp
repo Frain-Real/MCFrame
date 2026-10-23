@@ -6,7 +6,7 @@
 //  * TCB и стеки статические — куча для задач не нужна;
 //  * регистрация задачи ОДНИМ вызовом add_task(t, stack, words), который
 //    сам инициализирует стек и переводит задачу в ready;
-//  * сон через scheduler::sleep_for() с проверкой кода возврата;
+//  * сон через scheduler::sleep_for_ms() с проверкой кода возврата;
 //  * измерение стека по водяному знаку, а не «на глаз».
 // ---------------------------------------------------------------------------
 #include "user_app.hpp"
@@ -78,15 +78,15 @@ embed::atomic_t<uint32_t> g_worker_count{0u};
 embed::watchdog::Participant g_blink_wd;
 embed::watchdog::Participant g_worker_wd;
 
-constexpr uint32_t kBlinkWdTimeout  = 8000u;    // период задачи — 500 тиков (5 с)
-constexpr uint32_t kWorkerWdTimeout = 15000u;   // период задачи — 1000 тиков (10 с)
+constexpr uint32_t kBlinkWdTimeout  = 8000u;    // период задачи — 5000 мс (5 с)
+constexpr uint32_t kWorkerWdTimeout = 15000u;   // период задачи — 10000 мс (10 с)
 
 void blink_task(void* /*ctx*/) noexcept {
     embed::scheduler& sched = embed::scheduler::instance();
     for (;;) {
         (void)g_blink_count.fetch_add(1u, embed::MemoryOrderRelaxed);
         // sleep_for сам инициирует переключение контекста.
-        (void)sched.sleep_for(500);
+        (void)sched.sleep_for_ms(5000);
         (void)g_blink_wd.check_in();
     }
 }
@@ -95,7 +95,7 @@ void worker_task(void* /*ctx*/) noexcept {
     embed::scheduler& sched = embed::scheduler::instance();
     for (;;) {
         (void)g_worker_count.fetch_add(1u, embed::MemoryOrderRelaxed);
-        (void)sched.sleep_for(1000);
+        (void)sched.sleep_for_ms(10000);
         (void)g_worker_wd.check_in();
     }
 }
@@ -106,7 +106,7 @@ void worker_task(void* /*ctx*/) noexcept {
 // килобайты. 2 канала × блок 4 кадра × 2 половины = 16 отсчётов = 32 Б.
 struct AdcKernel {
     static void yield() noexcept {
-        (void)embed::scheduler::instance().sleep_for(1);
+        (void)embed::scheduler::instance().sleep_for_ms(10);
     }
 };
 struct AdcHal { uint8_t reserved = 0; };
@@ -434,7 +434,7 @@ void ota_task(void* /*ctx*/) noexcept {
         (void)embed::ota::Service::instance().poll(50u);
         (void)g_ota_polls.fetch_add(1u, embed::MemoryOrderRelaxed);
         (void)g_ota_wd.check_in();
-        (void)sched.sleep_for(100);
+        (void)sched.sleep_for_ms(1000);
     }
 }
 
@@ -466,7 +466,7 @@ void shell_task(void* /*ctx*/) noexcept {
         if (st == embed::Status::Ok && n == 1u) {
             g_shell.feed(c);
         } else {
-            (void)sched.sleep_for(5u);
+            (void)sched.sleep_for_ms(50);
         }
     }
 }

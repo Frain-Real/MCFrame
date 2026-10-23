@@ -13,6 +13,7 @@ Status fill_ota_config(ota::Config& ota_cfg, const Config& boot_cfg) noexcept {
 
     ota_cfg.storage          = boot_cfg.storage;
     ota_cfg.meta_offset      = boot_cfg.layout.meta_offset;
+    ota_cfg.meta_size        = boot_cfg.layout.meta_size;
     ota_cfg.slot_offset[0]   = boot_cfg.layout.slot_offset[0];
     ota_cfg.slot_capacity[0] = boot_cfg.layout.slot_size[0];
     ota_cfg.slot_offset[1]   = boot_cfg.layout.slot_offset[1];

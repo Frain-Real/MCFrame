@@ -19,6 +19,9 @@ struct GpioConfig {
     GpioSpeed speed = GpioSpeed::Low;
     bool      initial = false;   // для Output
     uint8_t   alternate = 0u;    // AF-номер для Alternate (F4/G4)
+    /// Открытый сток. Нужен I2C (SDA/SCL) и разделяемым линиям: два
+    /// устройства не должны «тянуть» линию в разные стороны push-pull.
+    bool      open_drain = false;
 };
 
 using GpioIrqCallback = void (*)(void*);

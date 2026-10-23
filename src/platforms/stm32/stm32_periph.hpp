@@ -6,6 +6,7 @@
 #pragma once
 
 #include "stm32_regs.hpp"
+#include "boards/pin_map.hpp"
 #include "hal/IGpio.hpp"
 #include "hal/ISpi.hpp"
 #include "hal/IPwm.hpp"
@@ -17,6 +18,16 @@
 #include <cstdint>
 
 namespace embed::stm32 {
+
+inline GPIO_TypeDef* gpio_port(board::Port p) noexcept {
+    switch (p) {
+        case board::Port::A: return GPIOA;
+        case board::Port::B: return GPIOB;
+        case board::Port::C: return GPIOC;
+        case board::Port::D: return GPIOD;
+        default:             return nullptr;
+    }
+}
 
 inline uint32_t gpio_rcc_bit(GPIO_TypeDef* port) noexcept {
     if (port == GPIOA) return RCC_APB2ENR_IOPAEN;
@@ -34,6 +45,8 @@ inline void gpio_clock_enable(GPIO_TypeDef* port) noexcept {
 class GpioPin final : public hal::IGpioPin {
 public:
     GpioPin(GPIO_TypeDef* port, uint8_t pin) noexcept : port_(port), pin_(pin) {}
+    explicit GpioPin(board::Pin pin) noexcept
+        : port_(gpio_port(pin.port)), pin_(pin.number) {}
 
     Status configure(const hal::GpioConfig& cfg) noexcept override {
         if (port_ == nullptr || pin_ > 15u) return Status::InvalidArg;

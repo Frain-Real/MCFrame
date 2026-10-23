@@ -1,7 +1,7 @@
 # MCFrame
 **Проект пишется мной и нейросетью. Проект находится в сыром виде (альфа версия).**
 
-Декларативный фреймворк для микроконтроллеров (поддерживаемые архитектуры: ARM Cortex-M3, STM32F103).
+Декларативный фреймворк для микроконтроллеров: ARM Cortex-M3/M4F (STM32F103/F407/G431) и RISC-V ESP32-C3.
 
 ## Сборка
 
@@ -32,18 +32,18 @@ cmake --build build --parallel
 |---|---|---|---|---|
 | `mock` | host | host | mcframe | готово |
 | `stm32` | armv7m | stm32f1 | mcframe | готово |
-| `stm32f4` | armv7m | stm32f4 | mcframe | Phase 2 (self-test) |
-| `stm32g4` | armv7m | stm32g4 | mcframe | Phase 2 (self-test) |
+| `stm32f4` | armv7m | stm32f4 | mcframe | Phase 3 (BSP + драйверы) |
+| `stm32g4` | armv7m | stm32g4 | mcframe | Phase 3 (BSP + драйверы) |
 | `esp32c3` | riscv32 | esp32c3 | freertos | Phase 7 (hardening) |
 
 ```bash
-./build.sh stm32f4 Release        # Phase 2 self-test (phase2_fw.elf)
-./build.sh stm32g4 Release        # Phase 2 self-test
+./build.sh stm32f4 Release        # self-test + phase3_fw (драйверы)
+./build.sh stm32g4 Release        # self-test + phase3_fw (драйверы)
 python3 tools/target_plan.py      # проверка матрицы без кросс-компилятора
 ```
 
-`stm32f4`/`stm32g4` уже собирают **self-test ядра** (`phase2_fw.elf`):
-ARMv7-M контекст, SysTick, FPU-фрейм. Полное приложение с периферией — Phase 3.
+`stm32f4`/`stm32g4` собирают **self-test ядра** (`phase2_fw.elf`) и **`phase3_fw.elf`**
+с драйверами GPIO/UART/SPI/I2C/ADC/PWM, картой пинов и DMA-маршрутами.
 C3 — Phase 5 IDF-проект: `firmware/esp32c3/build.sh` (WiFi/BLE/OTA);
 для сборки нужен ESP-IDF 6.x.
 
@@ -58,6 +58,7 @@ C3 — Phase 5 IDF-проект: `firmware/esp32c3/build.sh` (WiFi/BLE/OTA);
 - [`docs/phase5.md`](docs/phase5.md) — WiFi/BLE/provisioning/OTA;
 - [`docs/phase6.md`](docs/phase6.md) — NVS/mcflash/rollback/FlashOps;
 - [`docs/phase7.md`](docs/phase7.md) — power/security/diagnostics/sanitizers;
+- [`docs/phase8.md`](docs/phase8.md) — F4/G4 BSP, NVS v2, Duration, декларативная плата, C3 repartition;
 - [`docs/adr/001-kernel-backends.md`](docs/adr/001-kernel-backends.md) — MCFrame/FreeRTOS backend;
 - [`docs/adr/002-hal-interfaces.md`](docs/adr/002-hal-interfaces.md) — HAL-интерфейсы;
 - [`docs/adr/003-layer-model.md`](docs/adr/003-layer-model.md) — arch/soc/board/kernel;
@@ -116,16 +117,22 @@ F407/G431:
 Добавлены реальные драйверы:
 
 - [`stm32_periph.hpp`](src/platforms/stm32/stm32_periph.hpp) — F103 GPIO/SPI/PWM;
-- [`stm32_periph_m4.hpp`](src/platforms/stm32f4g4/stm32_periph_m4.hpp) — F407/G431;
+  [`uart_stm32.hpp`](src/platforms/stm32/uart_stm32.hpp) — USART1/2/3 одним автоматом;
+- [`stm32_periph_m4.hpp`](src/platforms/stm32f4g4/stm32_periph_m4.hpp) — F407/G431:
+  GPIO, USART1/2/3, SPI1/2/3, I2C1/2 (F4 classic / G4 TIMINGR), ADC1, PWM;
+- [`dma_map_m4.hpp`](src/platforms/stm32f4g4/dma_map_m4.hpp) — маршруты
+  F4 (потоки DMA1/DMA2 + CHSEL) и G4 (каналы + DMAMUX), а не таблица F1;
 - BSP [`f103_generic`](src/boards/f103_generic), [`f407_generic`](src/boards/f407_generic), [`g431_generic`](src/boards/g431_generic);
+  пины — в `pins.hpp` каждой платы, с `static_assert` на конфликты;
 - `board::spi_cs()` — CS для `SpiDevice`;
 - shell-команды `gpio/spi/pwm` в [`shell_board.hpp`](src/boards/common/shell_board.hpp);
 - self-test [`phase3_main.cpp`](firmware/phase3/phase3_main.cpp): LED, SPI transfer, PWM.
 
 EXTI реализован для F103/F407/G431. SPI умеет polling, IRQ и DMA на всех
-трёх: F103 — DMA1 Ch2/3 через `DmaManager`, F407 — DMA2 Stream0/3, G431 —
-DMA1 + DMAMUX. F4/G4 BSP получил UART1 (polling). Self-test не проверяет
-внешний loopback без HIL.
+трёх: F103 — DMA1 Ch2/3 через `DmaManager`, F407/G431 — через
+`dma_map_m4.hpp` (DMA2 Stream0/3 у F4, DMA1+DMAMUX у G4). F4/G4 BSP получил
+USART1/2, I2C1/2, ADC1, SPI1/2 и инстанс-шаблоны `board::uart<2>()` /
+`board::spi<2>()`. Self-test не проверяет внешний loopback без HIL.
 
 ### Phase 4: ESP32-C3
 
@@ -146,27 +153,48 @@ idf.py build
 Phase 5 добавляет WiFi AP+STA (WPA2), BLE NimBLE (peripheral GATT,
 observer, broadcaster, central connect), provisioning по BLE/UART и HTTPS OTA с TLS.
 Реальная сборка выполнена на ESP-IDF 6.0.2; `mcframe_c3.bin` занимает
-0xee670 из 1 МБ.
+0xee670 из 1.25 МБ (запас 0x51990, ~25%).
 
 ### Phase 6: NVS и OTA-инструменты
 
 - [`src/os/nvs`](src/os/nvs/nvs.hpp) — два банка, CRC32, wear leveling,
-  атомарная компакция; 29 проверок;
+  атомарная компакция; **NVS v2**: namespaces, блобы до 512 Б, 64 ключа,
+  версия схемы с миграцией и опциональное AES-CTR+HMAC шифрование;
 - [`tools/mcflash.py`](tools/mcflash.py) — `pack/flash/verify/monitor`,
   UART/TCP/TLS, SHA-256, resume;
-- F407/G431 `FlashOps` и загрузчик/два слота (F4 64K+448K+448K+4K,
-  G4 20K+52K+52K+4K);
+- F407/G431 `FlashOps` и загрузчик/два слота (F4 16K boot + 16K meta-журнал + 32K NVS + 448K + 448K,
+  G4 20K+50K+50K+4K+4K NVS);
 - PVD/brown-out F1/F4/G4 (`power::Brownout`);
-- NVS на F4 BSP (16 КБ после OTA-метаданных);
+- NVS: G4 — 4 КБ (flat и slot, слоты 50 КБ); F1 flat — 4 КБ (образ 124 КБ);
+  F1 slot — 0 (128 КБ заняты); F4 — meta-журнал 16 КБ (сектор 1) и NVS 32 КБ (секторы 2-3);
 - C3 `EspPartitionStorage` и bootloader rollback/confirm;
 - `docs/phase6.md` — ограничения (MOLP/TLS на C3, HIL).
 
 ### Phase 7: production hardening
 
 - C3: DFS/light sleep, brown-out detector, BLE encryption, shell `heap/tasks/reset/power`;
-- STM32: PVD (`power::Brownout`), F4/G4 bootloader + два слота, NVS на F4;
+- STM32: PVD (`power::Brownout`), F4/G4 bootloader + два слота, NVS-адаптер;
 - ASan/UBSan: `-DMCFRAME_SANITIZE=ON`, CI job `sanitizers`;
-- C3 `mcframe_c3.bin` = 0xee670, свободно ~72 КБ (7%).
+- C3 `mcframe_c3.bin` = 0xee670, слот 1.25 МБ, свободно 0x51990 (~334 КБ, 25%).
+
+### Phase 8: платформенная зрелость и эргономика
+
+- **F4/G4** — рабочие драйверы GPIO/UART/SPI/I2C/ADC/PWM, `dma_map_m4.hpp`
+  с маршрутами F4/G4, BSP с инстанс-шаблонами; README больше не обещает
+  только Cortex-M3.
+- **Декларативная плата** — [`boards/pin_map.hpp`](src/boards/pin_map.hpp):
+  `Pin`, `Signal`, `PinMap`, проверка конфликтов на этапе компиляции,
+  несколько UART/SPI/I2C. BSP создаёт драйверы ИЗ карты, а не из констант.
+- **NVS v2** — namespaces, блобы до 512 Б, 64 ключа, schema version +
+  миграция, [`AesCtrHmac`](src/os/nvs/nvs_cipher.hpp); формат v1 читается и
+  автоматически переписывается в v2. F4: meta — 16-КБ append-журнал в секторе 1, NVS — 32 КБ в
+  секторах 2-3 (`FlashSectorStorage`); F1/G4 — 4-КБ meta после слотов.
+- **F1 USART2/3** — тот же async-автомат, что USART1: Polling/Async/Dma,
+  MD startup с векторами USART3/SPI2.
+- **Типобезопасное время** — [`duration.hpp`](src/os/time/duration.hpp) +
+  `sleep_for_ms`/`sleep_until`; на тике 10 мс `sleep_for_ms(1)` — один тик,
+  а не ноль.
+- **C3** — слоты 1.25 МБ (0x140000), свободно 0x51990 (~334 КБ) вместо ~72 КБ.
 
 ### LTO
 
@@ -219,7 +247,7 @@ cmake и печатается в отчёте конфигурации.
   сборка библиотеки и линковка прошивки не сойдутся;
 * **проверяйте не только размер, но и работоспособность**: LTO переставляет и
   инлайнит код, а в проекте есть `__attribute__((naked))` (сохранение и загрузка
-  контекста задач) и таблица векторов в `startup_stm32f10x_ld.s`. После смены
+  контекста задач) и таблица векторов в `startup_stm32f10x_md.s`. После смены
   флага имеет смысл убедиться, что символы обработчиков на месте
   (`arm-none-eabi-nm firmware | grep -E "Reset_Handler|SysTick_Handler|main"`),
   а `.isr_vector` не пуст (`arm-none-eabi-objdump -h firmware`);
@@ -311,7 +339,7 @@ static uint32_t        my_stack[192];
 static void my_task(void*) noexcept {
     for (;;) {
         // ... полезная работа ...
-        (void)embed::scheduler::instance().sleep_for(100);
+        (void)embed::scheduler::instance().sleep_for_ms(1000);
     }
 }
 
@@ -360,7 +388,7 @@ target_link_libraries(my_app PRIVATE MCFrame::MCFrame)
 | Стек задачи | Передавайте **статический** массив: `add_task(t, stack, words)` |
 | Пул стеков | `stack_alloc()` / `stack_free()` — строго **LIFO**: вернуть можно только регион с вершины пула, иначе `Status::NotSupported` |
 | Завершение задачи | `scheduler::exit()` из самой задачи или `remove_task(t)` снаружи: в обоих случаях ядро сразу получает новую задачу |
-| Сон | `scheduler::sleep_for(ticks)` — сам инициирует переключение |
+| Сон | `scheduler::sleep_for_ms(ms)` / `sleep_for(chrono::Duration)` / `sleep_until(TimePoint)`; `sleep_for(ticks)` оставлен для совместимости |
 | Энергосбережение | `power::Supervisor::instance().init(cfg)` + системный хук `Supervisor::tick_hook` (первым) — см. «Энергосбережение» |
 | Сторожевой таймер | `watchdog::Service::init(cfg)` → `Participant::init(...)` у каждой задачи → хук `Service::tick_hook` → `Service::start()` последним — см. «Сторожевой таймер» |
 | Смена контекста | Обработчики `PendSV_Handler`/`SVC_Handler` уже определены платформой; своих с этими именами не заводить — см. «Смена контекста: PendSV и SVC» |
@@ -372,6 +400,8 @@ target_link_libraries(my_app PRIVATE MCFrame::MCFrame)
 | Отложенная работа | `WorkQueue<N>` — ISR/таймер делает `post()`, задача исполняет; колбэки не работают в прерывании |
 | Статистика задач | `task::runtime_ticks()/switches()`, `scheduler::task_snapshot()` |
 | Round-robin | `scheduler::set_time_slice(ticks)` или `-DMCFRAME_TIME_SLICE_TICKS=N` (0 — выкл.) |
+| NVS | `board::nvs()` (`hal::INvs`); F4 — 32 КБ (секторы 2-3), G4 — 4 КБ (flat/slot), F1 flat — 4 КБ; F1 slot — внешнее через `nvs::HalFlashStorage` |
+| Пины | `board::pins()` — карта платы; конфликт функций на одной ноге — ошибка компиляции |
 | Логи | `MCFRAME_LOG_INFO(tag, msg)`, `log::from_isr()`, `log::pop()` — кольцо для shell |
 | Shell | `shell::Console` + `add_watchdog_commands()` / `add_ota_commands()` |
 | Авария | `MCFRAME_ASSERT(cond)`, `MCFRAME_PANIC(kind)`, `fault::last()/report()`; запись переживает reset — см. «Диагностика отказов» |
@@ -382,6 +412,64 @@ target_link_libraries(my_app PRIVATE MCFrame::MCFrame)
 | Регионы памяти | Меняются в `src/platforms/stm32/linker.ld` (`_OS_Heap_Size`, `_OS_StackPool_Size`) |
 | Загрузчик | Образ `bootloader/bootloader_fw` с 0x08000000, приложение — в слот (`-DMCFRAME_IMAGE=slot`). `boot::Loader` решает, `platform::BootOps::jump` переходит; приложение подтверждает загрузку через `boot::confirm_self()` — см. «Загрузчик» |
 | OTA | `ota::Service::init(cfg)` — ГДЕ хранить и ПО ЧЕМУ принимать; постоянный `poll()` в задаче; `boot_check()`/`confirm_running()` при загрузке. Носитель и интерфейс обязаны жить дольше сервиса — см. «OTA: приём новой прошивки» |
+
+## Декларативная плата и несколько инстансов
+
+Пины описываются в `src/boards/<board>/pins.hpp` одним `constexpr`-объектом
+[`PinMap`](src/boards/pin_map.hpp). Проверка конфликтов — на этапе компиляции:
+
+```cpp
+// boards/f407_generic/pins.hpp
+inline constexpr PinMap<20> kPins = PinMap<20>{{
+    {Pin{Port::A, 9u}, Signal::UartTx, 1u, 7u, 0u},   // USART1_TX, AF7
+    {Pin{Port::A, 5u}, Signal::SpiSck, 1u, 5u, 0u},   // SPI1_SCK
+    // ...
+}};
+static_assert(kPins.valid(), "конфликт пинов");
+```
+
+BSP создаёт драйверы ИЗ карты, а не из констант; инстансы доступны
+шаблонами: `board::uart<2>()`, `board::spi<2>()`, `board::i2c<1>()`.
+Одна нога не может быть объявлена дважды, один функциональный слот —
+выведен на две ноги.
+
+## NVS v2: namespaces, блобы, схема и шифрование
+
+```cpp
+nvs::Store store;
+nvs::Config cfg{&flash, 8192u};
+cfg.schema_version = 2;
+cfg.migrate = &my_migration;          // from 1 to 2
+store.init(cfg);
+
+nvs::Namespace wifi = store.open_namespace("wifi");
+(void)wifi.set("ssid", "home", 4u);
+(void)store.set_blob("cert", der, der_len);   // до MCFRAME_NVS_VALUE_MAX (512)
+```
+
+- до `MCFRAME_NVS_MAX_KEYS` (64) ключей, ключ `namespace/name`;
+- версия схемы в заголовке банка + миграция; старый формат v1 читается и
+  автоматически переписывается в v2;
+- [`nvs::AesCtrHmac`](src/os/nvs/nvs_cipher.hpp) — необязательное
+  AES-128-CTR + HMAC-SHA256; ключ задаёт приложение, в NVS он не хранится;
+- внутренняя область: G4 — 4 КБ (flat и slot), F1 flat — 4 КБ
+  (`-DMCFRAME_NVS_FLASH_SIZE=4K`); F1 slot — 0 (внешнее `hal::INvs`);
+  F4 — meta-журнал 16 КБ сразу за загрузчиком, NVS 32 КБ следующими двумя 16-КБ секторами.
+
+## Время: Duration вместо «тиков»
+
+`sleep_for(uint32_t ticks)` остался для совместимости, но прикладной код
+должен использовать миллисекунды/`Duration`:
+
+```cpp
+using namespace embed::chrono;
+(void)sched.sleep_for_ms(100);           // 100 мс, а не 100 тиков
+(void)sched.sleep_for(milliseconds(250));
+(void)sched.sleep_until(TimePoint::from_ms(deadline));
+```
+
+Перевод в тики — с округлением ВВЕРХ: при тике 10 мс `sleep_for_ms(1)`
+проспит 10 мс, а `sleep_for_ms(0)` — это `yield`.
 
 ## Атомарные переменные
 
@@ -1164,7 +1252,7 @@ void sensor_task(void*) noexcept {
     for (;;) {
         read_sensor();
         (void)sensor_wd.check_in();      // «цикл отработал»
-        scheduler::instance().sleep_for(100);
+        scheduler::instance().sleep_for_ms(1000);
     }
 }
 ```
@@ -1960,7 +2048,7 @@ void ota_task(void*) noexcept {
     for (;;) {
         (void)ota::Service::instance().poll(50u);   // бюджет, мс
         (void)g_ota_wd.check_in();                  // участник сторожа
-        (void)scheduler::instance().sleep_for(100);
+        (void)scheduler::instance().sleep_for_ms(1000);
     }
 }
 
@@ -2172,7 +2260,7 @@ st-flash write .build/stm32/example_fw.bin    0x08005000   # слот A
 
 `.github/workflows/ci.yml` проверяет то, что легко сломать незаметно:
 
-* **mock Debug** — сборка с ASan/UBSan и все 17 наборов;
+* **mock Debug** — сборка с ASan/UBSan и все 23 набора;
 * **mock Release** — LTO-сборка (проверяет, что LTO не ломает таблицы
   векторов/`naked`-функции) и те же наборы;
 * **stm32** — кросс-сборка `flat`, `flat + shell` и `slot`, плюс бюджет
@@ -2218,7 +2306,12 @@ ctest --test-dir .build/mock --output-on-failure
 .build/mock/tests/mc_tests_stm32watchdog  # IWDG/BKP на модели: 44 проверки
 .build/mock/tests/mc_tests_ota       # OTA: протокол, слоты, выравнивание, продолжение: 290 проверок
 .build/mock/tests/mc_tests_boot      # загрузчик: выбор слота, проверка образа, переход: 96 проверок
-.build/mock/tests/mc_tests_nvs       # Phase 6: NVS, банки, CRC, power-fail: 29 проверок
+.build/mock/tests/mc_tests_nvs       # Phase 6: NVS v2: namespaces/blobs/шифрование: 74 проверки
+.build/mock/tests/mc_tests_board_pins    # декларативная карта пинов/конфликты: 10 проверок
+.build/mock/tests/mc_tests_uart_multi    # F1 USART2/3, тот же async-автомат: 22 проверки
+.build/mock/tests/mc_tests_ota_meta      # OTA meta-журнал: append/компакция/обрыв: 13 проверок
+.build/mock/tests/mc_tests_time_units    # Duration/TimePoint/округление: 11 проверок
+.build/mock/tests/mc_tests_m4_drivers    # F4 DMA-маршруты и карта платы: 14 проверок
 .build/mock/tests/mc_tests_fault     # P0: запись об аварии, wait queue, PI, таймаут, стек: 76 проверок
 .build/mock/tests/mc_tests_ipc       # P1: очереди/события/WorkQueue/log/shell/статистика: 98 проверок
 .build/mock/tests/mc_tests_hal       # Phase 1: HAL-интерфейсы, mock, board, kernel, arch-frame: 78 проверок

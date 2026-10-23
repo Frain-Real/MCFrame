@@ -20,7 +20,8 @@
   - разделы factory/ota_0/ota_1;
   - shell-команда `ota <https-url>`.
 - [x] partition table:
-  - nvs 16K, otadata 8K, phy_init 4K, factory/ota_0/ota_1 по 1M.
+  - nvs 16K, otadata 8K, phy_init 4K, factory/ota_0/ota_1 по 1.25M;
+  - 192 КБ в конце Flash оставлены под будущий data-раздел.
 - [x] сборка ESP-IDF 6.0.2 (реально выполнена).
 
 ## Сборка
@@ -38,8 +39,9 @@ idf.py build
 
 ## Размер
 
-`mcframe_c3.bin` = 0xee670 (976 496 Б), свободно 0x11990 (~72.0 КБ, 7%) в 1 МБ
-разделе. Дальнейшие фичи потребуют оптимизации или изменения раскладки.
+`mcframe_c3.bin` = 0xee670 (976 496 Б). После переразметки слот — 1.25 МБ
+(0x140000), поэтому запас вырос с ~7% до 25% (0x51990, ≈334 КБ). Дальнейшие фичи
+больше не упираются в размер раздела.
 
 ## Ограничения
 
@@ -48,7 +50,7 @@ idf.py build
 - GATT-сервис встроенный provisioning; произвольный `add_gatt_service` пока
   `NotSupported`.
 - BLE security/pairing отключён (`CONFIG_BT_NIMBLE_SECURITY_ENABLE=n`),
-  чтобы влезть в 1 МБ; provisioning открыт.
+  в ранней конфигурации; текущая Phase 7 включает pairing (см. phase7.md).
 - TLS 1.2, общий bundle CA; TLS 1.3/DTLS отключены для размера.
 - IPv6 отключён.
 - Wi-Fi/BLE на реальной плате не проверялись (нет HIL).

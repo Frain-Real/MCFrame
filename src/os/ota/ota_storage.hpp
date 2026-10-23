@@ -621,6 +621,7 @@ struct LayoutCheck {
 
 inline LayoutCheck check_layout(const Storage& storage,
                                uint32_t meta_offset,
+                               uint32_t meta_size,
                                const uint32_t slot_offset[2],
                                const uint32_t slot_capacity[2]) noexcept {
     LayoutCheck out{};
@@ -630,8 +631,10 @@ inline LayoutCheck check_layout(const Storage& storage,
     if (page == 0u || cap == 0u) { out.status = Status::NotSupported; return out; }
     if ((meta_offset % page) != 0u) return out;
 
-    const uint32_t meta_len = page * kMetaPages;   // обе копии обоих слотов
-    if (meta_offset + meta_len > cap) return out;
+    const uint32_t meta_len = (meta_size == 0u) ? (page * kMetaPages) : meta_size;
+    if ((meta_len % page) != 0u) return out;
+    if (meta_len < kSlotRecordSize * 2u) return out;
+    if (meta_offset > cap || meta_len > cap - meta_offset) return out;
 
     for (uint32_t s = 0u; s < 2u; ++s) {
         if (slot_capacity[s] == 0u) continue;
@@ -766,53 +769,208 @@ inline bool record_take_trial(SlotRecord& rec, uint32_t max_attempts) noexcept {
 /// Один объект на все нужды: сервис OTA читает и пишет метки приёма, загрузчик —
 /// только читает и правит счётчики загрузки. Логика адресации страниц (две на
 /// слот) живёт здесь, а не повторяется в каждом вызывающем.
-class SlotStore {
+/// Журнал метаданных в ОДНОМ стираемом секторе.
+///
+/// Зачем: на F4 метаданные — 80-байтные записи, а минимальный стираемый
+/// сектор — 16/64/128 КБ. Хранить «две копии на слот по фиксированным
+/// страницам» значит требовать 4 страницы и стирать целый сектор на каждое
+/// обновление. Журнал вместо этого:
+///   * дописывает запись в ещё стёртое место (1 -> 0 биты, без erase);
+///   * при переполнении сектора делает компакцию: стирает ТОЛЬКО этот сектор
+///     и переносит по одной актуальной записи на слот;
+///   * при обрыве питания на append предыдущая запись остаётся целой.
+///
+/// Сектор метаданных физически отделён от загрузчика: компакция не может
+/// стереть код загрузчика.
+class MetaJournal {
 public:
-    SlotStore() noexcept = default;
+    MetaJournal() noexcept = default;
 
-    /// Привязать хранилище. meta_offset — начало области метаданных
-    /// (первая из четырёх страниц: по две на слот).
-    Status init(Storage* storage, uint32_t meta_offset) noexcept {
+    Status init(Storage* storage, uint32_t offset, uint32_t size) noexcept {
         if (storage == nullptr) return Status::InvalidArg;
         const uint32_t page = storage->page_size();
         if (page == 0u) return Status::NotSupported;
-        if ((meta_offset % page) != 0u) return Status::InvalidArg;
-        if ((meta_offset + page * kMetaPages) > storage->capacity()) {
+        if ((offset % page) != 0u || (size % page) != 0u) return Status::InvalidArg;
+        if (size < kSlotRecordSize * 2u) return Status::InvalidArg;
+        if (offset > storage->capacity() ||
+            size > storage->capacity() - offset) {
             return Status::InvalidArg;
         }
-
         storage_ = storage;
-        meta_offset_ = meta_offset;
-        per_slot_ = page * kMetaPagesPerSlot;
+        offset_  = offset;
+        size_    = size;
+        return scan();
+    }
 
-        for (uint8_t s = 0u; s < 2u; ++s) {
-            const Status st = store_[s].init(storage, meta_offset + s * per_slot_);
+    bool initialized() const noexcept { return storage_ != nullptr; }
+    uint32_t meta_offset() const noexcept { return offset_; }
+    uint32_t meta_size() const noexcept { return size_; }
+    uint32_t last_seq() const noexcept { return seq_; }
+
+    /// Актуальная запись слота: Ok | NotFound.
+    Status load(uint8_t slot, SlotRecord& out) noexcept {
+        if (storage_ == nullptr) return Status::Unavailable;
+        if (slot > 1u) return Status::InvalidArg;
+        const Status st = scan();
+        if (st != Status::Ok) return st;
+        if (!has_[slot]) return Status::NotFound;
+        out = latest_[slot];
+        return Status::Ok;
+    }
+
+    /// Дописать новую запись. seq назначается журналом.
+    Status store(SlotRecord& rec) noexcept {
+        if (storage_ == nullptr) return Status::Unavailable;
+        if (rec.slot > 1u) return Status::InvalidArg;
+
+        Status st = scan();
+        if (st != Status::Ok) return st;
+
+        // Повреждённый/недописанный хвост или место кончилось — компакция.
+        if (dirty_ || used_ + kSlotRecordSize > size_) {
+            st = compact();
             if (st != Status::Ok) return st;
+            st = scan();
+            if (st != Status::Ok) return st;
+        }
+
+        rec.seq = seq_ + 1u;
+        uint8_t buf[kSlotRecordSize]{};
+        encode_record(buf, rec);
+        st = storage_->write(offset_ + used_, buf, kSlotRecordSize);
+        if (st != Status::Ok) return st;
+        used_ += kSlotRecordSize;
+        seq_ = rec.seq;
+        latest_[rec.slot] = rec;
+        has_[rec.slot] = true;
+        return Status::Ok;
+    }
+
+    Status clear() noexcept {
+        if (storage_ == nullptr) return Status::Unavailable;
+        const Status st = storage_->erase(offset_, size_);
+        if (st != Status::Ok) return st;
+        used_ = 0u; seq_ = 0u; dirty_ = false;
+        has_[0] = has_[1] = false;
+        latest_[0] = latest_[1] = SlotRecord{};
+        return Status::Ok;
+    }
+
+private:
+    Status scan() noexcept {
+        used_ = 0u;
+        seq_ = 0u;
+        dirty_ = false;
+        has_[0] = has_[1] = false;
+        latest_[0] = latest_[1] = SlotRecord{};
+
+        for (uint32_t pos = 0u; pos + kSlotRecordSize <= size_;
+             pos += kSlotRecordSize) {
+            uint8_t buf[kSlotRecordSize]{};
+            const Status st = storage_->read(offset_ + pos, buf, sizeof(buf));
+            if (st != Status::Ok) return st;
+
+            // Стертый хвост: здесь можно писать без erase.
+            if (proto::get_u32(buf) == 0xFFFFFFFFu) {
+                used_ = pos;
+                return Status::Ok;
+            }
+
+            SlotRecord r{};
+            if (!decode_record(buf, r) || r.slot > 1u) {
+                // Порча/обрыв: дописывать в это место нельзя, нужна компакция.
+                dirty_ = true;
+                used_ = pos;
+                return Status::Ok;
+            }
+
+            if (r.seq > seq_) seq_ = r.seq;
+            if (!has_[r.slot] || r.seq > latest_[r.slot].seq) {
+                latest_[r.slot] = r;
+                has_[r.slot] = true;
+            }
+            used_ = pos + kSlotRecordSize;
         }
         return Status::Ok;
     }
 
-    bool initialized() const noexcept { return storage_ != nullptr; }
+    Status compact() noexcept {
+        SlotRecord keep[2]{};
+        bool keep_has[2] = { has_[0], has_[1] };
+        keep[0] = latest_[0];
+        keep[1] = latest_[1];
+
+        const Status st = storage_->erase(offset_, size_);
+        if (st != Status::Ok) return st;
+
+        used_ = 0u;
+        seq_ = 0u;
+        dirty_ = false;
+        has_[0] = has_[1] = false;
+        latest_[0] = latest_[1] = SlotRecord{};
+
+        for (uint8_t s = 0u; s < 2u; ++s) {
+            if (!keep_has[s]) continue;
+            uint8_t buf[kSlotRecordSize]{};
+            encode_record(buf, keep[s]);
+            const Status w = storage_->write(offset_ + used_, buf, kSlotRecordSize);
+            if (w != Status::Ok) return w;
+            used_ += kSlotRecordSize;
+            if (keep[s].seq > seq_) seq_ = keep[s].seq;
+            latest_[s] = keep[s];
+            has_[s] = true;
+        }
+        return Status::Ok;
+    }
+
+    Storage*   storage_ = nullptr;
+    uint32_t   offset_ = 0u;
+    uint32_t   size_ = 0u;
+    uint32_t   used_ = 0u;
+    uint32_t   seq_ = 0u;
+    bool       dirty_ = false;
+    bool       has_[2] = {false, false};
+    SlotRecord latest_[2]{};
+};
+
+class SlotStore {
+public:
+    SlotStore() noexcept = default;
+
+    /// Привязать хранилище. meta_offset — начало области метаданных;
+    /// meta_size == 0 означает старую раскладку: page_size()*4.
+    ///
+    /// Внутри — ОДИН журнал на оба слота: запись 80 байт дописывается в
+    /// ещё стёртое место, а не требует четырёх отдельных страниц.
+    Status init(Storage* storage, uint32_t meta_offset,
+                uint32_t meta_size = 0u) noexcept {
+        if (storage == nullptr) return Status::InvalidArg;
+        const uint32_t page = storage->page_size();
+        if (page == 0u) return Status::NotSupported;
+        if (meta_size == 0u) meta_size = page * kMetaPages;
+        return journal_.init(storage, meta_offset, meta_size);
+    }
+
+    bool initialized() const noexcept { return journal_.initialized(); }
+    uint32_t meta_offset() const noexcept { return journal_.meta_offset(); }
+    uint32_t meta_size() const noexcept { return journal_.meta_size(); }
+    uint32_t last_seq() const noexcept { return journal_.last_seq(); }
 
     /// Прочитать запись слота: Ok | NotFound (записи нет).
     Status load(uint8_t slot, SlotRecord& out) noexcept {
-        if (storage_ == nullptr) return Status::Unavailable;
-        if (slot > 1u) return Status::InvalidArg;
-        return store_[slot].load(slot, out);
+        return journal_.load(slot, out);
     }
 
     /// Записать запись слота (счётчик seq ведётся хранилищем).
     Status store(uint8_t slot, const SlotRecord& rec) noexcept {
-        if (storage_ == nullptr) return Status::Unavailable;
         if (slot > 1u) return Status::InvalidArg;
         SlotRecord copy = rec;
         copy.slot = slot;
-        return store_[slot].store(copy);
+        return journal_.store(copy);
     }
 
     /// Пометить слот негодным (запись создаётся, если её не было).
     Status invalidate(uint8_t slot, uint16_t detail = 0u) noexcept {
-        if (storage_ == nullptr) return Status::Unavailable;
         if (slot > 1u) return Status::InvalidArg;
 
         SlotRecord rec{};
@@ -841,10 +999,7 @@ public:
     }
 
 private:
-    Storage* storage_ = nullptr;
-    uint32_t meta_offset_ = 0u;
-    uint32_t per_slot_ = 0u;
-    MetaStore store_[2]{};
+    MetaJournal journal_{};
 };
 
 } // namespace embed::ota

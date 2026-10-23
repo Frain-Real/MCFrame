@@ -9,6 +9,7 @@
 - [Phase 5](phase5.md) — WiFi/BLE, provisioning, HTTPS OTA.
 - [Phase 6](phase6.md) — NVS, mcflash, rollback, FlashOps.
 - [Phase 7](phase7.md) — power, security, diagnostics, sanitizers.
+- [Phase 8](phase8.md) — F4/G4 BSP, NVS v2, Duration, декларативная плата, C3 repartition.
 - [HAL и board](hal.md) — интерфейсы Phase 1.
 
 ## Architecture Decision Records

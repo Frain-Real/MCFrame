@@ -22,7 +22,14 @@
 #include "boot.hpp"
 
 #include "../config/time_config.hpp"
+
+#ifndef MCFRAME_BOOT_VERIFY_HASH
+#define MCFRAME_BOOT_VERIFY_HASH 1
+#endif
+
+#if MCFRAME_BOOT_VERIFY_HASH
 #include "../crypto/sha2.hpp"      // проверка образа по SHA-256, если он записан
+#endif
 
 namespace embed::boot {
 
@@ -76,6 +83,7 @@ Status Loader::init(const Config& cfg) noexcept {
     // странице, а слоты — влезать в его ёмкость. Ошибка здесь означала бы
     // стирание не той страницы, а это уже необратимо.
     const ota::LayoutCheck lc = ota::check_layout(*cfg_.storage, cfg_.layout.meta_offset,
+                                                 cfg_.layout.meta_size,
                                                  cfg_.layout.slot_offset, cfg_.layout.slot_size);
     if (!lc.ok) return lc.status;
     layout_check_ = lc;
@@ -101,7 +109,7 @@ Status Loader::read_record(uint8_t slot, ota::SlotRecord& out) noexcept {
     // Дублировать формат метаданных здесь значило бы однажды разойтись с ним, а
     // цена расхождения — загрузка не того слота.
     if (!store_.initialized()) {
-        const Status st = store_.init(cfg_.storage, cfg_.layout.meta_offset);
+        const Status st = store_.init(cfg_.storage, cfg_.layout.meta_offset, cfg_.layout.meta_size);
         if (st != Status::Ok) return st;
     }
     return store_.load(slot, out);
@@ -110,7 +118,7 @@ Status Loader::read_record(uint8_t slot, ota::SlotRecord& out) noexcept {
 Status Loader::write_record(uint8_t slot, const ota::SlotRecord& rec) noexcept {
     if (slot > 1u) return Status::InvalidArg;
     if (!store_.initialized()) {
-        const Status st = store_.init(cfg_.storage, cfg_.layout.meta_offset);
+        const Status st = store_.init(cfg_.storage, cfg_.layout.meta_offset, cfg_.layout.meta_size);
         if (st != Status::Ok) return st;
     }
     return store_.store(slot, rec);
@@ -124,7 +132,7 @@ uint8_t Loader::pick_candidate() noexcept {
     // состояниях предпочтительнее тот, из которого работаем сейчас.
     ota::SlotRecord rec{};
     if (!store_.initialized()) {
-        if (store_.init(cfg_.storage, cfg_.layout.meta_offset) != Status::Ok) {
+        if (store_.init(cfg_.storage, cfg_.layout.meta_offset, cfg_.layout.meta_size) != Status::Ok) {
             return Layout::kNoSlot;
         }
     }
@@ -455,8 +463,15 @@ Status Loader::validate(uint8_t slot, uint32_t image_size, uint32_t image_crc32,
     if (!cfg_.verify_crc) return Status::Ok;
 
     uint32_t crc = ota::proto::image_crc_begin();
+#if MCFRAME_BOOT_VERIFY_HASH
     crypto::Sha2<crypto::Sha2Variant::Sha256> hasher{};
     const bool want_hash = cfg_.verify_hash && (sha256 != nullptr);
+#else
+    // F4-загрузчик обязан влезть в 16 КБ вместе с meta-журналом. CRC32
+    // остаётся; SHA-256 проверяется при приёме OTA до активации слота.
+    const bool want_hash = false;
+    (void)sha256;
+#endif
 
     uint32_t done = 0u;
     while (done < image_size) {
@@ -466,7 +481,9 @@ Status Loader::validate(uint8_t slot, uint32_t image_size, uint32_t image_crc32,
                                             verify_buf_, chunk);
         if (st != Status::Ok) return st;
         crc = ota::proto::image_crc_update(crc, verify_buf_, chunk);
+#if MCFRAME_BOOT_VERIFY_HASH
         if (want_hash) hasher.update(verify_buf_, chunk);
+#endif
         done += chunk;
     }
 
@@ -474,6 +491,7 @@ Status Loader::validate(uint8_t slot, uint32_t image_size, uint32_t image_crc32,
         ++stats_.bad_crc;
         return Status::Corruption;
     }
+#if MCFRAME_BOOT_VERIFY_HASH
     if (want_hash) {
         uint8_t digest[32]{};
         hasher.finalize(digest);
@@ -484,6 +502,7 @@ Status Loader::validate(uint8_t slot, uint32_t image_size, uint32_t image_crc32,
             return Status::Corruption;
         }
     }
+#endif
     return Status::Ok;
 }
 

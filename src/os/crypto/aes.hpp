@@ -326,18 +326,21 @@ public:
                 *output_len = 0u;
                 return Status::Ok;
             }
-            if (input_len % BlockSize != 0u) {
-                return Status::InvalidArg;
-            }
             if (output_cap < input_len) {
                 return Status::NoMemory;
             }
 
             if constexpr (Mode == AesMode::Ctr) {
-                // CTR: расшифрование — то же XOR с гаммой.
+                // CTR: расшифрование — то же XOR с гаммой. Длина НЕ обязана
+                // быть кратной блоку: потоковый режим не добивает данные.
+                // Проверка кратности ниже относится только к ECB/CBC.
                 ctr_xor(input, output, input_len);
                 *output_len = input_len;
                 return Status::Ok;
+            }
+
+            if (input_len % BlockSize != 0u) {
+                return Status::InvalidArg;
             }
 
             utilities::fast_memmove(output, input, input_len);

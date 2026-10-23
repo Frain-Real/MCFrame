@@ -126,7 +126,8 @@ Status Service::init(const Config& cfg) noexcept {
 
     // Раскладка: метаданные не пересекаются со слотами, образ влезает в слот.
     const LayoutCheck lc = check_layout(*cfg_.storage, cfg_.meta_offset,
-                                       cfg_.slot_offset, cfg_.slot_capacity);
+                                       cfg_.meta_size, cfg_.slot_offset,
+                                       cfg_.slot_capacity);
     if (!lc.ok) return lc.status;
     page_        = page;
     image_limit_ = lc.image_limit;
@@ -137,7 +138,7 @@ Status Service::init(const Config& cfg) noexcept {
     // Записи состояния ведёт общий SlotStore: те же правила читает и
     // загрузчик, поэтому «кто кого грузит» и «сколько раз пытались» не может
     // разойтись между двумя образами (см. ota_storage.hpp).
-    Status st = slots_.init(cfg_.storage, cfg_.meta_offset);
+    Status st = slots_.init(cfg_.storage, cfg_.meta_offset, cfg_.meta_size);
     if (st != Status::Ok) return st;
 
     // Интерфейс приёма: nullptr означает «интерфейса нет» — это законный

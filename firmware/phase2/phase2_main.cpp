@@ -42,23 +42,23 @@ void task_a(void*) noexcept {
     scheduler& s = scheduler::instance();
     for (uint32_t i = 0u; i < 20u; ++i) {
         g_a = g_a * 1.5f + 1.0f;
-        (void)s.sleep_for(1u);
+        (void)s.sleep_for_ms(10);
     }
-    for (;;) (void)s.sleep_for(1000u);
+    for (;;) (void)s.sleep_for_ms(10000);
 }
 
 void task_b(void*) noexcept {
     scheduler& s = scheduler::instance();
     for (uint32_t i = 0u; i < 20u; ++i) {
         g_b = g_b * 0.5f + 3.0f;
-        (void)s.sleep_for(1u);
+        (void)s.sleep_for_ms(10);
     }
-    for (;;) (void)s.sleep_for(1000u);
+    for (;;) (void)s.sleep_for_ms(10000);
 }
 
 void task_check(void*) noexcept {
     scheduler& s = scheduler::instance();
-    (void)s.sleep_for(100u);
+    (void)s.sleep_for_ms(1000);
 
     float ea = 0.0f;
     float eb = 0.0f;

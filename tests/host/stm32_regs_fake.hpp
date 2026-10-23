@@ -677,6 +677,8 @@ private:
 
 // ─────────────────────────── Глобальные модели ──────────────────────────────
 extern UsartModel g_usart1;
+extern UsartModel g_usart2;
+extern UsartModel g_usart3;
 extern I2cModel   g_i2c1;
 extern RccModel   g_rcc;
 extern NvicModel  g_nvic;
@@ -712,6 +714,8 @@ void fakeResetKeepBackup() noexcept;
 
 // ─────────────── Подмена указателей на периферию (CMSIS -> модель) ──────────
 #undef USART1
+#undef USART2
+#undef USART3
 #undef I2C1
 #undef RCC
 #undef GPIOA
@@ -738,6 +742,8 @@ static ::TIM_TypeDef  g_tim2{};
 #undef BKP
 
 #define USART1 (&::embed::test::g_usart1.regs)
+#define USART2 (&::embed::test::g_usart2.regs)
+#define USART3 (&::embed::test::g_usart3.regs)
 #define I2C1   (&::embed::test::g_i2c1.regs)
 #define RCC    (&::embed::test::g_rcc.regs)
 #define NVIC   (&::embed::test::g_nvic.regs)

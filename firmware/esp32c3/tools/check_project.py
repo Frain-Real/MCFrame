@@ -37,6 +37,18 @@ def main() -> int:
             print(f"component CMake missing {needle}", file=sys.stderr)
             return 1
 
+    # Переразметка 4 МБ: слоты 1.25 МБ должны оставаться внутри Flash и не
+    # пересекаться. Иначе «запас 28%» окажется за пределами кристалла.
+    parts = (ROOT / "partitions.csv").read_text()
+    for needle in ["0x140000", "0x150000", "0x290000"]:
+        if needle not in parts:
+            print(f"partitions.csv missing {needle}", file=sys.stderr)
+            return 1
+    end = 0x10000 + 3 * 0x140000
+    if end > 0x400000:
+        print("partitions.csv exceeds 4 MB", file=sys.stderr)
+        return 1
+
     sdk = (ROOT / "sdkconfig.defaults").read_text()
     for needle in ["CONFIG_FREERTOS_HZ=1000", "CONFIG_FREERTOS_UNICORE=y",
                    "CONFIG_PARTITION_TABLE_CUSTOM=y", "CONFIG_BT_ENABLED=y",

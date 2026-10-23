@@ -42,10 +42,13 @@ hal::ISpi& spi = board::spi1();
 hal::IUart& con = board::console();
 ```
 
-`boards/f103_generic` и `boards/mock_generic` дают одинаковые имена
-(`board::Uart`, `board::I2c`, `board::Spi`, `board::Pwm`, `board::Gpio`,
-`board::Console`). На F103 USART1/I2C1 реальные, SPI/PWM пока
-`NotSupported` — их реализации появятся в Phase 3.
+Платы: `f103_generic`, `f407_generic`, `g431_generic`, `mock_generic`,
+`esp32c3`. На STM32 доступны `board::uart<1/2>()`, `board::spi<1/2>()`,
+`board::i2c<1/2>()`, `board::adc1()`, `board::pwm1()`, `board::nvs()`.
+Пины — не константы в драйвере, а [`PinMap`](../src/boards/pin_map.hpp):
+карта платы проверяется `static_assert` на конфликты, BSP создаёт драйверы
+из неё. На F103 USART1/2/3 (один async-автомат), SPI1/2, I2C1, ADC1, PWM TIM2_CH1 — реальные
+драйверы; на F4/G4 — USART1/2, SPI1/2, I2C1/2, ADC1, PWM.
 
 ## Mock-реализации
 
