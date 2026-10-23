@@ -487,7 +487,7 @@ Status Store::set(const char* key, const void* data, Size len) noexcept {
     e->offset = last_record_offset_;
     e->value_len = static_cast<uint16_t>(len + ((cipher_ != nullptr) ? cipher_->overhead() : 0u));
     e->key_len = static_cast<uint8_t>(key_len);
-    e->flags = flags;
+    e->flags = static_cast<uint8_t>(flags);
     e->format = kFormatVersion;
     e->used = true;
 

@@ -390,7 +390,7 @@ Stats Supervisor::stats() noexcept {
     // 64-битное деление — сотни тактов на Cortex-M3, но stats() вызывается
     // из отчёта/диагностики, а не в горячем пути.
     s.avg_load_percent  = (windows_ == 0u)
-                        ? 0u
+                        ? static_cast<uint8_t>(0u)
                         : static_cast<uint8_t>(load_sum_ / windows_);
 
     s.sleep_entries      = sleep_entries_;

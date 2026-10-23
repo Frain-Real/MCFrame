@@ -30,6 +30,7 @@ Status fill_ota_config(ota::Config& ota_cfg, const Config& boot_cfg) noexcept {
 }
 
 bool ota_is_available(const Config& boot_cfg) noexcept {
+    (void)boot_cfg;
     if (!ota::Service::instance().initialized()) return false;
     return Loader::instance().current_slot() != Layout::kNoSlot;
 }

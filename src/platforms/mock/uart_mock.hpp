@@ -42,7 +42,7 @@ public:
         async::Strategy strategy = Strat;
 
         Config() = default;
-        Config(const Base::Config& base) noexcept : Base::Config(base) {}
+        Config(const typename Base::Config& base) noexcept : Base::Config(base) {}
     };
 
     static UartMock& instance() noexcept {

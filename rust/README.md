@@ -15,7 +15,7 @@ runtime: только C ABI-функции из [`src/os/rust/rust_bridge.cpp`](
 | host/mock | обычный host |
 
 В окружении может не быть установленного `rust-std` для ARM. Nightly умеет
-собрать `core` из `rust-src`:
+собрать `core` из `rust-src` (компонент `rust-src` должен быть установлен):
 
 ```bash
 cd rust/mcframe_app

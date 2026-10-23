@@ -54,7 +54,7 @@ uint64_t now_ms() noexcept {
 /// Активированный слот — это ЯВНАЯ просьба хоста загрузить именно его, поэтому
 /// он важнее всего. Дальше — подтверждённый (Running: он уже доказывал, что
 /// работает) и проверенный (Verified). Всё остальное грузить нечего.
-int state_rank(ota::proto::State st) noexcept {
+[[maybe_unused]] int state_rank(ota::proto::State st) noexcept {
     switch (st) {
         case ota::proto::State::Activated: return 3;
         case ota::proto::State::Running:   return 2;

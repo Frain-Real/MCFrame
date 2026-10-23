@@ -12,12 +12,6 @@ uint32_t get_u32(const uint8_t* p) noexcept {
            (static_cast<uint32_t>(p[2]) << 8) |
            static_cast<uint32_t>(p[3]);
 }
-void put_u32(uint8_t* p, uint32_t v) noexcept {
-    p[0] = static_cast<uint8_t>(v >> 24);
-    p[1] = static_cast<uint8_t>(v >> 16);
-    p[2] = static_cast<uint8_t>(v >> 8);
-    p[3] = static_cast<uint8_t>(v);
-}
 } // namespace
 
 Status query(Factory& factory, const char* server,

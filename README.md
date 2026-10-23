@@ -39,6 +39,7 @@ cmake --build build --parallel
 ```bash
 ./build.sh stm32f4 Release        # self-test + phase3_fw (драйверы)
 ./build.sh stm32g4 Release        # self-test + phase3_fw (драйверы)
+# Rust: нужны nightly + rust-src; ARM staticlib собирается -Z build-std=core.
 ./build.sh mock Debug -DMCFRAME_RUST_APP=ON   # + Rust staticlib и mc_tests_rust
 python3 tools/target_plan.py      # проверка матрицы без кросс-компилятора
 ```
@@ -2301,7 +2302,8 @@ tools/check_size.sh .build/stm32/example_fw.bin 53248 "slot"
 * CMake ≥ 3.20
 * mock: GCC/Clang (проверено на GCC 16)
 * stm32: `arm-none-eabi-gcc` + `arm-none-eabi-gcc-ar` (для сборок с LTO — то
-  есть для `Release`; без `gcc-ar` собирайте с `-DMCFRAME_LTO=OFF`)
+  есть для `Release`; без `gcc-ar` собирайте с `-DMCFRAME_LTO=OFF`) и
+  `libstdc++-arm-none-eabi-newlib` (C++-заголовки `<cstdint>`/`<cstring>`)
 
 ## Тесты
 

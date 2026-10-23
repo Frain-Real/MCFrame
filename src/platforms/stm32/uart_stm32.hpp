@@ -92,8 +92,8 @@ public:
     static constexpr config::DmaRequest kRxRequest = Traits::kRxRequest;
 
     using Base     = IUart<UartDriver<Traits>>;
-    using Parity   = Base::Parity;
-    using StopBits = Base::StopBits;
+    using Parity   = typename Base::Parity;
+    using StopBits = typename Base::StopBits;
 
     /// Конфигурация = базовая + выбор стратегии.
     ///
@@ -104,7 +104,7 @@ public:
         async::Strategy strategy = kDefaultStrategy;
 
         Config() = default;
-        Config(const Base::Config& base) noexcept : Base::Config(base) {}
+        Config(const typename Base::Config& base) noexcept : Base::Config(base) {}
     };
 
     static UartDriver& instance() noexcept {

@@ -44,7 +44,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib
 
       - name: Configure + build Phase 2 self-test
         run: ./build.sh ${{ matrix.target }} Release
@@ -77,7 +78,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build with ESP-IDF
+        shell: bash
         run: |
+          # Образ espressif/idf может не иметь idf.py в PATH до export.sh.
+          if [ -z "${IDF_PATH:-}" ]; then export IDF_PATH=/opt/esp-idf; fi
+          . "$IDF_PATH/export.sh"
           cd firmware/esp32c3
           idf.py set-target esp32c3
           idf.py build
@@ -122,7 +127,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib
 
       - name: Flat image
         run: ./build.sh stm32 Release
