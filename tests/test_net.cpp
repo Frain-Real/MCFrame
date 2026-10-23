@@ -6,6 +6,8 @@
 // ---------------------------------------------------------------------------
 #include "os/net/http.hpp"
 #include "os/net/mqtt.hpp"
+#include "os/net/tls.hpp"
+#include "os/shell/net_shell.hpp"
 #include "os/net/sntp.hpp"
 #include "os/time/rtc.hpp"
 #include "os/config/time_config.hpp"
@@ -115,7 +117,18 @@ void test_socket_ipv4() {
     check("http url", net::http::parse_url("http://example.com/api?x=1", u) &&
           std::strcmp(u.host, "example.com") == 0 && u.port == 80u &&
           std::strcmp(u.path, "/api?x=1") == 0 && !u.tls);
-    check("https is marked", net::http::parse_url("https://example.com/", u) && u.tls);
+    check("https is marked", net::http::parse_url("https://example.com/", u) && u.tls &&
+          u.port == 443u);
+}
+
+
+bool contains(const uint8_t* p, Size n, const char* text) {
+    const Size m = std::strlen(text);
+    if (m == 0u || m > n) return false;
+    for (Size i = 0u; i + m <= n; ++i) {
+        if (std::memcmp(p + i, text, m) == 0) return true;
+    }
+    return false;
 }
 
 void test_mqtt() {
@@ -167,6 +180,139 @@ void test_mqtt() {
     const uint8_t pingresp[] = {0xD0, 0x00};
     f.tcp.push(pingresp, sizeof(pingresp));
     check("ping", c.ping(100u) == Status::Ok);
+
+    // QoS2 publish: PUBREC -> PUBREL -> PUBCOMP.
+    f.tcp.clear_tx();
+    const uint16_t qid = static_cast<uint16_t>(c.packet_id() + 1u);
+    const uint8_t qos2ack[] = {0x50, 0x02, static_cast<uint8_t>(qid >> 8),
+                               static_cast<uint8_t>(qid), 0x70, 0x02,
+                               static_cast<uint8_t>(qid >> 8),
+                               static_cast<uint8_t>(qid)};
+    f.tcp.push(qos2ack, sizeof(qos2ack));
+    check("publish qos2", c.publish("dev/q2", "xy", 2u, 2u, false, 100u) == Status::Ok);
+    check("QoS2 packets", f.tcp.tx_len() >= 2u && (f.tcp.tx()[0] & 0xF0u) == 0x30u);
+
+    // Incoming QoS2: PUBLISH не отдаётся до PUBREL.
+    ctx.count = 0;
+    const uint8_t q2pub[] = {0x34, 0x0B, 0x00, 0x05, 'd','e','v','/','x',
+                             0x00, 0x07, '4','2'};
+    f.tcp.push(q2pub, sizeof(q2pub));
+    check("incoming qos2 stored", c.poll(100u) == Status::Ok && ctx.count == 0);
+    const uint8_t q2rel[] = {0x62, 0x02, 0x00, 0x07};
+    f.tcp.push(q2rel, sizeof(q2rel));
+    check("incoming qos2 released", c.poll(100u) == Status::Ok && ctx.count == 1);
+
+    // LWT: будет в CONNECT и не потеряется.
+    MockFactory f2;
+    mqtt::Client<512> c2;
+    mqtt::Config cfg2{};
+    cfg2.host = "broker";
+    cfg2.client_id = "mc-will";
+    cfg2.will_topic = "last/will";
+    cfg2.will_payload = "bye";
+    cfg2.will_len = 3u;
+    cfg2.will_qos = 2u;
+    cfg2.will_retain = true;
+    f2.tcp.push(connack, sizeof(connack));
+    check("LWT init", c2.init(f2, cfg2) == Status::Ok);
+    check("LWT connect", c2.connect(100u) == Status::Ok);
+    check("LWT topic in CONNECT", contains(f2.tcp.tx(), f2.tcp.tx_len(), "last/will"));
+    check("LWT payload in CONNECT", contains(f2.tcp.tx(), f2.tcp.tx_len(), "bye"));
+    c2.close();
+
+    // Reconnect после close.
+    f.tcp.clear_tx();
+    f.tcp.push(connack, sizeof(connack));
+    check("reconnect", c.reconnect(100u) == Status::Ok && c.connected());
+    check("reconnect sends CONNECT", f.tcp.tx_len() > 2u && f.tcp.tx()[0] == 0x10u);
+    check("disconnect sends DISCONNECT", c.disconnect(100u) == Status::Ok && !c.connected());
+}
+
+
+class FakeTlsSession final : public TlsSession {
+public:
+    Status start(Socket&, const Endpoint&, const char* host,
+                 const TlsConfig&, uint32_t) noexcept override {
+        host_seen = host != nullptr;
+        active = true;
+        return Status::Ok;
+    }
+    Status send(const void* data, Size len, Size& sent) noexcept override {
+        if (!active) return Status::Unavailable;
+        sent = len;
+        last_len = len;
+        if (data != nullptr && len > 0u) last_byte = static_cast<const uint8_t*>(data)[len - 1u];
+        return Status::Ok;
+    }
+    Status recv(void* data, Size cap, Size& got, uint32_t) noexcept override {
+        if (!active) return Status::Unavailable;
+        static const char kReply[] = "tls";
+        Size n = sizeof(kReply) - 1u;
+        if (n > cap) n = cap;
+        for (Size i = 0u; i < n; ++i) static_cast<uint8_t*>(data)[i] = static_cast<uint8_t>(kReply[i]);
+        got = n;
+        return Status::Ok;
+    }
+    void close() noexcept override { active = false; }
+
+    bool active = false;
+    bool host_seen = false;
+    Size last_len = 0u;
+    uint8_t last_byte = 0u;
+};
+
+class FakeTlsProvider final : public TlsProvider {
+public:
+    Status create(TlsSession*& out) noexcept override {
+        if (used) return Status::NoMemory;
+        used = true;
+        out = &session;
+        return Status::Ok;
+    }
+    void release(TlsSession*) noexcept override { used = false; }
+    FakeTlsSession session;
+    bool used = false;
+};
+
+void test_tls_layer() {
+    std::puts("TLS layer:");
+    MockFactory f;
+    FakeTlsProvider provider;
+    TlsFactoryT<2> tls(f, provider);
+    TlsConfig cfg{};
+    cfg.verify = true;
+    tls.set_config(cfg);
+
+    Endpoint ep{};
+    check("TLS resolve", tls.resolve("broker", ep) == Status::Ok && ep.port == 0u);
+    Socket* s = nullptr;
+    check("TLS create", tls.create(Protocol::Tcp, s) == Status::Ok && s != nullptr);
+    check("TLS UDP rejected", tls.create(Protocol::Udp, s) == Status::NotSupported);
+    check("TLS connect", s != nullptr && s->connect(ep, 100u) == Status::Ok);
+    Size sent = 0u;
+    check("TLS send", s != nullptr && s->send("abc", 3u, sent) == Status::Ok && sent == 3u);
+    uint8_t buf[8]{};
+    Size got = 0u;
+    check("TLS recv", s != nullptr && s->recv(buf, sizeof(buf), got, 100u) == Status::Ok &&
+          got == 3u && buf[0] == 't' && buf[2] == 's');
+    s->close();
+    check("TLS released", !provider.used);
+}
+
+
+void test_tcp_shell() {
+    std::puts("Shell over TCP:");
+    ScriptSocket sock;
+    Endpoint ep{127,0,0,1,4444};
+    check("socket connect", sock.connect(ep, 100u) == Status::Ok);
+    shell::Console console;
+    shell::TcpConsole port;
+    port.attach(sock, console);
+    const uint8_t cmd[] = "help\n";
+    sock.push(cmd, sizeof(cmd) - 1u);
+    port.poll();
+    check("TCP shell output", sock.tx_len() > 0u && contains(sock.tx(), sock.tx_len(), "commands:"));
+    port.detach();
 }
 
 void test_http() {
@@ -242,6 +388,8 @@ int main() {
     std::puts("=== network ===");
     test_socket_ipv4();
     test_mqtt();
+    test_tls_layer();
+    test_tcp_shell();
     test_http();
     test_sntp();
     std::printf("%d/%d проверок пройдено%s\n", g_total - g_failed, g_total,

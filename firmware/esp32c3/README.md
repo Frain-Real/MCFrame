@@ -58,10 +58,16 @@ GATT-сервис `6d636672-...`:
 
 ## Ограничения
 
-- Central BLE: режим и connect() есть; GATT-клиент пока без API.
+- Central BLE: connect(), discover_services/chars, read/write и CCCD
+  subscribe_notify; HIL на внешнем peripheral не проводился.
 - Произвольный GATT-сервис через `add_gatt_service` пока `NotSupported`;
   встроенный provisioning-сервис работает.
 - BLE pairing/security отключён в текущей конфигурации; размер слота это уже не ограничивает (см. ниже).
 - TLS 1.2, common CA bundle; TLS 1.3/IPv6 отключены.
 - `mcframe_c3.bin` занимает ~0xeea90 из 1.25 МБ (0x51570, ~25% запаса).
 - На реальной плате WiFi/BLE/OTA не проверялись.
+
+## littlefs
+
+`src/os/fs/lfs.c` включён в компонент `mcframe` с `LFS_NO_MALLOC`;
+`fs::LittleFs<BlockSize>` доступен приложению (BlockDevice — свой SD/SPI).

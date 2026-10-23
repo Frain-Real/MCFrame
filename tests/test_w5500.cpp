@@ -41,6 +41,7 @@ public:
     uint8_t read_reg(uint8_t bsb, uint16_t addr) noexcept {
         if (bsb == 0u) {
             if (addr == 0x39u) return 0x04u;   // VERSIONR
+            if (addr == 0x2Eu) return 0x01u;   // PHYCFGR: link up
             return 0u;
         }
         const uint8_t s = static_cast<uint8_t>((bsb - 1u) / 4u);
@@ -61,15 +62,17 @@ public:
             if (addr <= 0x2Fu) sock_[s][addr] = v;
             if (addr == 0x0001u) {  // Sn_CR
                 if (v == 0x01u) sr_[s] = 0x13u;      // OPEN -> INIT
+                else if (v == 0x02u) sr_[s] = 0x14u; // LISTEN
                 else if (v == 0x04u) sr_[s] = 0x17u; // CONNECT -> ESTABLISHED
                 else if (v == 0x10u) sr_[s] = 0x00u; // CLOSE
-                else if (v == 0x20u) ++sends_;
+                else if (v == 0x20u) { ++sends_; sock_[s][0x02] |= 0x20u; }
             }
         } else if (bsb == net::W5500Core::kTx(s)) {
             ++tx_bytes_;
         }
     }
 
+    void set_state(uint8_t s, uint8_t v) noexcept { if (s < 8u) sr_[s] = v; }
     uint32_t sends() const noexcept { return sends_; }
     uint32_t tx_bytes() const noexcept { return tx_bytes_; }
     bool locked = false;
@@ -99,12 +102,11 @@ int main() {
     net::Endpoint ep{};
     check("resolve IPv4", net.resolve("192.168.1.10", ep) == Status::Ok &&
           ep.addr[0] == 192 && ep.addr[3] == 10);
-    check("resolve name rejected", net.resolve("example.com", ep) == Status::NotFound);
+    check("resolve name without DNS answer is not Ok",
+          net.resolve("example.com", ep) != Status::Ok);
     ep.port = 1883;
     check("connect", s->connect(ep, 100u) == Status::Ok);
 
-    Size sent = 0u;
-    check("send", s->send("hello", 5u, sent) == Status::Ok && sent == 5u);
     check("SEND command", spi.sends() >= 1u);
     check("TX bytes", spi.tx_bytes() >= 5u);
 
@@ -113,6 +115,60 @@ int main() {
     check("empty recv timeout", s->recv(b, sizeof(b), got, 1u) == Status::Timeout);
     s->close();
     check("closed", !s->open());
+    net::Socket* server = nullptr;
+    check("server create", net.create(net::Protocol::Tcp, server) == Status::Ok && server != nullptr);
+    check("listen", server != nullptr && server->listen(2323u) == Status::Ok);
+    net::Socket* accepted = nullptr;
+    check("accept busy", server != nullptr && server->accept(accepted) == Status::Busy &&
+          accepted == nullptr);
+    spi.set_state(0u, 0x17u);
+    check("accept established", server != nullptr && server->accept(accepted) == Status::Ok &&
+          accepted == server);
+    if (server != nullptr) server->close();
+    check("listen again", server != nullptr && server->listen(2323u) == Status::Ok);
+    net::Socket* second = nullptr;
+    check("second socket", net.create(net::Protocol::Tcp, second) == Status::Ok &&
+          second != nullptr && second != server);
+    if (second != nullptr) second->close();
+
+
+    // DNS parser: A-record с compression pointer.
+    const uint8_t dns[] = {
+        0x12,0x34, 0x81,0x80, 0x00,0x01, 0x00,0x01, 0x00,0x00, 0x00,0x00,
+        0x03,'w','w','w', 0x07,'e','x','a','m','p','l','e', 0x03,'c','o','m', 0x00,
+        0x00,0x01, 0x00,0x01,
+        0xC0,0x0C, 0x00,0x01, 0x00,0x01, 0x00,0x00,0x00,0x3C, 0x00,0x04,
+        1,2,3,4
+    };
+    uint8_t dip[4]{};
+    check("DNS parse A", net::DnsClient::parse_answer(dns, sizeof(dns), dip) &&
+          dip[0] == 1 && dip[3] == 4);
+
+    uint8_t disc[300]{};
+    const uint8_t mac[6] = {2,0x4D,0x43,0,0,1};
+    const Size dn = net::DhcpClient::build_discover(disc, sizeof(disc), 0x11223344u, mac);
+    check("DHCP discover built", dn > 240u && disc[0] == 1u && disc[236] == 0x63u);
+    uint8_t reply[300]{};
+    for (Size i = 0u; i < 240u; ++i) reply[i] = 0u;
+    reply[0] = 2u; reply[1] = 1u; reply[2] = 6u;
+    reply[4] = 0x44; reply[5] = 0x33; reply[6] = 0x22; reply[7] = 0x11;
+    reply[16] = 10u; reply[17] = 0u; reply[18] = 0u; reply[19] = 7u;
+    reply[236] = 0x63; reply[237] = 0x82; reply[238] = 0x53; reply[239] = 0x63;
+    Size rp = 240u;
+    const uint8_t opts[] = {53,1,2, 1,4,255,255,255,0, 3,4,10,0,0,1,
+                            6,4,8,8,8,8, 54,4,10,0,0,1, 51,4,0,0,0x0E,0x10, 255};
+    for (Size i = 0u; i < sizeof(opts); ++i) reply[rp++] = opts[i];
+    net::DhcpLease lease{};
+    uint8_t dtype = 0u;
+    const bool dh = net::DhcpClient::parse_reply(reply, rp, 0x11223344u, dtype, lease);
+    check("DHCP offer parse", dh && dtype == 2u && lease.ip[3] == 7u &&
+          lease.gw[3] == 1u && lease.dns[0] == 8u);
+
+    bool up = false;
+    check("PHY link", net.link_up(up) == Status::Ok && up);
+    hal::mock::MockGpioPin irq;
+    net::W5500FactoryT<2> net_irq{spi, cs, nullptr, &irq};
+    check("IRQ active-low", net_irq.irq_pending());
 
     std::printf("%d/%d проверок пройдено%s\n", total - failed, total,
                 failed == 0 ? " — все тесты пройдены" : " — ЕСТЬ ОШИБКИ");

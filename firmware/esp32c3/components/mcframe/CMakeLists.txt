@@ -3,9 +3,12 @@
 # (см. docs/adr/004-esp32c3.md). Компилируются shell, HAL C3 и BSP.
 set(MCFRAME_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../..")
 
+# littlefs: без malloc/assert, все буферы статические (LittleFs<...>).
+
 idf_component_register(
     SRCS
         "${MCFRAME_ROOT}/src/os/shell/shell.cpp"
+        "${MCFRAME_ROOT}/src/os/fs/lfs.c"
         "shell_c3.cpp"
         "${MCFRAME_ROOT}/src/boards/esp32c3/hal_esp32c3.cpp"
         "${MCFRAME_ROOT}/src/boards/esp32c3/board.cpp"
@@ -16,6 +19,7 @@ idf_component_register(
         "ota_https.cpp"
     INCLUDE_DIRS
         "${MCFRAME_ROOT}/src"
+        "${MCFRAME_ROOT}/src/os/fs"
         "."
     REQUIRES
         esp_driver_gpio
@@ -37,6 +41,8 @@ idf_component_register(
         esp_partition
         app_update
 )
+target_compile_definitions(${COMPONENT_LIB} PRIVATE LFS_NO_MALLOC LFS_NO_ASSERT)
+
 
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     MCFRAME_SOC_ESP32C3=1

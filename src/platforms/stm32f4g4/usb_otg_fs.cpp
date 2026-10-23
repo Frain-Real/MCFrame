@@ -25,6 +25,7 @@ constexpr uint32_t kDiepmsk   = 0x810u;
 constexpr uint32_t kDoepmsk   = 0x814u;
 constexpr uint32_t kDaintmsk  = 0x81Cu;
 constexpr uint32_t kDiepctl0  = 0x900u;
+constexpr uint32_t kDiepint0  = 0x908u;
 constexpr uint32_t kDieptsiz0 = 0x910u;
 constexpr uint32_t kDoepctl0  = 0xB00u;
 constexpr uint32_t kDoeptsiz0 = 0xB10u;
@@ -46,6 +47,8 @@ constexpr uint32_t kDiepSnak   = 1u << 27;
 constexpr uint32_t kEptypeCtl  = 0u << 18;
 constexpr uint32_t kEptypeBulk = 2u << 18;
 constexpr uint32_t kMpsiz64    = 64u;
+constexpr uint32_t kEp0Packet  = 64u;
+constexpr uint32_t kDiepintXfrc = 1u << 0;
 
 bool wait_ahb_idle() noexcept {
     uint32_t guard = 100000u;
@@ -91,8 +94,15 @@ Status OtgFsHal::init(SetupCallback on_setup, OutCallback on_out, void* ctx) noe
     setup_cb_ = on_setup;
     out_cb_ = on_out;
     ctx_ = ctx;
-    ctrl_len_ = 0u;
+    ctrl_out_len_ = 0u;
     ctrl_pos_ = 0u;
+    ctrl_in_data_ = nullptr;
+    ctrl_in_len_ = 0u;
+    ctrl_in_pos_ = 0u;
+    ctrl_in_active_ = false;
+    expect_out_ = false;
+    pending_address_ = 0u;
+    address_pending_ = false;
 
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
     RCC->AHB2ENR |= (1u << 7);       // OTGFSEN (F4, AHB2)
@@ -104,12 +114,11 @@ Status OtgFsHal::init(SetupCallback on_setup, OutCallback on_out, void* ctx) noe
     GPIOA->AFR[1] = (GPIOA->AFR[1] & ~((0xFu << 12) | (0xFu << 16))) |
                     ((10u << 12) | (10u << 16));
 
-    // Мягкий сброс ядра.
     OTG_REG(kGrstctl) |= 1u;
     if (!wait_ahb_idle()) return Status::HardwareError;
 
     OTG_REG(kGusbcfg) |= (1u << 30);          // FDMOD: device mode
-    OTG_REG(kGusbcfg) = (OTG_REG(kGusbcfg) & ~(0xFu << 10)) | (9u << 10); // TRDT
+    OTG_REG(kGusbcfg) = (OTG_REG(kGusbcfg) & ~(0xFu << 10)) | (9u << 10);
     OTG_REG(kGccfg) &= ~(1u << 16);           // PWRDWN = 0
     OTG_REG(kGahbcfg) |= 1u;                  // GINTMSK
     OTG_REG(kDcfg) = 3u;                      // full speed
@@ -142,16 +151,28 @@ void OtgFsHal::poll() noexcept {
         OTG_REG(kGintsts) = kGintEnumDne;
     }
     if ((st & kGintRxFlvl) != 0u) handle_rx();
-    if ((st & kGintIepInt) != 0u) OTG_REG(kGintsts) = kGintIepInt;
+    if ((st & kGintIepInt) != 0u) {
+        if ((OTG_REG(kDiepint0) & kDiepintXfrc) != 0u) handle_ep0_in_done();
+        OTG_REG(kGintsts) = kGintIepInt;
+    }
     if ((st & kGintOepInt) != 0u) OTG_REG(kGintsts) = kGintOepInt;
 }
 
 void OtgFsHal::handle_reset() noexcept {
-    OTG_REG(kDcfg) &= ~(0x7Fu << 4);          // address 0
+    OTG_REG(kDcfg) &= ~0x7Fu;                 // address 0
     OTG_REG(kDiepctl0) = kMpsiz64 | kEptypeCtl;
     OTG_REG(kDoepctl0) = kMpsiz64 | kEptypeCtl;
-    ctrl_len_ = 0u;
+    ctrl_in_data_ = nullptr;
+    ctrl_in_len_ = 0u;
+    ctrl_in_pos_ = 0u;
+    ctrl_in_active_ = false;
+    ctrl_out_len_ = 0u;
     ctrl_pos_ = 0u;
+    expect_out_ = false;
+    pending_address_ = 0u;
+    address_pending_ = false;
+    pending_setup_ = embed::usb::Setup{};
+    fifo_flush(0u);
 }
 
 void OtgFsHal::handle_rx() noexcept {
@@ -169,16 +190,51 @@ void OtgFsHal::handle_rx() noexcept {
         s.value = static_cast<uint16_t>(b[2] | (b[3] << 8));
         s.index = static_cast<uint16_t>(b[4] | (b[5] << 8));
         s.length = static_cast<uint16_t>(b[6] | (b[7] << 8));
-        if (setup_cb_ != nullptr) setup_cb_(ctx_, s);
+
+        pending_setup_ = s;
+        ctrl_out_len_ = 0u;
+        ctrl_pos_ = 0u;
+        expect_out_ = false;
+
+        if (s.length != 0u && !s.in()) {
+            if (s.length > sizeof(ctrl_out_)) {
+                stall_ep0();
+                return;
+            }
+            expect_out_ = true;
+            // Принимаем data stage. Для длины <=64 хватает одного пакета;
+            // при большей длине OTG FS всё равно режет на 64-байтные пакеты.
+            const uint32_t packets = (s.length + kEp0Packet - 1u) / kEp0Packet;
+            OTG_REG(kDoeptsiz0) = (packets << 19) | s.length;
+            OTG_REG(kDoepctl0) |= kDiepCnak;
+            return;
+        }
+
+        if (setup_cb_ != nullptr) setup_cb_(ctx_, s, nullptr, 0u);
         else stall_ep0();
         return;
     }
-    if (ep == 0u && (pktsts == 2u || pktsts == 3u)) { // OUT data
-        const Size n = (len > sizeof(ctrl_out_)) ? sizeof(ctrl_out_) : len;
-        ctrl_len_ = read_fifo(0u, ctrl_out_, n);
-        ctrl_pos_ = 0u;
+
+    if (ep == 0u && (pktsts == 2u || pktsts == 3u)) {
+        if (expect_out_) {
+            const Size room = sizeof(ctrl_out_) - ctrl_out_len_;
+            const Size n = (len > room) ? room : len;
+            ctrl_out_len_ += read_fifo(0u, ctrl_out_ + ctrl_out_len_, n);
+            if (ctrl_out_len_ >= pending_setup_.length || len < kEp0Packet) {
+                expect_out_ = false;
+                ctrl_pos_ = 0u;
+                if (setup_cb_ != nullptr) {
+                    setup_cb_(ctx_, pending_setup_, ctrl_out_, ctrl_out_len_);
+                }
+            }
+        } else {
+            // Status OUT после IN data stage (ZLP) — просто поглотить.
+            uint8_t tmp[8]{};
+            (void)read_fifo(0u, tmp, len < sizeof(tmp) ? len : sizeof(tmp));
+        }
         return;
     }
+
     if (ep != 0u && pktsts == 2u) {
         uint8_t tmp[64]{};
         const Size n = (len > sizeof(tmp)) ? sizeof(tmp) : len;
@@ -187,19 +243,53 @@ void OtgFsHal::handle_rx() noexcept {
     }
 }
 
+void OtgFsHal::send_ep0_next() noexcept {
+    if (!ctrl_in_active_) return;
+    if (ctrl_in_pos_ >= ctrl_in_len_) {
+        // ZLP/status IN: одна пустая передача.
+        OTG_REG(kDieptsiz0) = 1u << 19;
+        OTG_REG(kDiepctl0) |= kDiepEpena | kDiepCnak;
+        ctrl_in_active_ = false;
+        return;
+    }
+    Size chunk = ctrl_in_len_ - ctrl_in_pos_;
+    if (chunk > kEp0Packet) chunk = kEp0Packet;
+    write_fifo(0u, ctrl_in_data_ + ctrl_in_pos_, chunk);
+    OTG_REG(kDieptsiz0) = chunk | (1u << 19);
+    OTG_REG(kDiepctl0) |= kDiepEpena | kDiepCnak;
+    ctrl_in_pos_ += chunk;
+    if (ctrl_in_pos_ >= ctrl_in_len_) ctrl_in_active_ = false;
+}
+
+void OtgFsHal::handle_ep0_in_done() noexcept {
+    OTG_REG(kDiepint0) = kDiepintXfrc;
+    if (ctrl_in_active_) {
+        send_ep0_next();
+        return;
+    }
+    // SET_ADDRESS применяется после завершения status stage, иначе хост
+    // отправит status на старый адрес и enumeration сорвётся.
+    if (address_pending_ && !ctrl_in_active_) {
+        OTG_REG(kDcfg) = (OTG_REG(kDcfg) & ~0x7Fu) | (pending_address_ & 0x7Fu);
+        address_pending_ = false;
+    }
+}
+
 Status OtgFsHal::ep0_write(const void* data, Size len) noexcept {
     if (!inited_) return Status::Unavailable;
-    const auto* p = static_cast<const uint8_t*>(data);
-    if (p != nullptr && len > 0u) write_fifo(0u, p, len);
-    OTG_REG(kDieptsiz0) = static_cast<uint32_t>(len & 0x7Fu) | (1u << 19);
-    OTG_REG(kDiepctl0) |= kDiepEpena | kDiepCnak;
+    if (len != 0u && data == nullptr) return Status::InvalidArg;
+    ctrl_in_data_ = static_cast<const uint8_t*>(data);
+    ctrl_in_len_ = len;
+    ctrl_in_pos_ = 0u;
+    ctrl_in_active_ = true;
+    send_ep0_next();
     return Status::Ok;
 }
 
 Status OtgFsHal::ep0_read(void* data, Size cap, Size& got) noexcept {
     got = 0u;
-    if (ctrl_pos_ >= ctrl_len_) return Status::Timeout;
-    Size n = ctrl_len_ - ctrl_pos_;
+    if (ctrl_pos_ >= ctrl_out_len_) return Status::Timeout;
+    Size n = ctrl_out_len_ - ctrl_pos_;
     if (n > cap) n = cap;
     auto* out = static_cast<uint8_t*>(data);
     for (Size i = 0u; i < n; ++i) out[i] = ctrl_out_[ctrl_pos_ + i];
@@ -222,12 +312,19 @@ Status OtgFsHal::ep_write(uint8_t ep, const void* data, Size len) noexcept {
 
 Status OtgFsHal::ep_read(uint8_t, void*, Size, Size& got) noexcept {
     got = 0u;
-    return Status::NotSupported;   // OUT-данные приходят через out_callback
+    return Status::NotSupported;
 }
 
 void OtgFsHal::stall_ep0() noexcept {
     OTG_REG(kDiepctl0) |= kDiepStall | kDiepSnak;
     OTG_REG(kDoepctl0) |= (1u << 21);
+}
+
+Status OtgFsHal::set_address(uint8_t address) noexcept {
+    if (!inited_) return Status::Unavailable;
+    pending_address_ = address & 0x7Fu;
+    address_pending_ = true;
+    return Status::Ok;
 }
 
 } // namespace embed::stm32f4g4::usb

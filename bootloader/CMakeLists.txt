@@ -31,17 +31,15 @@ else()
     endif()
     target_link_libraries(bootloader_fw PRIVATE MCFrame::MCFrame)
     target_include_directories(bootloader_fw PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    # Загрузчик живёт в одном 16-КБ секторе F4: размер важнее скорости.
+    # Загрузчик живёт в фиксированном секторе: размер важнее скорости.
     # -Oz агрессивнее -Os и не меняет семантику.
-    if(MCU_TARGET STREQUAL "stm32f4")
-        target_compile_options(bootloader_fw PRIVATE -Oz)
-        # LTO-оптимизация задаётся и на линковке: иначе -O3 из Release
-        # перебивает -Oz и размер не меняется.
-        target_link_options(bootloader_fw PRIVATE -Oz -Wl,--gc-sections)
-        # 16-КБ загрузчик: BOOT_LOG в этой сборке не нужен, строки только
-        # увеличивают образ. Диагностика остаётся в приложении.
-        target_compile_definitions(bootloader_fw PRIVATE MCFRAME_BOOT_LOGS=0)
-    endif()
+    target_compile_options(bootloader_fw PRIVATE -Oz)
+    # LTO-оптимизация задаётся и на линковке: иначе -O3 из Release
+    # перебивает -Oz и размер не меняется.
+    target_link_options(bootloader_fw PRIVATE -Oz -Wl,--gc-sections)
+    # Загрузчик не печатает: строки/формат занимают место в его секторе.
+    # Диагностика остаётся в приложении.
+    target_compile_definitions(bootloader_fw PRIVATE MCFRAME_BOOT_LOGS=0)
 
     # Образ загрузчика: адрес и размер — из общей раскладки.
     mcframe_firmware_bootloader(bootloader_fw)

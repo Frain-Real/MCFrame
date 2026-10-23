@@ -138,7 +138,8 @@ Status Service::init(const Config& cfg) noexcept {
     // Записи состояния ведёт общий SlotStore: те же правила читает и
     // загрузчик, поэтому «кто кого грузит» и «сколько раз пытались» не может
     // разойтись между двумя образами (см. ota_storage.hpp).
-    Status st = slots_.init(cfg_.storage, cfg_.meta_offset, cfg_.meta_size);
+    Status st = slots_.init(cfg_.storage, cfg_.meta_offset, cfg_.meta_size,
+                            cfg_.meta_backup_offset, cfg_.meta_backup_size);
     if (st != Status::Ok) return st;
 
     // Интерфейс приёма: nullptr означает «интерфейса нет» — это законный

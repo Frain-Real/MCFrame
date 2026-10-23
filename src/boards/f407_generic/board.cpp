@@ -54,6 +54,7 @@ embed::stm32::Spi2 g_spi2{board::kPins.pin(board::Signal::SpiSck, 2u),
 
 embed::stm32::GpioPin g_led{board::kPins.pin(board::Signal::Led, 0u)};
 embed::stm32::GpioPin g_cs{board::kPins.pin(board::Signal::SpiCs, 1u)};
+embed::stm32::sd::Card g_sd{g_spi1, g_cs};
 
 embed::stm32::Pwm g_pwm{TIM2, 1u,
                         board::kPins.pin(board::Signal::Pwm, 2u, 1u),
@@ -76,6 +77,7 @@ Spi&  spi1() noexcept { return g_spi1; }
 Spi&  spi2() noexcept { return g_spi2; }
 Pwm&  pwm1() noexcept { return g_pwm; }
 Nvs&  nvs() noexcept { return g_nvs; }
+Sd&   sd() noexcept { return g_sd; }
 
 void init_peripherals() noexcept {
     embed::hal::GpioConfig out{};

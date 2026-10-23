@@ -16,6 +16,7 @@
 #include "hal/INvs.hpp"
 
 #include "stm32_periph_m4.hpp"
+#include "platforms/stm32/sd_spi.hpp"
 
 namespace board {
 
@@ -27,6 +28,7 @@ using Spi     = embed::hal::ISpi;
 using Pwm     = embed::hal::IPwm;
 using Gpio    = embed::hal::IGpioPin;
 using Nvs     = embed::hal::INvs;
+using Sd      = embed::stm32::sd::Card;
 
 using Pins = PinMap<20>;
 constexpr const Pins& pins() noexcept { return kPins; }
@@ -43,6 +45,7 @@ Spi&  spi1() noexcept;
 Spi&  spi2() noexcept;
 Pwm&  pwm1() noexcept;
 Nvs&  nvs() noexcept;
+Sd&   sd() noexcept;
 
 /// Инстанс-шаблоны: board::uart<2>(), board::spi<2>(), board::i2c<1>().
 /// Так приложение не зависит от конкретного имени функции и может

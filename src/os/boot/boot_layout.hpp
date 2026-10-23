@@ -72,8 +72,12 @@ struct Layout {
 
     /// Область метаданных OTA (записи состояния слотов).
     uint32_t meta_offset = 0u;
-    /// Сколько байт она занимает (4 страницы — по две копии на слот).
+    /// Сколько байт она занимает (журнал/резерв).
     uint32_t meta_size   = 0u;
+
+    /// Резервная область meta. 0 — backup не используется.
+    uint32_t meta_backup_offset = 0u;
+    uint32_t meta_backup_size   = 0u;
 
     /// Пригодна ли раскладка для работы (проверяется загрузчиком при старте).
     ///
@@ -95,6 +99,16 @@ struct Layout {
             if (overlaps(meta_offset, meta_end, slot_offset[s],
                          slot_offset[s] + slot_size[s])) {
                 return false;
+            }
+        }
+        if (meta_backup_size != 0u) {
+            const uint32_t b_end = meta_backup_offset + meta_backup_size;
+            if (overlaps(meta_backup_offset, b_end, meta_offset, meta_end)) return false;
+            if (overlaps(meta_backup_offset, b_end, boot_offset,
+                         boot_offset + boot_size)) return false;
+            for (uint8_t s = 0u; s < 2u; ++s) {
+                if (overlaps(meta_backup_offset, b_end, slot_offset[s],
+                             slot_offset[s] + slot_size[s])) return false;
             }
         }
         return true;
@@ -130,6 +144,8 @@ inline constexpr Layout kStm32F103Rb = {
     /* slot_size   */ {52u * 1024u, 52u * 1024u},
     /* meta_offset */ 124u * 1024u,
     /* meta_size   */ 4u * 1024u,
+    /* meta_backup_offset */ 0u,
+    /* meta_backup_size   */ 0u,
 };
 
 /// Раскладка для стенда: та же арифметика, но «Flash» — модель носителя на
@@ -153,6 +169,9 @@ inline constexpr Layout kMockStand = kStm32F103Rb;
 #ifndef MCFRAME_FLASH_SLOT_SIZE
 #define MCFRAME_FLASH_SLOT_SIZE   (52u * 1024u)
 #endif
+#ifndef MCFRAME_FLASH_SLOT1_SIZE
+#define MCFRAME_FLASH_SLOT1_SIZE  MCFRAME_FLASH_SLOT_SIZE
+#endif
 #ifndef MCFRAME_FLASH_SLOT0_OFFSET
 #define MCFRAME_FLASH_SLOT0_OFFSET (20u * 1024u)
 #endif
@@ -165,6 +184,12 @@ inline constexpr Layout kMockStand = kStm32F103Rb;
 #ifndef MCFRAME_FLASH_META_SIZE
 #define MCFRAME_FLASH_META_SIZE   (4u * 1024u)
 #endif
+#ifndef MCFRAME_FLASH_META_BACKUP_OFFSET
+#define MCFRAME_FLASH_META_BACKUP_OFFSET 0u
+#endif
+#ifndef MCFRAME_FLASH_META_BACKUP_SIZE
+#define MCFRAME_FLASH_META_BACKUP_SIZE 0u
+#endif
 
 /// Раскладка текущей сборки (совпадает с линкером и с загрузчиком).
 inline constexpr Layout kBoard = {
@@ -173,9 +198,11 @@ inline constexpr Layout kBoard = {
     /* slot_offset */ {static_cast<uint32_t>(MCFRAME_FLASH_SLOT0_OFFSET),
                        static_cast<uint32_t>(MCFRAME_FLASH_SLOT1_OFFSET)},
     /* slot_size   */ {static_cast<uint32_t>(MCFRAME_FLASH_SLOT_SIZE),
-                       static_cast<uint32_t>(MCFRAME_FLASH_SLOT_SIZE)},
+                       static_cast<uint32_t>(MCFRAME_FLASH_SLOT1_SIZE)},
     /* meta_offset */ static_cast<uint32_t>(MCFRAME_FLASH_META_OFFSET),
     /* meta_size   */ static_cast<uint32_t>(MCFRAME_FLASH_META_SIZE),
+    /* meta_backup_offset */ static_cast<uint32_t>(MCFRAME_FLASH_META_BACKUP_OFFSET),
+    /* meta_backup_size   */ static_cast<uint32_t>(MCFRAME_FLASH_META_BACKUP_SIZE),
 };
 
 static_assert(kBoard.valid(), "раскладка сборки непригодна: слоты/метаданные пересекаются");

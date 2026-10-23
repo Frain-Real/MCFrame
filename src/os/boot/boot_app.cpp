@@ -14,11 +14,16 @@ Status fill_ota_config(ota::Config& ota_cfg, const Config& boot_cfg) noexcept {
     ota_cfg.storage          = boot_cfg.storage;
     ota_cfg.meta_offset      = boot_cfg.layout.meta_offset;
     ota_cfg.meta_size        = boot_cfg.layout.meta_size;
+    ota_cfg.meta_backup_offset = boot_cfg.layout.meta_backup_offset;
+    ota_cfg.meta_backup_size   = boot_cfg.layout.meta_backup_size;
     ota_cfg.slot_offset[0]   = boot_cfg.layout.slot_offset[0];
     ota_cfg.slot_capacity[0] = boot_cfg.layout.slot_size[0];
     ota_cfg.slot_offset[1]   = boot_cfg.layout.slot_offset[1];
     ota_cfg.slot_capacity[1] = boot_cfg.layout.slot_size[1];
     ota_cfg.note_base        = boot_cfg.note_base;
+    // Политика signed обязана действовать и на приём: иначе VERIFY/активация
+    // могли бы обойти проверку подписи, которую требует загрузчик.
+    ota_cfg.require_signature = boot_cfg.require_signature;
 
     // Активный слот — тот, из которого СЕЙЧАС исполняется код (VTOR), а не
     // константа сборки: приложение, собранное для слота A и запущенное из слота

@@ -4,12 +4,24 @@
 
 namespace embed::usb::dfu {
 
+class Target {
+public:
+    virtual ~Target() = default;
+    virtual Size capacity() const noexcept = 0;
+    virtual Status begin() noexcept = 0;
+    virtual Status write(uint32_t offset, const void* data, Size len) noexcept = 0;
+    virtual Status read(uint32_t offset, void* data, Size len) noexcept = 0;
+    virtual Status finish() noexcept = 0;
+};
+
 class Dfu final : public Class {
 public:
     enum class State : uint8_t {
         AppIdle = 0u, AppDetach = 1u, DfuIdle = 2u, DnloadSync = 3u,
         DnBusy = 4u, ManifestSync = 5u, Manifest = 6u, Error = 7u
     };
+
+    explicit Dfu(Target* target = nullptr) noexcept : target_(target) {}
 
     const uint8_t* config_descriptor(Size& len) const noexcept override {
         len = sizeof(config_);
@@ -25,12 +37,23 @@ public:
                 state_ = State::AppDetach;
                 return Status::Ok;
             case 0x01u:                       // DNLOAD
+                if (s.length == 0u) return manifest();
                 return dnload(out, out_len, s.length);
             case 0x02u: {                     // UPLOAD
                 if (upload_pos_ >= size_) return Status::NotFound;
                 Size n = size_ - upload_pos_;
                 if (n > s.length) n = s.length;
-                in = data_ + upload_pos_;
+                if (n > sizeof(upload_buf_)) n = sizeof(upload_buf_);
+                if (target_ != nullptr) {
+                    if (target_->read(upload_pos_, upload_buf_, n) != Status::Ok) {
+                        state_ = State::Error;
+                        status_code_ = 1u;
+                        return Status::HardwareError;
+                    }
+                    in = upload_buf_;
+                } else {
+                    in = data_ + upload_pos_;
+                }
                 in_len = n;
                 upload_pos_ += n;
                 state_ = State::DfuIdle;
@@ -57,6 +80,7 @@ public:
                 state_ = State::DfuIdle;
                 offset_ = 0u;
                 upload_pos_ = 0u;
+                begun_ = false;
                 status_code_ = 0u;
                 return Status::Ok;
             default:
@@ -70,15 +94,54 @@ public:
     uint8_t status_code() const noexcept { return status_code_; }
 
 private:
+    Status manifest() noexcept {
+        if (target_ != nullptr) {
+            const Status st = target_->finish();
+            if (st != Status::Ok) {
+                state_ = State::Error;
+                status_code_ = 1u;
+                return st;
+            }
+        }
+        state_ = State::Manifest;
+        status_code_ = 0u;
+        return Status::Ok;
+    }
+
     Status dnload(const uint8_t* out, Size out_len, uint16_t wlength) noexcept {
         if (out == nullptr || out_len == 0u) return Status::InvalidArg;
-        if (out_len != wlength) out_len = wlength;   // доверяем фактическому буферу
-        if (offset_ + out_len > sizeof(data_)) {
-            state_ = State::Error;
-            status_code_ = 1u;
-            return Status::NoMemory;
+        if (out_len > wlength) out_len = wlength;
+        if (out_len == 0u) return Status::InvalidArg;
+
+        if (target_ != nullptr) {
+            if (!begun_) {
+                const Status bs = target_->begin();
+                if (bs != Status::Ok) {
+                    state_ = State::Error;
+                    status_code_ = 1u;
+                    return bs;
+                }
+                begun_ = true;
+            }
+            if (offset_ + out_len > target_->capacity()) {
+                state_ = State::Error;
+                status_code_ = 1u;
+                return Status::NoMemory;
+            }
+            const Status ws = target_->write(offset_, out, out_len);
+            if (ws != Status::Ok) {
+                state_ = State::Error;
+                status_code_ = 1u;
+                return ws;
+            }
+        } else {
+            if (offset_ + out_len > sizeof(data_)) {
+                state_ = State::Error;
+                status_code_ = 1u;
+                return Status::NoMemory;
+            }
+            for (Size i = 0u; i < out_len; ++i) data_[offset_ + i] = out[i];
         }
-        for (Size i = 0u; i < out_len; ++i) data_[offset_ + i] = out[i];
         offset_ += out_len;
         size_ = offset_;
         state_ = State::DfuIdle;
@@ -96,6 +159,9 @@ private:
     Size    size_ = 0u;
     Size    offset_ = 0u;
     Size    upload_pos_ = 0u;
+    Target* target_ = nullptr;
+    bool    begun_ = false;
+    uint8_t upload_buf_[64]{};
     State   state_ = State::AppIdle;
     uint8_t status_code_ = 0u;
     uint8_t status_[6]{};

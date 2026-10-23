@@ -31,31 +31,51 @@
 
 if(MCU_TARGET STREQUAL "stm32f4")
     # F4: 16K boot (сектор 0) + 16K meta-журнал (сектор 1) +
-    # 32K NVS (секторы 2-3) + 448K слот A + 448K слот B = 960K.
+    # 32K NVS (секторы 2-3) + 448K слот A + 384K слот B +
+    # 16K meta-backup (начало сектора 11) = 912K.
     # Метаданные лежат В СВОЁМ 16K-секторе рядом с загрузчиком; обновление —
     # append 80-байтной записи без стирания сектора. Слот A — 0x10000.
     set(_layout_boot "16K")
     set(_layout_slot "448K")
+    set(_layout_slot1 "384K")
     set(_layout_total "1M")
     set(_layout_meta "16K")
+    set(_layout_meta_backup "16K")
 elseif(MCU_TARGET STREQUAL "stm32g4")
     set(_layout_meta "4K")
-    # 20K boot + 2*50K slots + 4K meta + 4K NVS = 128K. Слот 50K вместо 52K
-    # освобождает 4K под внутреннюю NVS и не пересекается с метаданными.
+    # 20K boot + 2*48K slots + 4K meta + 4K meta-backup + 4K NVS = 128K.
+    # Слот 48K вместо 52K освобождает место под NVS и backup.
     set(_layout_boot "20K")
-    set(_layout_slot "50K")
+    # G4: 20K boot + 2*48K slots + 4K meta + 4K meta-backup + 4K NVS = 128K.
+    set(_layout_slot "48K")
     set(_layout_total "128K")
+    set(_layout_meta_backup "4K")
 else()
     set(_layout_boot "20K")
     set(_layout_slot "52K")
     set(_layout_total "128K")
-    set(_layout_meta "4K")
+    set(_layout_meta_backup "0K")
+    # F1 flat не имеет OTA-загрузчика, но может иметь NVS. Чтобы не
+    # пересекаться, делим последние 4 КБ: NVS 2K + meta 2K. F1 slot
+    # по-прежнему отдаёт все 4 КБ под meta.
+    if(MCU_TARGET STREQUAL "stm32" AND MCFRAME_IMAGE STREQUAL "flat")
+        set(_layout_meta "2K")
+    else()
+        set(_layout_meta "4K")
+    endif()
 endif()
 
 set(MCFRAME_FLASH_BOOT_SIZE "${_layout_boot}" CACHE STRING
     "Размер загрузчика (начало Flash): 0x08000000 + этот размер = слот A")
 set(MCFRAME_FLASH_SLOT_SIZE "${_layout_slot}" CACHE STRING
-    "Размер одного слота приложения (кратен странице Flash)")
+    "Размер слота A приложения (кратен странице Flash)")
+if(NOT DEFINED _layout_slot1)
+    set(_layout_slot1 "${_layout_slot}")
+endif()
+set(MCFRAME_FLASH_SLOT1_SIZE "${_layout_slot1}" CACHE STRING
+    "Размер слота B приложения")
+set(MCFRAME_FLASH_META_BACKUP_SIZE "${_layout_meta_backup}" CACHE STRING
+    "Резервная область meta (0 — backup выключен)")
 set(MCFRAME_FLASH_META_SIZE "${_layout_meta}" CACHE STRING
     "Область метаданных OTA: журнал append-only (F4 — 16K, остальные — 4K)")
 set(MCFRAME_FLASH_TOTAL "${_layout_total}" CACHE STRING
@@ -83,7 +103,9 @@ endfunction()
 
 mcframe_bytes(_boot_size "${MCFRAME_FLASH_BOOT_SIZE}")
 mcframe_bytes(_slot_size "${MCFRAME_FLASH_SLOT_SIZE}")
+mcframe_bytes(_slot1_size "${MCFRAME_FLASH_SLOT1_SIZE}")
 mcframe_bytes(_meta_size "${MCFRAME_FLASH_META_SIZE}")
+mcframe_bytes(_meta_backup_size "${MCFRAME_FLASH_META_BACKUP_SIZE}")
 mcframe_bytes(_flash_total "${MCFRAME_FLASH_TOTAL}")
 math(EXPR _flash_base  "0x08000000")
 
@@ -100,10 +122,10 @@ if(MCU_TARGET STREQUAL "stm32f4")
     set(_default_nvs "32K")
 elseif(MCU_TARGET STREQUAL "stm32g4")
     set(_layout_meta "4K")
-    # 20K boot + 2*50K slots + 4K meta + 4K NVS = 128K.
+    # 20K boot + 2*48K slots + 4K meta + 4K backup + 4K NVS = 128K.
     set(_default_nvs "4K")
 elseif(MCU_TARGET STREQUAL "stm32" AND MCFRAME_IMAGE STREQUAL "flat")
-    set(_default_nvs "4K")
+    set(_default_nvs "2K")
 else()
     set(_default_nvs "0")
 endif()
@@ -129,30 +151,51 @@ if(MCU_TARGET STREQUAL "stm32f4")
     math(EXPR _nvs_offset "${_boot_size} + ${_meta_size}")
     math(EXPR _slot0_off  "${_nvs_offset} + ${_nvs_size}")
     math(EXPR _slot1_off  "${_slot0_off} + ${_slot_size}")
-    math(EXPR _flash_end  "${_slot1_off} + ${_slot_size}")
+    math(EXPR _meta_backup_off "${_slot1_off} + ${_slot1_size}")
+    math(EXPR _flash_end  "${_meta_backup_off} + ${_meta_backup_size}")
 else()
-    math(EXPR _nvs_offset "${_flash_total} - ${_nvs_size}")
     math(EXPR _slot0_off  "0 + ${_boot_size}")
     math(EXPR _slot1_off  "${_slot0_off} + ${_slot_size}")
-    math(EXPR _meta_off   "${_slot1_off} + ${_slot_size}")
-    math(EXPR _flash_end  "${_meta_off} + ${_meta_size}")
+    if(MCU_TARGET STREQUAL "stm32" AND MCFRAME_IMAGE STREQUAL "flat")
+        # Последние 4 КБ: [NVS 2K][meta 2K]. Слоты заканчиваются на 124 КБ.
+        math(EXPR _nvs_offset "${_flash_total} - ${_nvs_size} - ${_meta_size}")
+        math(EXPR _meta_off   "${_flash_total} - ${_meta_size}")
+        math(EXPR _meta_backup_off 0)
+        math(EXPR _flash_end  "${_flash_total}")
+    else()
+        math(EXPR _nvs_offset "${_flash_total} - ${_nvs_size}")
+        math(EXPR _meta_off   "${_slot1_off} + ${_slot1_size}")
+        if(MCU_TARGET STREQUAL "stm32g4")
+            math(EXPR _meta_backup_off "${_meta_off} + ${_meta_size}")
+            math(EXPR _flash_end "${_nvs_offset} + ${_nvs_size}")
+        else()
+            math(EXPR _meta_backup_off 0)
+            math(EXPR _flash_end  "${_meta_off} + ${_meta_size}")
+        endif()
+    endif()
 endif()
 
 set(MCFRAME_FLASH_SLOT0_OFFSET ${_slot0_off} CACHE INTERNAL "Смещение слота A")
 set(MCFRAME_FLASH_SLOT1_OFFSET ${_slot1_off} CACHE INTERNAL "Смещение слота B")
 set(MCFRAME_FLASH_META_OFFSET  ${_meta_off}  CACHE INTERNAL "Смещение метаданных")
+set(MCFRAME_FLASH_META_BACKUP_OFFSET ${_meta_backup_off} CACHE INTERNAL "Смещение backup meta")
 set(MCFRAME_FLASH_END          ${_flash_end} CACHE INTERNAL "Занято под схему")
 set(MCFRAME_NVS_OFFSET ${_nvs_offset} CACHE INTERNAL "Смещение NVS от начала Flash")
 set(MCFRAME_NVS_SIZE   ${_nvs_size}   CACHE INTERNAL "Размер области NVS")
 message(STATUS "MCFrame: NVS ${_nvs_size} Б по смещению ${_nvs_offset}")
 
-# Проверка пересечений для вариантов «NVS в конце Flash».
-if(NOT MCU_TARGET STREQUAL "stm32f4"
-   AND _nvs_size GREATER 0 AND _nvs_offset LESS _flash_end)
-    message(WARNING
-        "MCFrame: область NVS (${_nvs_offset}..${_flash_total}) пересекается с "
-        "раскладкой OTA (до ${_flash_end}). Это допустимо только для flat-образа; "
-        "не прошивайте bootloader вместе с таким образом.")
+# Явная проверка пересечения NVS с раскладкой OTA. Для F1 flat области
+# разделены: NVS 124..126 КБ, meta 126..128 КБ.
+if(_nvs_size GREATER 0)
+    math(EXPR _nvs_end "${_nvs_offset} + ${_nvs_size}")
+    math(EXPR _meta_end "${_meta_off} + ${_meta_size}")
+    if(_nvs_offset LESS _flash_total AND _nvs_end GREATER _meta_off AND
+       _meta_end GREATER _nvs_offset)
+        message(FATAL_ERROR
+            "MCFrame: NVS (${_nvs_offset}..${_nvs_end}) пересекается с OTA "
+            "metadata (${_meta_off}..${_meta_end}). Уменьшите NVS/meta или "
+            "используйте внешнее хранилище.")
+    endif()
 endif()
 
 # Проверка, что схема влезает в Flash ПЛАТЫ: если нет — сборка обязана упасть
@@ -170,8 +213,9 @@ if(_flash_end GREATER _flash_total)
 endif()
 
 message(STATUS "MCFrame: раскладка Flash: загрузчик ${_boot_size} Б, "
-               "слоты ${_slot_size} Б (A=${_slot0_off}, B=${_slot1_off}), "
-               "метаданные ${_meta_size} Б (${_meta_off}); "
+               "слот A ${_slot_size} Б (${_slot0_off}), слот B ${_slot1_size} Б "
+               "(${_slot1_off}), метаданные ${_meta_size} Б (${_meta_off}), "
+               "meta-backup ${_meta_backup_size} Б (${_meta_backup_off}); "
                "занято ${_flash_end} из ${_flash_total}")
 
 # ── Определения для C++: раскладка из одного источника ──
@@ -184,8 +228,11 @@ function(mcframe_flash_layout target)
         MCFRAME_FLASH_SLOT_SIZE=${_slot_size}
         MCFRAME_FLASH_SLOT0_OFFSET=${_slot0_off}
         MCFRAME_FLASH_SLOT1_OFFSET=${_slot1_off}
+        MCFRAME_FLASH_SLOT1_SIZE=${_slot1_size}
         MCFRAME_FLASH_META_OFFSET=${_meta_off}
-        MCFRAME_FLASH_META_SIZE=${_meta_size})
+        MCFRAME_FLASH_META_SIZE=${_meta_size}
+        MCFRAME_FLASH_META_BACKUP_OFFSET=${_meta_backup_off}
+        MCFRAME_FLASH_META_BACKUP_SIZE=${_meta_backup_size})
 endfunction()
 
 # ── Линкер-скрипт: у КАЖДОЙ прошивки он свой ──
@@ -243,6 +290,12 @@ function(mcframe_firmware_flat target)
             # Flat-образ F4 живёт только до meta-журнала (16K): дальше
             # начинаются meta, NVS и слоты. Self-test F4 — phase3_slot.
             set(_flat_len ${_meta_off})
+        elseif(MCU_TARGET STREQUAL "stm32" AND MCFRAME_IMAGE STREQUAL "flat")
+            # F1 flat: до NVS/meta, которые занимают последние 4 КБ.
+            set(_flat_len ${_nvs_offset})
+        elseif(MCU_TARGET STREQUAL "stm32g4" AND MCFRAME_IMAGE STREQUAL "flat")
+            # G4 flat: до meta/backup/NVS; self-test не должен их затирать.
+            set(_flat_len ${_meta_off})
         else()
             math(EXPR _flat_len "${_flash_total} - ${_nvs_size}")
         endif()
@@ -261,6 +314,6 @@ function(mcframe_firmware_slot target slot_index)
                          ${MCFRAME_FLASH_SLOT0_ADDR} ${_slot_size})
     else()
         mcframe_firmware(${target} "${MCFRAME_LINKER_SLOT}"
-                         ${MCFRAME_FLASH_SLOT1_ADDR} ${_slot_size})
+                         ${MCFRAME_FLASH_SLOT1_ADDR} ${_slot1_size})
     endif()
 endfunction()

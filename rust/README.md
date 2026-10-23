@@ -14,15 +14,17 @@ runtime: только C ABI-функции из [`src/os/rust/rust_bridge.cpp`](
 | STM32F4/G4 (Cortex-M4F, hard-float) | `thumbv7em-none-eabihf` |
 | host/mock | обычный host |
 
-В окружении может не быть установленного `rust-std` для ARM. Nightly умеет
-собрать `core` из `rust-src` (компонент `rust-src` должен быть установлен):
+Версия nightly и `rust-src` зафиксированы в корневом
+[`rust-toolchain.toml`](../rust-toolchain.toml) (`nightly-2026-07-22`).
+В окружении может не быть установленного `rust-std` для ARM; nightly собирает
+`core` из `rust-src`:
 
 ```bash
 cd rust/mcframe_app
 # F1:
-CARGO_HOME=../../.cargo-home RUSTUP_TOOLCHAIN=nightly   cargo build --release -Z build-std=core --target thumbv7m-none-eabi
+CARGO_HOME=../../.cargo-home cargo build --release --locked -Z build-std=core --target thumbv7m-none-eabi
 # F4/G4:
-CARGO_HOME=../../.cargo-home RUSTUP_TOOLCHAIN=nightly   cargo build --release -Z build-std=core --target thumbv7em-none-eabihf
+CARGO_HOME=../../.cargo-home cargo build --release --locked -Z build-std=core --target thumbv7em-none-eabihf
 ```
 
 Результат:

@@ -41,6 +41,44 @@ endif()
 # Опция живёт здесь, а не только в example/: от неё зависит бюджет
 # диагностики — см. MCFRAME_FAULT_REPORT ниже.
 set(MCFRAME_IMAGE "flat" CACHE STRING "Образ example_fw: flat | slot")
+
+# Политика загрузчика. Явная, а не «молчаливое» отключение SHA:
+#   crc    — только CRC32 + вектор;
+#   sha    — CRC32 + SHA-256 (если он записан);
+#   signed — как sha + обязательный kRecFlagSignOk (подпись проверена OTA).
+if(NOT DEFINED MCFRAME_BOOT_SECURITY)
+    if(MCU_TARGET STREQUAL "stm32f4")
+        set(MCFRAME_BOOT_SECURITY "crc" CACHE STRING
+            "Политика загрузчика: crc | sha | signed (F4 по умолчанию crc: 16K)")
+    else()
+        set(MCFRAME_BOOT_SECURITY "sha" CACHE STRING
+            "Политика загрузчика: crc | sha | signed")
+    endif()
+endif()
+set_property(CACHE MCFRAME_BOOT_SECURITY PROPERTY STRINGS crc sha signed)
+if(NOT MCFRAME_BOOT_SECURITY MATCHES "^(crc|sha|signed)$")
+    message(FATAL_ERROR "MCFRAME_BOOT_SECURITY: ожидается crc|sha|signed, получено '${MCFRAME_BOOT_SECURITY}'")
+endif()
+if(MCFRAME_BOOT_SECURITY STREQUAL "crc")
+    set(MCFRAME_BOOT_VERIFY_HASH 0)
+    set(MCFRAME_BOOT_REQUIRE_SIGNATURE 0)
+elseif(MCFRAME_BOOT_SECURITY STREQUAL "sha")
+    set(MCFRAME_BOOT_VERIFY_HASH 1)
+    set(MCFRAME_BOOT_REQUIRE_SIGNATURE 0)
+else()
+    set(MCFRAME_BOOT_VERIFY_HASH 1)
+    set(MCFRAME_BOOT_REQUIRE_SIGNATURE 1)
+endif()
+message(STATUS "MCFrame: boot security=${MCFRAME_BOOT_SECURITY}")
+if(MCU_TARGET STREQUAL "stm32f4")
+    if(MCFRAME_BOOT_SECURITY STREQUAL "crc")
+        message(STATUS "MCFrame: F4 boot использует CRC32 явно (16-КБ сектор); "
+                       "SHA/signed: -DMCFRAME_BOOT_SECURITY=sha|signed")
+    else()
+        message(WARNING "MCFrame: F4 boot security=${MCFRAME_BOOT_SECURITY} "
+                        "может не уложиться в 16 КБ; проверьте размер bootloader_fw")
+    endif()
+endif()
 set_property(CACHE MCFRAME_IMAGE PROPERTY STRINGS flat slot)
 
 # Квант round-robin для задач одного приоритета, тиков (0 — выключен).
@@ -68,6 +106,21 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(MCFRAME_SANITIZE "ASan/UBSan для host-тестов (mock)" OFF)
+option(MCFRAME_FUZZ "Собрать libFuzzer-цели (Clang)" OFF)
+option(MCFRAME_COVERAGE "Инструментация покрытия host-тестов" OFF)
+if(MCFRAME_FUZZ)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "MCFRAME_FUZZ требует Clang/libFuzzer")
+    endif()
+    add_compile_options(-fsanitize=fuzzer-no-link,address -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=fuzzer-no-link,address)
+endif()
+
+if(MCFRAME_COVERAGE)
+    add_compile_options(--coverage -fno-omit-frame-pointer)
+    add_link_options(--coverage)
+endif()
+
 if(MCFRAME_SANITIZE)
     if(NOT MCU_TARGET STREQUAL "mock")
         message(FATAL_ERROR "MCFRAME_SANITIZE поддерживается только для mock")

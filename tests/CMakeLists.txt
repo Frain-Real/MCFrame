@@ -378,3 +378,17 @@ if(BUILD_TESTING)
     set_tests_properties(stm32_periph PROPERTIES
         FAIL_REGULAR_EXPRESSION "FAIL")
 endif()
+
+if(MCFRAME_FUZZ)
+    add_subdirectory(fuzz)
+endif()
+
+add_executable(mc_tests_rndis test_rndis_factory.cpp)
+target_link_libraries(mc_tests_rndis PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_rndis PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+add_test(NAME rndis COMMAND mc_tests_rndis)
+
+add_executable(mc_tests_littlefs test_littlefs.cpp)
+target_link_libraries(mc_tests_littlefs PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_littlefs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+add_test(NAME littlefs COMMAND mc_tests_littlefs)

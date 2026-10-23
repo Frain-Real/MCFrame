@@ -44,6 +44,10 @@ class Client {
 public:
     Client() noexcept = default;
 
+    /// Разрешить https:// через TLS-фабрику. По умолчанию HTTPS отклоняется,
+    /// чтобы plaintext-фабрика не отправила запрос в открытом виде на 443.
+    void enable_tls(bool on = true) noexcept { tls_enabled_ = on; }
+
     Status request(Factory& factory, const Request& req, Response& resp,
                    BodySink sink = nullptr, void* sink_ctx = nullptr,
                    uint32_t timeout_ms = 5000u) noexcept {
@@ -51,7 +55,7 @@ public:
         resp = Response{};
         Url url{};
         if (!parse_url(req.url, url)) return Status::InvalidArg;
-        if (url.tls) return Status::NotSupported;
+        if (url.tls && !tls_enabled_) return Status::NotSupported;
         if (req.body_len > 0u && req.body == nullptr) return Status::InvalidArg;
 
         Socket* s = nullptr;
@@ -72,7 +76,8 @@ public:
         if (st == Status::Ok) st = send_str(url.path);
         if (st == Status::Ok) st = send_str(" HTTP/1.1\r\nHost: ");
         if (st == Status::Ok) st = send_str(url.host);
-        if (st == Status::Ok && url.port != 80u) {
+        if (st == Status::Ok &&
+            ((url.tls && url.port != 443u) || (!url.tls && url.port != 80u))) {
             st = send_str(":");
             if (st == Status::Ok) st = send_u32(url.port);
         }
@@ -148,6 +153,8 @@ private:
         }
         return Status::Ok;
     }
+
+    bool tls_enabled_ = false;
 
     Status recv_some(void* p, Size cap, Size& got, uint32_t timeout_ms) noexcept {
         return sock_->recv(p, cap, got, timeout_ms);

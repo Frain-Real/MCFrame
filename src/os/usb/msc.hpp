@@ -42,7 +42,9 @@ public:
     }
 
     /// Обработать 31-байтный CBW. Ответ (данные + CSW) отправляется через Hal.
-    Status handle_cbw(const uint8_t* cbw, Size len, Hal& hal) noexcept {
+    Status handle_cbw(const uint8_t* cbw, Size len, Hal& hal,
+                      const uint8_t* out_data = nullptr,
+                      Size out_len = 0u) noexcept {
         if (cbw == nullptr || len < 31u) return Status::InvalidArg;
         const uint32_t sig = rd32(cbw);
         if (sig != 0x43425355u) return Status::Corruption;
@@ -81,8 +83,20 @@ public:
                 const uint16_t n = static_cast<uint16_t>((cbw[22] << 8) | cbw[23]);
                 st = read_blocks(lba, n, dlen, residue, hal);
             }
-        } else if (op == 0x2Au) {            // WRITE(10) — только отказ
-            st = Status::NotSupported;
+        } else if (op == 0x2Au) {            // WRITE(10)
+            if (cblen < 10u) { st = Status::InvalidArg; }
+            else if (out_data == nullptr || out_len < dlen) { st = Status::InvalidArg; }
+            else {
+                const uint32_t lba = rd32be(cbw + 17u);
+                const uint16_t n = static_cast<uint16_t>((cbw[22] << 8) | cbw[23]);
+                if (dev_->block_size() == 0u || n == 0u ||
+                    lba + n > dev_->block_count() ||
+                    static_cast<uint32_t>(n) * dev_->block_size() > out_len) {
+                    st = Status::InvalidArg;
+                } else {
+                    st = dev_->write_block(lba, out_data, n);
+                }
+            }
         } else {
             st = Status::NotSupported;
         }

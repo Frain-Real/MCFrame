@@ -109,7 +109,8 @@ Status Loader::read_record(uint8_t slot, ota::SlotRecord& out) noexcept {
     // Дублировать формат метаданных здесь значило бы однажды разойтись с ним, а
     // цена расхождения — загрузка не того слота.
     if (!store_.initialized()) {
-        const Status st = store_.init(cfg_.storage, cfg_.layout.meta_offset, cfg_.layout.meta_size);
+        const Status st = store_.init(cfg_.storage, cfg_.layout.meta_offset, cfg_.layout.meta_size,
+                   cfg_.layout.meta_backup_offset, cfg_.layout.meta_backup_size);
         if (st != Status::Ok) return st;
     }
     return store_.load(slot, out);
@@ -118,7 +119,8 @@ Status Loader::read_record(uint8_t slot, ota::SlotRecord& out) noexcept {
 Status Loader::write_record(uint8_t slot, const ota::SlotRecord& rec) noexcept {
     if (slot > 1u) return Status::InvalidArg;
     if (!store_.initialized()) {
-        const Status st = store_.init(cfg_.storage, cfg_.layout.meta_offset, cfg_.layout.meta_size);
+        const Status st = store_.init(cfg_.storage, cfg_.layout.meta_offset, cfg_.layout.meta_size,
+                   cfg_.layout.meta_backup_offset, cfg_.layout.meta_backup_size);
         if (st != Status::Ok) return st;
     }
     return store_.store(slot, rec);
@@ -132,7 +134,8 @@ uint8_t Loader::pick_candidate() noexcept {
     // состояниях предпочтительнее тот, из которого работаем сейчас.
     ota::SlotRecord rec{};
     if (!store_.initialized()) {
-        if (store_.init(cfg_.storage, cfg_.layout.meta_offset, cfg_.layout.meta_size) != Status::Ok) {
+        if (store_.init(cfg_.storage, cfg_.layout.meta_offset, cfg_.layout.meta_size,
+                   cfg_.layout.meta_backup_offset, cfg_.layout.meta_backup_size) != Status::Ok) {
             return Layout::kNoSlot;
         }
     }
@@ -243,6 +246,18 @@ Status Loader::evaluate(Decision& out) noexcept {
                 return Status::Ok;
             }
         }
+    }
+
+    // Политика signed: неподписанный/непроверенный образ не грузим даже
+    // если CRC сошлась. Флаг выставляет только OTA-приём после проверки
+    // подписи прикладным верификатором.
+    if (cfg_.require_signature && (rec.flags & ota::kRecFlagSignOk) == 0u) {
+        (void)store_.invalidate(slot, 6u);
+        out.action = Action::Stay;
+        out.reason = Reason::UnsignedImage;
+        last_reason_ = out.reason;
+        ++stats_.stays;
+        return Status::Ok;
     }
 
     if (rec.image_size == 0u || rec.image_size > cfg_.layout.slot_size[slot]) {

@@ -501,6 +501,7 @@ public:
 
     /// Прочитать более новую валидную запись для слота (с перечитыванием).
     /// Возврат: Ok | NotFound (обе копии пусты/испорчены/относятся к другому слоту).
+    /// Актуальная запись слота: Ok | NotFound.
     Status load(uint8_t slot, SlotRecord& out) noexcept {
         if (storage_ == nullptr) return Status::Unavailable;
         refresh();
@@ -518,6 +519,7 @@ public:
 
     /// Записать запись: seq увеличивается автоматически (иначе копии нельзя
     /// было бы сравнивать), пишется поверх старшей по номеру страницы.
+    /// Дописать новую запись. seq назначается журналом.
     Status store(SlotRecord& rec) noexcept {
         if (storage_ == nullptr) return Status::Unavailable;
         // Перед записью — перечитать: иначе seq и выбор «какую копию затирать»
@@ -782,11 +784,21 @@ inline bool record_take_trial(SlotRecord& rec, uint32_t max_attempts) noexcept {
 ///
 /// Сектор метаданных физически отделён от загрузчика: компакция не может
 /// стереть код загрузчика.
+#ifndef MCFRAME_META_BACKUP
+#define MCFRAME_META_BACKUP 0
+#endif
+
 class MetaJournal {
 public:
     MetaJournal() noexcept = default;
 
-    Status init(Storage* storage, uint32_t offset, uint32_t size) noexcept {
+    /// init(..., backup_offset, backup_size): backup — второй независимый
+    /// стираемый регион. Перед компакцией туда пишется снимок актуальных
+    /// записей, поэтому обрыв питания между erase и rewrite primary не теряет
+    /// метаданные. backup_size == 0 — режим без backup (старые раскладки).
+    Status init(Storage* storage, uint32_t offset, uint32_t size,
+                uint32_t backup_offset = 0u,
+                uint32_t backup_size = 0u) noexcept {
         if (storage == nullptr) return Status::InvalidArg;
         const uint32_t page = storage->page_size();
         if (page == 0u) return Status::NotSupported;
@@ -796,18 +808,39 @@ public:
             size > storage->capacity() - offset) {
             return Status::InvalidArg;
         }
+#if MCFRAME_META_BACKUP
+        if (backup_size != 0u) {
+            if ((backup_offset % page) != 0u || (backup_size % page) != 0u ||
+                backup_size < kSlotRecordSize * 2u ||
+                backup_offset > storage->capacity() ||
+                backup_size > storage->capacity() - backup_offset) {
+                return Status::InvalidArg;
+            }
+            // Регионы обязаны быть независимы: иначе backup стирает primary.
+            if (offset < backup_offset + backup_size &&
+                backup_offset < offset + size) {
+                return Status::InvalidArg;
+            }
+        }
+#else
+        (void)backup_offset; (void)backup_size;
+        backup_offset = 0u; backup_size = 0u;
+#endif
         storage_ = storage;
         offset_  = offset;
         size_    = size;
+        backup_offset_ = backup_offset;
+        backup_size_   = backup_size;
         return scan();
     }
 
     bool initialized() const noexcept { return storage_ != nullptr; }
     uint32_t meta_offset() const noexcept { return offset_; }
     uint32_t meta_size() const noexcept { return size_; }
+    uint32_t backup_offset() const noexcept { return backup_offset_; }
+    uint32_t backup_size() const noexcept { return backup_size_; }
     uint32_t last_seq() const noexcept { return seq_; }
 
-    /// Актуальная запись слота: Ok | NotFound.
     Status load(uint8_t slot, SlotRecord& out) noexcept {
         if (storage_ == nullptr) return Status::Unavailable;
         if (slot > 1u) return Status::InvalidArg;
@@ -818,7 +851,6 @@ public:
         return Status::Ok;
     }
 
-    /// Дописать новую запись. seq назначается журналом.
     Status store(SlotRecord& rec) noexcept {
         if (storage_ == nullptr) return Status::Unavailable;
         if (rec.slot > 1u) return Status::InvalidArg;
@@ -826,7 +858,6 @@ public:
         Status st = scan();
         if (st != Status::Ok) return st;
 
-        // Повреждённый/недописанный хвост или место кончилось — компакция.
         if (dirty_ || used_ + kSlotRecordSize > size_) {
             st = compact();
             if (st != Status::Ok) return st;
@@ -848,8 +879,14 @@ public:
 
     Status clear() noexcept {
         if (storage_ == nullptr) return Status::Unavailable;
-        const Status st = storage_->erase(offset_, size_);
+        Status st = storage_->erase(offset_, size_);
         if (st != Status::Ok) return st;
+#if MCFRAME_META_BACKUP
+        if (backup_size_ != 0u) {
+            st = storage_->erase(backup_offset_, backup_size_);
+            if (st != Status::Ok) return st;
+        }
+#endif
         used_ = 0u; seq_ = 0u; dirty_ = false;
         has_[0] = has_[1] = false;
         latest_[0] = latest_[1] = SlotRecord{};
@@ -857,39 +894,96 @@ public:
     }
 
 private:
-    Status scan() noexcept {
-        used_ = 0u;
-        seq_ = 0u;
-        dirty_ = false;
-        has_[0] = has_[1] = false;
-        latest_[0] = latest_[1] = SlotRecord{};
+    static Status scan_region(Storage* storage, uint32_t offset, uint32_t size,
+                              SlotRecord* latest, bool* has,
+                              uint32_t& used, uint32_t& seq,
+                              bool& dirty) noexcept {
+        used = 0u; seq = 0u; dirty = false;
+        has[0] = has[1] = false;
+        latest[0] = latest[1] = SlotRecord{};
 
-        for (uint32_t pos = 0u; pos + kSlotRecordSize <= size_;
+        for (uint32_t pos = 0u; pos + kSlotRecordSize <= size;
              pos += kSlotRecordSize) {
             uint8_t buf[kSlotRecordSize]{};
-            const Status st = storage_->read(offset_ + pos, buf, sizeof(buf));
+            const Status st = storage->read(offset + pos, buf, sizeof(buf));
             if (st != Status::Ok) return st;
 
-            // Стертый хвост: здесь можно писать без erase.
             if (proto::get_u32(buf) == 0xFFFFFFFFu) {
-                used_ = pos;
+                used = pos;
                 return Status::Ok;
             }
 
             SlotRecord r{};
             if (!decode_record(buf, r) || r.slot > 1u) {
-                // Порча/обрыв: дописывать в это место нельзя, нужна компакция.
-                dirty_ = true;
-                used_ = pos;
+                dirty = true;
+                used = pos;
                 return Status::Ok;
             }
 
-            if (r.seq > seq_) seq_ = r.seq;
-            if (!has_[r.slot] || r.seq > latest_[r.slot].seq) {
-                latest_[r.slot] = r;
-                has_[r.slot] = true;
+            if (r.seq > seq) seq = r.seq;
+            if (!has[r.slot] || r.seq > latest[r.slot].seq) {
+                latest[r.slot] = r;
+                has[r.slot] = true;
             }
-            used_ = pos + kSlotRecordSize;
+            used = pos + kSlotRecordSize;
+        }
+        return Status::Ok;
+    }
+
+    Status scan() noexcept {
+        uint32_t pused = 0u, pseq = 0u;
+        bool pdirty = false;
+        SlotRecord pl[2]{};
+        bool ph[2] = {false, false};
+        Status st = scan_region(storage_, offset_, size_, pl, ph, pused, pseq, pdirty);
+        if (st != Status::Ok) return st;
+
+        latest_[0] = pl[0]; latest_[1] = pl[1];
+        has_[0] = ph[0]; has_[1] = ph[1];
+        used_ = pused; seq_ = pseq; dirty_ = pdirty;
+
+        // Primary пуст/повреждён, а backup содержит снимок последней
+        // успешной компакции — читаем backup. dirty_ = true заставит
+        // следующий store переписать primary.
+#if MCFRAME_META_BACKUP
+        if (backup_size_ != 0u) {
+            uint32_t bused = 0u, bseq = 0u;
+            bool bdirty = false;
+            SlotRecord bl[2]{};
+            bool bh[2] = {false, false};
+            st = scan_region(storage_, backup_offset_, backup_size_,
+                             bl, bh, bused, bseq, bdirty);
+            if (st != Status::Ok) return st;
+            const uint8_t pcount = static_cast<uint8_t>(ph[0] + ph[1]);
+            const uint8_t bcount = static_cast<uint8_t>(bh[0] + bh[1]);
+            // Backup — снимок последней компакции. Если primary пуст,
+            // повреждён или содержит меньше записей, rewrite оборвался
+            // посередине (успела записаться только часть снимка).
+            if (bcount != 0u && (pdirty || pcount == 0u || bcount > pcount)) {
+                latest_[0] = bl[0]; latest_[1] = bl[1];
+                has_[0] = bh[0]; has_[1] = bh[1];
+                if (bseq > seq_) seq_ = bseq;
+                dirty_ = true;
+            }
+            (void)bused; (void)bdirty;
+        }
+#endif
+        return Status::Ok;
+    }
+
+    Status write_snapshot(Storage* storage, uint32_t offset, uint32_t size,
+                          const SlotRecord* keep, const bool* keep_has) noexcept {
+        Status st = storage->erase(offset, size);
+        if (st != Status::Ok) return st;
+        uint32_t pos = 0u;
+        for (uint8_t s = 0u; s < 2u; ++s) {
+            if (!keep_has[s]) continue;
+            if (pos + kSlotRecordSize > size) return Status::NoMemory;
+            uint8_t buf[kSlotRecordSize]{};
+            encode_record(buf, keep[s]);
+            st = storage->write(offset + pos, buf, kSlotRecordSize);
+            if (st != Status::Ok) return st;
+            pos += kSlotRecordSize;
         }
         return Status::Ok;
     }
@@ -899,6 +993,16 @@ private:
         bool keep_has[2] = { has_[0], has_[1] };
         keep[0] = latest_[0];
         keep[1] = latest_[1];
+
+        // Сначала backup. Если запись backup не удалась, primary ещё цел —
+        // стирать его нельзя.
+#if MCFRAME_META_BACKUP
+        if (backup_size_ != 0u) {
+            const Status b = write_snapshot(storage_, backup_offset_, backup_size_,
+                                            keep, keep_has);
+            if (b != Status::Ok) return b;
+        }
+#endif
 
         const Status st = storage_->erase(offset_, size_);
         if (st != Status::Ok) return st;
@@ -920,12 +1024,22 @@ private:
             latest_[s] = keep[s];
             has_[s] = true;
         }
+
+        // Primary записан; backup больше не нужен. Ошибку очистки игнорируем:
+        // данные уже надёжно в primary, а старый backup будет перезаписан.
+#if MCFRAME_META_BACKUP
+        if (backup_size_ != 0u) {
+            (void)storage_->erase(backup_offset_, backup_size_);
+        }
+#endif
         return Status::Ok;
     }
 
     Storage*   storage_ = nullptr;
     uint32_t   offset_ = 0u;
     uint32_t   size_ = 0u;
+    uint32_t   backup_offset_ = 0u;
+    uint32_t   backup_size_ = 0u;
     uint32_t   used_ = 0u;
     uint32_t   seq_ = 0u;
     bool       dirty_ = false;
@@ -937,31 +1051,29 @@ class SlotStore {
 public:
     SlotStore() noexcept = default;
 
-    /// Привязать хранилище. meta_offset — начало области метаданных;
-    /// meta_size == 0 означает старую раскладку: page_size()*4.
-    ///
-    /// Внутри — ОДИН журнал на оба слота: запись 80 байт дописывается в
-    /// ещё стёртое место, а не требует четырёх отдельных страниц.
     Status init(Storage* storage, uint32_t meta_offset,
-                uint32_t meta_size = 0u) noexcept {
+                uint32_t meta_size = 0u,
+                uint32_t backup_offset = 0u,
+                uint32_t backup_size = 0u) noexcept {
         if (storage == nullptr) return Status::InvalidArg;
         const uint32_t page = storage->page_size();
         if (page == 0u) return Status::NotSupported;
         if (meta_size == 0u) meta_size = page * kMetaPages;
-        return journal_.init(storage, meta_offset, meta_size);
+        return journal_.init(storage, meta_offset, meta_size,
+                             backup_offset, backup_size);
     }
 
     bool initialized() const noexcept { return journal_.initialized(); }
     uint32_t meta_offset() const noexcept { return journal_.meta_offset(); }
     uint32_t meta_size() const noexcept { return journal_.meta_size(); }
+    uint32_t backup_offset() const noexcept { return journal_.backup_offset(); }
+    uint32_t backup_size() const noexcept { return journal_.backup_size(); }
     uint32_t last_seq() const noexcept { return journal_.last_seq(); }
 
-    /// Прочитать запись слота: Ok | NotFound (записи нет).
     Status load(uint8_t slot, SlotRecord& out) noexcept {
         return journal_.load(slot, out);
     }
 
-    /// Записать запись слота (счётчик seq ведётся хранилищем).
     Status store(uint8_t slot, const SlotRecord& rec) noexcept {
         if (slot > 1u) return Status::InvalidArg;
         SlotRecord copy = rec;
@@ -969,7 +1081,6 @@ public:
         return journal_.store(copy);
     }
 
-    /// Пометить слот негодным (запись создаётся, если её не было).
     Status invalidate(uint8_t slot, uint16_t detail = 0u) noexcept {
         if (slot > 1u) return Status::InvalidArg;
 
@@ -982,8 +1093,6 @@ public:
         return store(slot, rec);
     }
 
-    /// Слот, который следует грузить, и его запись.
-    /// Layout::kNoSlot — грузить нечего.
     uint8_t pick(uint8_t current_slot, SlotRecord& out) noexcept {
         uint8_t best = 0xFFu;
         int best_rank = 0;
@@ -1001,5 +1110,4 @@ public:
 private:
     MetaJournal journal_{};
 };
-
 } // namespace embed::ota

@@ -158,6 +158,28 @@ typedef struct {
 #define PWR ((PWR_TypeDef*)0x40007000UL)
 
 typedef struct {
+    volatile uint32_t KR;
+    volatile uint32_t PR;
+    volatile uint32_t RLR;
+    volatile uint32_t SR;
+} IWDG_TypeDef;
+
+#define IWDG ((IWDG_TypeDef*)0x40003000UL)
+
+constexpr uint32_t PWR_CR_LPDS = 1u << 0;
+constexpr uint32_t PWR_CR_PDDS = 1u << 1;
+constexpr uint32_t PWR_CR_DBP  = 1u << 8;
+constexpr uint32_t RTC_CR_WUTE  = 1u << 10;
+constexpr uint32_t RTC_CR_WUTIE = 1u << 14;
+constexpr uint32_t RTC_ISR_WUTF  = 1u << 10;
+constexpr uint32_t RTC_ISR_WUTWF = 1u << 2;
+constexpr uint32_t RCC_CSR_IWDGRSTF = 1u << 29;
+constexpr uint32_t RCC_CSR_SFTRSTF  = 1u << 28;
+constexpr uint32_t RCC_CSR_PORRSTF  = 1u << 27;
+constexpr uint32_t RCC_CSR_PINRSTF  = 1u << 26;
+constexpr uint32_t RCC_CSR_LPWRRSTF = 1u << 30;
+
+typedef struct {
     volatile uint32_t TR;
     volatile uint32_t DR;
     volatile uint32_t CR;

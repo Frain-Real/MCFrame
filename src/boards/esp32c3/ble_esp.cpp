@@ -281,6 +281,17 @@ int BleEsp::gap_event(::ble_gap_event* event, void* arg) {
         case BLE_GAP_EVENT_ADV_COMPLETE:
             self->advertising_ = false;
             break;
+        case BLE_GAP_EVENT_NOTIFY_RX: {
+            if (self->notify_cb_ != nullptr && event->notify_rx.om != nullptr) {
+                uint8_t buf[128]{};
+                const uint16_t n = OS_MBUF_PKTLEN(event->notify_rx.om);
+                const uint16_t m = n > sizeof(buf) ? sizeof(buf) : n;
+                if (os_mbuf_copydata(event->notify_rx.om, 0, m, buf) == 0) {
+                    self->notify_cb_(self->notify_ctx_, event->notify_rx.attr_handle, buf, m);
+                }
+            }
+            break;
+        }
         case BLE_GAP_EVENT_DISC: {
             BleScanResult r{};
             std::memcpy(r.addr.bytes, event->disc.addr.val, 6);
@@ -304,6 +315,148 @@ int BleEsp::gap_event(::ble_gap_event* event, void* arg) {
         }
         default: break;
     }
+    return 0;
+}
+
+
+Status BleEsp::discover_services(uint16_t conn, BleGattServiceCallback cb,
+                                 void* ctx) noexcept {
+    if (!inited_ || cb == nullptr) return Status::Unavailable;
+    svc_cb_ = cb;
+    svc_ctx_ = ctx;
+    const int rc = ble_gattc_disc_all_svcs(conn, &BleEsp::svc_disc_cb, this);
+    return rc == 0 ? Status::Ok : Status::HardwareError;
+}
+
+Status BleEsp::discover_chars(uint16_t conn, uint16_t start_handle,
+                              uint16_t end_handle, BleGattCharCallback cb,
+                              void* ctx) noexcept {
+    if (!inited_ || cb == nullptr) return Status::Unavailable;
+    chr_cb_ = cb;
+    chr_ctx_ = ctx;
+    const int rc = ble_gattc_disc_all_chrs(conn, start_handle, end_handle,
+                                           &BleEsp::chr_disc_cb, this);
+    return rc == 0 ? Status::Ok : Status::HardwareError;
+}
+
+Status BleEsp::subscribe_notify(uint16_t conn, uint16_t char_handle, bool enable,
+                                BleGattNotifyCallback cb, void* ctx) noexcept {
+    if (!inited_ || cb == nullptr) return Status::Unavailable;
+    notify_cb_ = cb;
+    notify_ctx_ = ctx;
+    cccd_enable_ = enable;
+    cccd_handle_ = 0u;
+    // CCCD — дескриптор сразу после value handle характеристики.
+    const int rc = ble_gattc_disc_all_dscs(conn, char_handle, static_cast<uint16_t>(char_handle + 2u),
+                                           &BleEsp::dsc_disc_cb, this);
+    return rc == 0 ? Status::Ok : Status::HardwareError;
+}
+
+Status BleEsp::read_char(uint16_t conn, uint16_t handle,
+                         BleGattReadCallback cb, void* ctx) noexcept {
+    if (!inited_ || cb == nullptr) return Status::Unavailable;
+    read_cb_ = cb;
+    read_ctx_ = ctx;
+    const int rc = ble_gattc_read(conn, handle, &BleEsp::read_cb, this);
+    return rc == 0 ? Status::Ok : Status::HardwareError;
+}
+
+Status BleEsp::write_char(uint16_t conn, uint16_t handle, const void* data, Size len,
+                          bool with_response, BleGattWriteCallback cb, void* ctx) noexcept {
+    if (!inited_ || data == nullptr || len > 65535u) return Status::InvalidArg;
+    gatt_write_cb_ = cb;
+    gatt_write_ctx_ = ctx;
+    const int rc = with_response
+        ? ble_gattc_write_flat(conn, handle, data, static_cast<uint16_t>(len),
+                               &BleEsp::write_cb, this)
+        : ble_gattc_write_no_rsp_flat(conn, handle, data, static_cast<uint16_t>(len));
+    return rc == 0 ? Status::Ok : Status::HardwareError;
+}
+
+int BleEsp::svc_disc_cb(uint16_t, const struct ble_gatt_error* err,
+                        const struct ble_gatt_svc* svc, void* arg) {
+    auto* self = static_cast<BleEsp*>(arg);
+    if (self == nullptr) return 0;
+    if (err != nullptr && err->status == BLE_HS_EDONE) {
+        self->svc_cb_ = nullptr;
+        return 0;
+    }
+    if (err == nullptr || err->status != 0 || svc == nullptr) return 0;
+    BleGattService out{};
+    out.start_handle = svc->start_handle;
+    out.end_handle = svc->end_handle;
+    if (svc->uuid.u.type == BLE_UUID_TYPE_16) {
+        out.uuid.bytes[0] = static_cast<uint8_t>(svc->uuid.u16.value);
+        out.uuid.bytes[1] = static_cast<uint8_t>(svc->uuid.u16.value >> 8);
+    }
+    if (self->svc_cb_ != nullptr) self->svc_cb_(self->svc_ctx_, out);
+    return 0;
+}
+
+int BleEsp::chr_disc_cb(uint16_t, const struct ble_gatt_error* err,
+                        const struct ble_gatt_chr* chr, void* arg) {
+    auto* self = static_cast<BleEsp*>(arg);
+    if (self == nullptr || self->chr_cb_ == nullptr) return 0;
+    if (err != nullptr && err->status == BLE_HS_EDONE) {
+        self->chr_cb_ = nullptr;
+        return 0;
+    }
+    if (err != nullptr && err->status != 0) return 0;
+    if (chr == nullptr) return 0;
+    BleGattChar out{};
+    out.handle = chr->val_handle;
+    out.properties = static_cast<uint8_t>(chr->properties & 0x1Fu);
+    self->chr_cb_(self->chr_ctx_, out);
+    return 0;
+}
+
+int BleEsp::dsc_disc_cb(uint16_t conn, const struct ble_gatt_error* err,
+                        uint16_t chr_val_handle, const struct ble_gatt_dsc* dsc,
+                        void* arg) {
+    auto* self = static_cast<BleEsp*>(arg);
+    if (self == nullptr) return 0;
+    if (err != nullptr && err->status == BLE_HS_EDONE) {
+        if (self->cccd_handle_ != 0u) {
+            const uint8_t v[2] = {static_cast<uint8_t>(self->cccd_enable_ ? 1u : 0u), 0u};
+            (void)ble_gattc_write_flat(conn, self->cccd_handle_, v, 2u, nullptr, nullptr);
+        }
+        return 0;
+    }
+    if (err != nullptr && err->status != 0) return 0;
+    (void)chr_val_handle;
+    if (dsc == nullptr) return 0;
+    if (dsc->uuid.u.type == BLE_UUID_TYPE_16 &&
+        dsc->uuid.u16.value == 0x2902u) {
+        self->cccd_handle_ = dsc->handle;
+    }
+    return 0;
+}
+
+int BleEsp::read_cb(uint16_t, const struct ble_gatt_error* err,
+                    struct ble_gatt_attr* attr, void* arg) {
+    auto* self = static_cast<BleEsp*>(arg);
+    if (self == nullptr || self->read_cb_ == nullptr) return 0;
+    if (err != nullptr && err->status != 0) {
+        self->read_cb_(self->read_ctx_, attr != nullptr ? attr->handle : 0u,
+                       Status::HardwareError, nullptr, 0u);
+        return 0;
+    }
+    if (attr == nullptr || attr->om == nullptr) return 0;
+    uint8_t buf[64]{};
+    const uint16_t len = OS_MBUF_PKTLEN(attr->om);
+    const uint16_t n = len > sizeof(buf) ? sizeof(buf) : len;
+    if (os_mbuf_copydata(attr->om, 0, n, buf) != 0) return 0;
+    self->read_cb_(self->read_ctx_, attr->handle, Status::Ok, buf, n);
+    return 0;
+}
+
+int BleEsp::write_cb(uint16_t, const struct ble_gatt_error* err,
+                     struct ble_gatt_attr* attr, void* arg) {
+    auto* self = static_cast<BleEsp*>(arg);
+    if (self == nullptr || self->gatt_write_cb_ == nullptr) return 0;
+    self->gatt_write_cb_(self->gatt_write_ctx_, attr != nullptr ? attr->handle : 0u,
+                    (err != nullptr && err->status != 0) ? Status::HardwareError
+                                                         : Status::Ok);
     return 0;
 }
 

@@ -3,6 +3,10 @@ add_executable(phase3_fw
     phase3_main.cpp
     ${CMAKE_SOURCE_DIR}/src/platforms/${MCU_TARGET}/startup_${MCU_TARGET}.s
     ${CMAKE_SOURCE_DIR}/src/platforms/${MCU_TARGET}/system_${MCU_TARGET}.c)
+if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
+    target_sources(phase3_fw PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/platforms/stm32f4g4/power_m4.cpp)
+endif()
 target_link_libraries(phase3_fw PRIVATE MCFrame::MCFrame)
 # На F4 начало Flash занято загрузчиком/meta/NVS, поэтому self-test
 # линкуется в слот A (как phase3_slot). На G4 flat-образ помещается
@@ -25,6 +29,10 @@ if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
         phase3_main.cpp
         ${CMAKE_SOURCE_DIR}/src/platforms/${MCU_TARGET}/startup_${MCU_TARGET}.s
         ${CMAKE_SOURCE_DIR}/src/platforms/${MCU_TARGET}/system_${MCU_TARGET}.c)
+    if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
+        target_sources(phase3_slot PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/platforms/stm32f4g4/power_m4.cpp)
+    endif()
     target_link_libraries(phase3_slot PRIVATE MCFrame::MCFrame)
     mcframe_firmware_slot(phase3_slot 0)
     mcframe_flash_layout(phase3_slot)

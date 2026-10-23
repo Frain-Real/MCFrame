@@ -20,33 +20,38 @@
   - `power` — текущий PM-конфиг.
 - [x] ASan/UBSan для host-тестов:
   - CMake `-DMCFRAME_SANITIZE=ON`;
-  - CI job `sanitizers`; 28/28 tests под ASan+UBSan.
+  - CI job `sanitizers`; 30/30 tests под ASan+UBSan.
+- [x] F4/G4 STOP + RTC wakeup и IWDG:
+  - `power_m4.cpp` подключается приложением/phase3, загрузчик остаётся на
+    слабых заглушках;
+  - IWDG с выбором предделителя/RLR, RCC_CSR reset cause, backup-регистры;
+  - STOP через RTC wakeup timer, восстановление часов после WFI.
 - [x] Phase 6 closure:
   - F4/G4 bootloader + два слота;
   - PVD F1/F4/G4;
-  - NVS: F4 32 КБ (секторы 2-3), G4 4 КБ, F1 flat 4 КБ; F1 slot — внешняя;
+  - NVS: F4 32 КБ (секторы 2-3), G4 4 КБ, F1 flat 2 КБ + 2 КБ meta; F1 slot — внешняя;
   - BLE central connect.
 - [x] C3 headroom:
   - TLS pinned to ISRG Root X1 вместо CA bundle;
   - logs level NONE;
-  - `mcframe_c3.bin` = 0xeea90; после переразметки слот 1.25 МБ, свободно 0x51570 (~333 КБ, 25%).
+  - `mcframe_c3.bin` = 0xf1a40; после переразметки слот 1.25 МБ, свободно 0x4e5c0 (~314 КБ, 25%).
 
 ## Проверка
 
 ```text
-mock Debug        28/28
-ASan/UBSan        28/28
+mock Debug        30/30
+ASan/UBSan        30/30
 NVS               74/74
 mcflash            3/3
 F1/F4/G4 builds   OK
-C3 build          OK (0xeea90, 25% free)
+C3 build          OK (0xf1a40, 25% free)
 ```
 
 F4/G4 boot:
 
 ```text
-F4 boot 16K, meta 16K, NVS 32K, slots 448K
-G4 boot 20K, slots 52K, meta 4K
+F4 boot 16K, meta 16K, backup 16K, NVS 32K, slots 448K/384K
+G4 boot 20K, slots 48K, meta 4K, backup 4K, NVS 4K
 ```
 
 ## Ограничения

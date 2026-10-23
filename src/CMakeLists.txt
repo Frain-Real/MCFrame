@@ -19,7 +19,8 @@ set(OS_CORE_SOURCES
     os/rust/rust_bridge.cpp
     os/watchdog/watchdog.cpp
     os/interfaces/dma_manager.cpp
-    os/interfaces/dma_arbiter.cpp)
+    os/interfaces/dma_arbiter.cpp
+    os/fs/lfs.c)
 
 # ─────────── Криптография (не зависит от платформы) ───────────
 # Модуль целиком статический, без динамической памяти. Единицы трансляции
@@ -85,6 +86,9 @@ if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
         platforms/stm32f4g4/platform_ops.cpp
         platforms/stm32f4g4/rtc_m4.cpp
         platforms/stm32f4g4/usb_otg_fs.cpp)
+    if(MCU_TARGET STREQUAL "stm32g4")
+        list(APPEND OS_PLATFORM_SOURCES platforms/stm32g4/usb_fs_g4.cpp)
+    endif()
 else()
     set(OS_PLATFORM_SOURCES platforms/${MCU_TARGET}/platform_ops.cpp)
 endif()
@@ -178,6 +182,9 @@ endif()
 
 # Бюджет диагностики аварии: полный отчёт или «тихий» захват записи.
 # Значение приходит из корневого CMakeLists (MCFRAME_FAULT_REPORT).
+target_compile_definitions(MCFrame PRIVATE LFS_NO_MALLOC LFS_NO_ASSERT)
+target_include_directories(MCFrame PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/os/fs>)
 target_compile_definitions(MCFrame PUBLIC
     MCFRAME_FAULT_REPORT=$<BOOL:${MCFRAME_FAULT_REPORT}>
     MCFRAME_TIME_SLICE_TICKS=${MCFRAME_TIME_SLICE_TICKS}
@@ -195,10 +202,19 @@ if(DEFINED MCFRAME_NVS_SIZE)
         MCFRAME_NVS_SIZE=${MCFRAME_NVS_SIZE})
 endif()
 
-# F4-загрузчик должен уложиться в 16 КБ. SHA-256 образа проверяется при
-# OTA-приёме; в загрузчике остаются CRC32 и проверка вектора.
+# Политика загрузчика выбирается в корневом CMakeLists (crc/sha/signed),
+# а не «молчаливым» отключением SHA.
+target_compile_definitions(MCFrame PUBLIC
+    MCFRAME_BOOT_VERIFY_HASH=${MCFRAME_BOOT_VERIFY_HASH}
+    MCFRAME_BOOT_REQUIRE_SIGNATURE=${MCFRAME_BOOT_REQUIRE_SIGNATURE})
+if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4" OR MCU_TARGET STREQUAL "mock")
+    target_compile_definitions(MCFrame PUBLIC MCFRAME_META_BACKUP=1)
+else()
+    target_compile_definitions(MCFrame PUBLIC MCFRAME_META_BACKUP=0)
+endif()
 if(MCU_TARGET STREQUAL "stm32f4")
-    target_compile_definitions(MCFrame PUBLIC MCFRAME_BOOT_VERIFY_HASH=0)
+    # 16-КБ bootloader: таблица CRC32 (1 КБ) не помещается с запасом.
+    target_compile_definitions(MCFrame PUBLIC MCFRAME_CRC_SMALL=1)
 endif()
 
 # CMSIS нужен и приложению: драйверы STM32 включают stm32f10x.h.

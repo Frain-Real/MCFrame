@@ -2,6 +2,7 @@
 #include "boards/esp32c3/hal_esp32c3.hpp"
 #include "boards/esp32c3/wifi_esp.hpp"
 #include "boards/esp32c3/net_socket_esp.hpp"
+#include "os/net/tls_mbedtls.hpp"
 #include "boards/esp32c3/ble_esp.hpp"
 
 namespace {
@@ -16,6 +17,8 @@ embed::esp32c3::Pwm     g_pwm{static_cast<gpio_num_t>(BOARD_PWM_GPIO)};
 embed::esp32c3::Nvs     g_nvs;
 embed::esp32c3::WifiEsp g_wifi;
 embed::esp32c3::BleEsp  g_ble;
+embed::net::MbedTlsProvider<4> g_tls_provider;
+embed::net::TlsFactoryT<4>      g_tls{embed::esp32c3::sockets(), g_tls_provider};
 
 } // namespace
 
@@ -30,6 +33,7 @@ Pwm& pwm1() noexcept { return g_pwm; }
 Nvs& nvs() noexcept { return g_nvs; }
 Network& wifi() noexcept { return g_wifi; }
 Sockets& sockets() noexcept { return embed::esp32c3::sockets(); }
+Tls& tls() noexcept { return g_tls; }
 Ble& ble() noexcept { return g_ble; }
 
 void init() noexcept {

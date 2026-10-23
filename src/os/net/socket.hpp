@@ -49,6 +49,14 @@ public:
     virtual void close() noexcept = 0;
     virtual bool open() const noexcept = 0;
 
+    /// TCP-сервер: перевести сокет в LISTEN. По умолчанию не поддержано.
+    virtual Status listen(uint16_t) noexcept { return Status::NotSupported; }
+    /// Принять соединение. out — сокет из пула фабрики.
+    virtual Status accept(Socket*& out) noexcept {
+        (void)out;
+        return Status::NotSupported;
+    }
+
 protected:
     Socket() = default;
 };

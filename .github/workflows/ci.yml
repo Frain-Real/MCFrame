@@ -7,7 +7,7 @@ on:
 jobs:
   mock:
     name: mock-${{ matrix.build_type }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -23,7 +23,7 @@ jobs:
 
   target-plan:
     name: target-matrix
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -32,7 +32,7 @@ jobs:
 
   stm32-phase2:
     name: ${{ matrix.target }}-phase2
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -60,7 +60,7 @@ jobs:
 
   sanitizers:
     name: sanitizers
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -72,8 +72,8 @@ jobs:
 
   esp32c3-idf:
     name: esp32c3-idf-build
-    runs-on: ubuntu-latest
-    container: espressif/idf:latest
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.0.2
     steps:
       - uses: actions/checkout@v4
 
@@ -89,7 +89,7 @@ jobs:
 
   esp32c3-project:
     name: esp32c3-project
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -101,7 +101,7 @@ jobs:
 
   esp32c3-stub:
     name: esp32c3-stub
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -119,7 +119,7 @@ jobs:
 
   stm32:
     name: stm32-cross
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -168,3 +168,65 @@ jobs:
             .build/stm32/bootloader_fw.hex
             .build/stm32/example_fw.bin
             .build/stm32/example_fw.hex
+
+  rust:
+    name: rust-host-arm
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (pinned)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
+
+      - name: Host Rust link + tests
+        run: |
+          ./build.sh mock Release -DMCFRAME_RUST_APP=ON
+          ctest --test-dir .build/mock --output-on-failure
+
+      - name: F1 Rust flat image
+        run: ./build.sh stm32 Release -DMCFRAME_RUST_APP=ON -DMCFRAME_IMAGE=flat
+
+      - name: ARM staticlibs
+        working-directory: rust/mcframe_app
+        run: |
+          CARGO_HOME=../../.cargo-home cargo build --release --locked \
+            -Z build-std=core --target thumbv7m-none-eabi
+          CARGO_HOME=../../.cargo-home cargo build --release --locked \
+            -Z build-std=core --target thumbv7em-none-eabihf
+          test -f target/thumbv7m-none-eabi/release/libmcframe_app.a
+          test -f target/thumbv7em-none-eabihf/release/libmcframe_app.a
+
+  fuzz:
+    name: fuzz-smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clang + libFuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang
+      - name: Build fuzzers
+        run: |
+          cmake -S . -B .build/fuzz -DMCU_TARGET=mock -DCMAKE_BUILD_TYPE=Debug \
+            -DMCFRAME_FUZZ=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          cmake --build .build/fuzz --target fuzz_http_url fuzz_ota_payload -j2
+      - name: Run smoke iterations
+        run: |
+          mkdir -p .build/fuzz/corpus/http .build/fuzz/corpus/ota
+          .build/fuzz/tests/fuzz/fuzz_http_url -runs=2000 .build/fuzz/corpus/http
+          .build/fuzz/tests/fuzz/fuzz_ota_payload -runs=2000 .build/fuzz/corpus/ota
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: gcovr
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcovr
+      - name: Build + tests + coverage
+        run: ./tools/coverage.sh .build/coverage

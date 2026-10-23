@@ -16,6 +16,8 @@
 #include "hal/INvs.hpp"
 
 #include "stm32_periph_m4.hpp"
+#include "platforms/stm32/sd_spi.hpp"
+#include "platforms/stm32g4/usb_fs_g4.hpp"
 
 namespace board {
 
@@ -27,6 +29,8 @@ using Spi     = embed::hal::ISpi;
 using Pwm     = embed::hal::IPwm;
 using Gpio    = embed::hal::IGpioPin;
 using Nvs     = embed::hal::INvs;
+using Sd      = embed::stm32::sd::Card;
+using Usb     = embed::stm32g4::usb::UsbFsG4Hal;
 
 using Pins = PinMap<20>;
 constexpr const Pins& pins() noexcept { return kPins; }
@@ -43,6 +47,8 @@ Spi&  spi1() noexcept;
 Spi&  spi2() noexcept;
 Pwm&  pwm1() noexcept;
 Nvs&  nvs() noexcept;
+Sd&   sd() noexcept;
+Usb&  usb() noexcept;
 
 template <uint8_t I>
 inline auto& uart() noexcept {

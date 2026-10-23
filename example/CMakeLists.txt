@@ -113,3 +113,11 @@ else()
             COMMENT "Размер прошивки")
     endif()
 endif()
+
+
+# F4/G4 power/watchdog — отдельный TU только для приложения: загрузчик
+# (16 КБ) остаётся на слабых заглушках и не тянет STOP/IWDG.
+if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
+    target_sources(example_fw PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/platforms/stm32f4g4/power_m4.cpp)
+endif()

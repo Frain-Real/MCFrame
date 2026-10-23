@@ -3,6 +3,10 @@
 #include "os/usb/cdc_acm.hpp"
 #include "os/usb/dfu.hpp"
 #include "os/usb/msc.hpp"
+#include "os/usb/composite.hpp"
+#include "os/usb/dfu_storage.hpp"
+#include "os/usb/cdc_transport.hpp"
+#include "os/usb/rndis.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -21,7 +25,9 @@ void check(const char* what, bool ok) {
 class MockHal final : public usb::Hal {
 public:
     Status ep0_write(const void* d, Size n) noexcept override {
-        ep0_len = n; if (n <= sizeof(ep0)) std::memcpy(ep0, d, n); return Status::Ok;
+        ep0_len = n;
+        if (n != 0u && n <= sizeof(ep0)) std::memcpy(ep0, d, n);
+        return Status::Ok;
     }
     Status ep0_read(void* d, Size cap, Size& got) noexcept override {
         (void)d; (void)cap; got = 0u; return Status::NotSupported;
@@ -34,6 +40,7 @@ public:
         got = 0u; return Status::NotSupported;
     }
     void stall_ep0() noexcept override { stalled = true; }
+    Status set_address(uint8_t a) noexcept override { address = a; return Status::Ok; }
 
     uint8_t ep0[256]{};
     Size ep0_len = 0u;
@@ -42,6 +49,7 @@ public:
     uint8_t ep = 0u;
     uint32_t writes = 0u;
     bool stalled = false;
+    uint8_t address = 0xFFu;
 };
 
 usb::Setup mk(uint8_t type, uint8_t req, uint16_t value = 0u,
@@ -54,13 +62,23 @@ usb::Setup mk(uint8_t type, uint8_t req, uint16_t value = 0u,
 class RamBlock final : public usb::msc::BlockDevice {
 public:
     uint32_t block_count() const noexcept override { return 128u; }
+    uint32_t last_write = 0xFFFFFFFFu;
+    uint32_t last_count = 0u;
+    uint8_t last_byte = 0u;
     uint16_t block_size() const noexcept override { return 512u; }
     Status read_block(uint32_t lba, void* dst, uint32_t count) noexcept override {
         if (lba + count > block_count()) return Status::InvalidArg;
         std::memset(dst, static_cast<int>(lba & 0xFFu), count * 512u);
         return Status::Ok;
     }
-    Status write_block(uint32_t, const void*, uint32_t) noexcept override { return Status::NotSupported; }
+    Status write_block(uint32_t lba, const void* src, uint32_t count) noexcept override {
+        if (lba + count > block_count()) return Status::InvalidArg;
+        last_write = lba;
+        last_count = count;
+        const auto* p = static_cast<const uint8_t*>(src);
+        last_byte = (p != nullptr && count != 0u) ? p[0] : 0u;
+        return Status::Ok;
+    }
 };
 
 void test_core_cdc() {
@@ -75,7 +93,20 @@ void test_core_cdc() {
     check("GET_DESCRIPTOR config",
           dev.setup(mk(0x80, 6, 0x0200, 0, 67)) == Status::Ok && hal.ep0_len == 67u &&
           hal.ep0[1] == 2u && hal.ep0[2] == 67u);
-    check("SET_CONFIGURATION", dev.setup(mk(0x00, 9, 1)) == Status::Ok && dev.configured());
+    check("GET_DESCRIPTOR string manufacturer",
+          dev.setup(mk(0x80, 6, 0x0301, 0x0409, 64)) == Status::Ok &&
+          hal.ep0_len == 16u && hal.ep0[2] == 'M');
+    check("GET_DESCRIPTOR string product",
+          dev.setup(mk(0x80, 6, 0x0302, 0x0409, 64)) == Status::Ok &&
+          hal.ep0_len == 24u && hal.ep0[18] == 'U');
+    check("GET_DESCRIPTOR device short",
+          dev.setup(mk(0x80, 6, 0x0100, 0, 8)) == Status::Ok && hal.ep0_len == 8u);
+    check("GET_STATUS device", dev.setup(mk(0x80, 0, 0, 0, 2)) == Status::Ok &&
+          hal.ep0_len == 2u);
+    check("SET_ADDRESS", dev.setup(mk(0x00, 5, 7)) == Status::Ok &&
+          dev.address() == 7u && hal.address == 7u);
+    check("SET_CONFIGURATION", dev.setup(mk(0x00, 9, 1)) == Status::Ok && dev.configured() &&
+          hal.ep0_len == 0u);
     check("class configured", acm.is_configured());
 
     uint8_t line[7] = {0x00, 0xC2u, 0x01u, 0x00, 0x00, 0x00, 0x08u};
@@ -119,6 +150,105 @@ void test_dfu() {
     check("ABORT", dev.setup(mk(0x21, 6)) == Status::Ok);
 }
 
+
+void test_composite() {
+    std::puts("USB composite:");
+    MockHal hal;
+    usb::cdc::Acm acm;
+    usb::dfu::Dfu dfu;
+    usb::Class* kids[] = {&acm, &dfu};
+    usb::Composite<> comp(kids, 2u);
+    usb::Device dev;
+    check("composite init", dev.init(hal, comp) == Status::Ok);
+    check("composite descriptor", comp.descriptor_length() > 67u);
+    check("GET_DESCRIPTOR composite config",
+          dev.setup(mk(0x80, 6, 0x0200, 0, 64)) == Status::Ok &&
+          hal.ep0_len == 64u && hal.ep0[4] == 3u);   // 3 interfaces
+    check("SET_CONFIGURATION composite",
+          dev.setup(mk(0x00, 9, 1)) == Status::Ok && comp.is_configured());
+    check("DFU class request index 2",
+          dev.setup(mk(0xA1, 5, 0, 2, 1)) == Status::Ok && hal.ep0_len == 1u);
+    uint8_t line[7] = {0x00, 0xC2u, 0x01u, 0x00, 0x00, 0x00, 0x08u};
+    check("CDC class request index 0",
+          dev.setup(mk(0x21, 0x20, 0, 0, 7), line, sizeof(line)) == Status::Ok);
+}
+
+
+void test_dfu_storage() {
+    std::puts("USB DFU to flash:");
+    static uint8_t mem[4096]{};
+    ota::MemoryStorage storage;
+    storage.attach(mem, sizeof(mem), false);
+    usb::dfu::StorageTarget target(storage, 0u, sizeof(mem));
+    usb::dfu::Dfu dfu(&target);
+    MockHal hal;
+    usb::Device dev;
+    check("DFU storage init", dev.init(hal, dfu) == Status::Ok);
+    const uint8_t image[] = {1u, 2u, 3u, 4u};
+    check("DFU DNLOAD block", dev.setup(mk(0x21, 1, 0, 0, 4), image, 4u) == Status::Ok);
+    check("DFU flash write", mem[0] == 1u && mem[3] == 4u);
+    check("DFU MANIFEST", dev.setup(mk(0x21, 1, 0, 0, 0)) == Status::Ok &&
+          dfu.state() == usb::dfu::Dfu::State::Manifest);
+    check("DFU UPLOAD from flash", dev.setup(mk(0xA1, 2, 0, 0, 4)) == Status::Ok &&
+          hal.ep0_len == 4u && hal.ep0[3] == 4u);
+}
+
+
+void test_cdc_transport() {
+    std::puts("USB CDC transport:");
+    MockHal hal;
+    usb::cdc::Acm acm;
+    usb::Device dev;
+    check("CDC transport init", dev.init(hal, acm) == Status::Ok);
+    usb::cdc::AcmTransport tr(acm, hal);
+    const uint8_t in[] = "ota";
+    acm.on_out(in, sizeof(in) - 1u);
+    uint8_t buf[8]{};
+    Size got = 0u;
+    check("CDC OTA read", tr.read(buf, sizeof(buf), got, 10u) == Status::Ok &&
+          got == 3u && buf[0] == 'o');
+    check("CDC OTA iface", tr.iface() == ota::proto::Iface::Usb);
+    check("CDC OTA write", tr.write("ok", 2u, 10u) == Status::Ok && hal.ep == 0x82u);
+
+    shell::Console console;
+    usb::cdc::AcmConsole port(acm, hal);
+    port.init(console);
+    const uint8_t cmd[] = "help\n";
+    acm.on_out(cmd, sizeof(cmd) - 1u);
+    port.poll();
+    check("CDC shell poll", true);
+}
+
+
+void test_rndis() {
+    std::puts("USB RNDIS:");
+    MockHal hal;
+    usb::rndis::Rndis rndis;
+    usb::Device dev;
+    check("RNDIS init", dev.init(hal, rndis) == Status::Ok);
+    check("RNDIS config", dev.setup(mk(0x80, 6, 0x0200, 0, 64)) == Status::Ok &&
+          hal.ep0[4] == 2u && hal.ep0[49] == 0x0Au);   // data interface class
+    uint8_t init[24]{};
+    init[0] = 2u; init[4] = 24u;
+    init[8] = 0x11u; init[9] = 0x22u; init[10] = 0x33u; init[11] = 0x44u;
+    check("RNDIS INIT", dev.setup(mk(0x21, 0, 0, 0, sizeof(init)), init, sizeof(init)) == Status::Ok);
+    check("RNDIS INIT response", dev.setup(mk(0xA1, 1, 0, 0, 52)) == Status::Ok &&
+          hal.ep0_len == 52u && hal.ep0[0] == 2u && hal.ep0[1] == 0u &&
+          hal.ep0[2] == 0u && hal.ep0[3] == 0x80u);
+    uint8_t pkt[44 + 14]{};
+    pkt[0] = 1u; pkt[4] = 58u; pkt[8] = 44u; pkt[12] = 14u;
+    for (uint8_t i = 0u; i < 14u; ++i) pkt[44u + i] = i;
+    check("RNDIS host frame", rndis.receive(pkt, sizeof(pkt)) == Status::Ok);
+    Size fl = 0u;
+    const uint8_t* f = rndis.rx_frame(fl);
+    check("RNDIS frame queued", f != nullptr && fl == 14u && f[0] == 0u && f[13] == 13u);
+    rndis.pop_rx();
+    uint8_t eth[60]{};
+    eth[0] = 0xFFu;
+    check("RNDIS device frame", rndis.send_frame(eth, sizeof(eth)) == Status::Ok);
+    check("RNDIS flush", rndis.flush(hal) == 1u && hal.ep == 0x83u);
+}
+
 void test_msc() {
     std::puts("USB MSC:");
     MockHal hal;
@@ -143,6 +273,15 @@ void test_msc() {
     check("data written", hal.writes >= 2u);
     check("data/CSW", hal.ep_len == 13u && hal.out[0] == 'U' && hal.out[1] == 'S');
 
+    uint8_t wr[512]{};
+    wr[0] = 0x5Au;
+    uint8_t cbw_w[31]{};
+    std::memcpy(cbw_w, cbw, sizeof(cbw));
+    cbw_w[15] = 0x2Au;              // WRITE(10)
+    cbw_w[8] = 0x00; cbw_w[9] = 0x02;
+    check("WRITE10", msc.handle_cbw(cbw_w, sizeof(cbw_w), hal, wr, sizeof(wr)) == Status::Ok &&
+          block.last_write == 2u && block.last_count == 1u && block.last_byte == 0x5Au);
+
     uint8_t cbw2[31]{};
     std::memcpy(cbw2, cbw, sizeof(cbw));
     cbw2[15] = 0x12; // INQUIRY
@@ -159,6 +298,10 @@ int main() {
     test_core_cdc();
     test_dfu();
     test_msc();
+    test_composite();
+    test_dfu_storage();
+    test_cdc_transport();
+    test_rndis();
     std::printf("%d/%d проверок пройдено%s\n", g_total - g_failed, g_total,
                 g_failed == 0 ? " — все тесты пройдены" : " — ЕСТЬ ОШИБКИ");
     return g_failed == 0 ? 0 : 1;

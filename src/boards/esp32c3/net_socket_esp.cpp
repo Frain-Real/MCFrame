@@ -98,12 +98,36 @@ public:
         return Status::Ok;
     }
 
+    Status listen(uint16_t port) noexcept override {
+        if (fd_ < 0) return Status::Unavailable;
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_port = htons(port);
+        a.sin_addr.s_addr = htonl(INADDR_ANY);
+        if (::bind(fd_, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) {
+            return Status::HardwareError;
+        }
+        if (::listen(fd_, 2) != 0) return Status::HardwareError;
+        return Status::Ok;
+    }
+
+    Status accept(Socket*& out) noexcept override {
+        out = nullptr;
+        if (fd_ < 0) return Status::Unavailable;
+        const int c = ::accept(fd_, nullptr, nullptr);
+        if (c < 0) return (errno == EAGAIN || errno == EWOULDBLOCK) ? Status::Busy
+                                                                   : Status::Unavailable;
+        return adopt(c, out);
+    }
+
     void close() noexcept override {
         if (fd_ >= 0) { (void)::close(fd_); fd_ = -1; }
     }
     bool open() const noexcept override { return fd_ >= 0; }
 
 private:
+    static Status adopt(int fd, Socket*& out) noexcept;
+
     Status wait(bool for_write, uint32_t timeout_ms) noexcept {
         fd_set set;
         FD_ZERO(&set);
@@ -122,6 +146,18 @@ private:
 };
 
 EspSocket g_pool[4]{};
+
+Status EspSocket::adopt(int fd, Socket*& out) noexcept {
+    for (auto& s : g_pool) {
+        if (!s.open()) {
+            s.fd_ = fd;
+            out = &s;
+            return Status::Ok;
+        }
+    }
+    (void)::close(fd);
+    return Status::NoMemory;
+}
 
 Status resolve_impl(const char* host, net::Endpoint& out) noexcept {
     if (host == nullptr) return Status::InvalidArg;

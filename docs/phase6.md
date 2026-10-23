@@ -19,10 +19,11 @@
   - G4 — 128 КБ, страницы 2 КБ, программирование 8 байт.
 - [x] C3 `EspPartitionStorage` (ota::Storage) поверх `esp_partition`.
 - [x] F407/G431 загрузчик и два слота:
-  - F4: boot 16 КБ, meta 16 КБ, NVS 32 КБ, слоты по 448 КБ;
-    в 16-КБ загрузчик не влезает SHA-256, поэтому на F4 он проверяет CRC32 и
-    вектор, а SHA-256/подпись — при OTA-приёме;
-  - G4: boot 20 КБ, слоты по 50 КБ, meta 4 КБ, NVS 4 КБ;
+  - F4: boot 16 КБ, meta 16 КБ, meta-backup 16 КБ (сектор 11), NVS 32 КБ,
+    слот A 448 КБ, слот B 384 КБ; 16-КБ загрузчик по умолчанию использует
+    политику CRC32 (явно, `MCFRAME_BOOT_SECURITY=crc`), SHA/signed включаются
+    опцией и могут не влезть в 16 КБ;
+  - G4: boot 20 КБ, слоты по 48 КБ, meta 4 КБ, backup 4 КБ, NVS 4 КБ;
   - `bootloader_fw`, `phase3_slot` (адрес слота A), VTOR;
   - `BootOps` F4/G4: проверка SP/вектора, VTOR, MSP, переход.
 - [x] PVD/brown-out F1/F4/G4:
@@ -38,15 +39,50 @@
   - SHA-256/CRC32, `--resume`, `--activate`, `--verify`.
 - [x] Тесты mcflash: pack/unpack/коррупция/кадр.
 
+## Power-loss компакция meta
+
+`SlotStore`/`MetaJournal` поддерживают второй регион backup. Компакция:
+
+1. пишет снимок актуальных записей в backup;
+2. только после успешной записи стирает primary;
+3. после успешной записи primary очищает backup.
+
+Обрыв питания в любом окне оставляет либо primary, либо backup; при старте
+`MetaJournal::scan()` при повреждённом primary читает backup. Тест
+`tests/test_ota_meta.cpp` искусственно обрывает запись после `erase(primary)`.
+
+F4: primary — сектор 1, backup — 16 КБ в секторе 11 (слот B уменьшен до 384 КБ).
+G4: primary 4 КБ, backup 4 КБ, слоты по 48 КБ, NVS 4 КБ.
+F1: backup выключен из-за нехватки места (`MCFRAME_META_BACKUP=0`); на F1
+flat OTA нет, на F1 slot остаётся только append-журнал без backup.
+
+## Политика безопасности загрузчика
+
+Политика выбирается явно, а не «молчаливым» флагом:
+
+```bash
+-DMCFRAME_BOOT_SECURITY=crc     # CRC32 + вектор
+-DMCFRAME_BOOT_SECURITY=sha     # CRC32 + SHA-256, если он записан
+-DMCFRAME_BOOT_SECURITY=signed  # sha + обязательный kRecFlagSignOk
+```
+
+- `signed` не реализует криптографию в загрузчике: загрузчик доверяет только
+  флагу, который OTA-приём выставил после `ota::Config::verify_signature`.
+  Поэтому `signed` требует, чтобы приложение действительно настроило
+  верификатор и `require_signature=true`;
+- F4 по умолчанию `crc` из-за 16-КБ сектора; это **явно** печатается в
+  configure. `sha`/`signed` можно включить, но нужно проверить размер;
+- F1/G4 по умолчанию `sha`.
+
 ## Проверка
 
 ```text
-mock tests      28/28
+mock tests      30/30
 NVS             74/74
 mcflash tests   3/3
 F4/G4 build     OK
 F1 build        OK
-C3 build        OK (0xeea90, слот 1.25 МБ, 0x51570 свободно, 25%)
+C3 build        OK (0xf1a40, слот 1.25 МБ, 0x4e5c0 свободно, 25%)
 ```
 
 ## Ограничения
@@ -55,9 +91,9 @@ C3 build        OK (0xeea90, слот 1.25 МБ, 0x51570 свободно, 25%)
   C3 использует HTTPS OTA через `esp_https_ota`, а не MOLP-сервер.
 - OTA TLS на C3 привязан к **ISRG Root X1** (Let's Encrypt). Сервер с другим
   CA потребует заменить `isrg_root_x1.hpp`.
-- NVS на STM32: G4 — 4 КБ (flat и slot); F1 flat — 4 КБ (образ 124 КБ);
-  F1 slot — 0 (128 КБ заняты); F4 — meta 16 КБ (сектор 1), NVS 32 КБ (секторы
-  2-3 по 16 КБ). Внешнее хранилище — через `hal::INvs`.
-- C3 `mcframe_c3.bin` занимает 0xeea90 из 1.25 МБ (0x51570, ~25% запаса).
+- NVS на STM32: G4 — 4 КБ (flat и slot, слоты 48 КБ); F1 flat — 2 КБ NVS + 2 КБ meta
+  (образ 124 КБ); F1 slot — 0 (128 КБ заняты); F4 — meta 16 КБ (сектор 1),
+  backup 16 КБ (сектор 11), NVS 32 КБ (секторы 2-3 по 16 КБ). Внешнее хранилище — через `hal::INvs`.
+- C3 `mcframe_c3.bin` занимает 0xf1a40 из 1.25 МБ (0x4e5c0, ~25% запаса).
 - Реального HIL нет: проверки NVS/Flash/OTA — на моделях и сборке, PVD —
   только сборка.

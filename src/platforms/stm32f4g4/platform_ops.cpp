@@ -24,6 +24,32 @@ extern uint32_t _estack[];
 
 namespace embed::platform {
 namespace {
+uint32_t power_caps_stub() noexcept { return 0u; }
+uint32_t power_sysclk_stub() noexcept { return SystemCoreClock; }
+uint32_t power_profile_stub(uint32_t) noexcept { return 0u; }
+uint32_t power_horizon_stub() noexcept { return 0u; }
+uint32_t power_granularity_stub() noexcept { return 0u; }
+uint32_t power_deep_sleep_stub(uint32_t) noexcept { return 0u; }
+uint32_t wd_caps_stub() noexcept { return 0u; }
+uint32_t wd_closest_stub(uint32_t) noexcept { return 0u; }
+bool wd_start_stub(uint32_t) noexcept { return false; }
+void wd_kick_stub() noexcept {}
+bool wd_stop_stub() noexcept { return false; }
+bool wd_note_write_stub(uint32_t, uint16_t) noexcept { return false; }
+uint16_t wd_note_read_stub(uint32_t) noexcept { return 0u; }
+uint32_t wd_reset_cause_stub() noexcept { return 0u; }
+} // namespace
+
+// Слабые заглушки: загрузчик не тянет power/watchdog. Приложение F4/G4
+// подключает power_m4.cpp, чьи сильные определения заменяют эти.
+__attribute__((weak)) PowerOps kPowerOps{&power_caps_stub, &power_sysclk_stub, &power_profile_stub,
+                   &power_horizon_stub, &power_granularity_stub,
+                   &power_deep_sleep_stub};
+__attribute__((weak)) WatchdogOps kWatchdogOps{&wd_caps_stub, &wd_closest_stub, &wd_start_stub,
+                         &wd_kick_stub, &wd_stop_stub, &wd_note_write_stub,
+                         &wd_note_read_stub, &wd_reset_cause_stub};
+
+namespace {
 
 constexpr uint32_t kTickClockHz = 1000u;
 constexpr uint32_t kSysTickMaxReload = 0x00FFFFFFu;
@@ -87,28 +113,6 @@ void platform_fault_enable() noexcept { arch::armv7m::fpu_enable(); }
 void platform_adc_bind(void (*)() noexcept) noexcept {}
 void platform_i2c_bind(void (*)() noexcept, void (*)() noexcept) noexcept {}
 void platform_log(const char*) noexcept {}
-
-// ── Заглушки подсистем: caps=0, self-test их не использует ──
-uint32_t power_caps() noexcept { return 0u; }
-uint32_t power_sysclk() noexcept { return SystemCoreClock; }
-uint32_t power_profile(uint32_t) noexcept { return 0u; }
-uint32_t power_horizon() noexcept { return 0u; }
-uint32_t power_granularity() noexcept { return 0u; }
-uint32_t power_deep_sleep(uint32_t) noexcept { return 0u; }
-const PowerOps kPowerOps{&power_caps, &power_sysclk, &power_profile,
-                         &power_horizon, &power_granularity, &power_deep_sleep};
-
-uint32_t wd_caps() noexcept { return 0u; }
-uint32_t wd_closest(uint32_t) noexcept { return 0u; }
-bool wd_start(uint32_t) noexcept { return false; }
-void wd_kick() noexcept {}
-bool wd_stop() noexcept { return false; }
-bool wd_note_write(uint32_t, uint16_t) noexcept { return false; }
-uint16_t wd_note_read(uint32_t) noexcept { return 0u; }
-uint32_t wd_reset_cause() noexcept { return 0u; }
-const WatchdogOps kWatchdogOps{&wd_caps, &wd_closest, &wd_start, &wd_kick,
-                               &wd_stop, &wd_note_write, &wd_note_read,
-                               &wd_reset_cause};
 
 uint32_t flash_caps() noexcept {
     return static_cast<uint32_t>(FlashCaps::Internal) |

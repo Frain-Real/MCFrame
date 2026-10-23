@@ -15,6 +15,10 @@
 // ---------------------------------------------------------------------------
 #pragma once
 
+#ifndef MCFRAME_CRC_SMALL
+#define MCFRAME_CRC_SMALL 0
+#endif
+
 #include "crypto_utils.hpp"
 
 #include <cstddef>
@@ -126,6 +130,23 @@ public:
         }
         const uint8_t* bytes = static_cast<const uint8_t*>(data);
 
+#if MCFRAME_CRC_SMALL
+        // Битовая версия без таблицы 1 КБ: нужна 16-КБ загрузчику F4.
+        for (Size i = 0; i < len; ++i) {
+            if constexpr (Reflected) {
+                c ^= bytes[i];
+                for (int b = 0; b < 8; ++b) {
+                    c = (c & 1u) ? ((c >> 1) ^ effective_poly()) : (c >> 1);
+                }
+            } else {
+                c ^= static_cast<uint32_t>(bytes[i]) << (width_bits - 8u);
+                for (int b = 0; b < 8; ++b) {
+                    c = (c & msb_mask()) ? ((c << 1) ^ effective_poly()) : (c << 1);
+                }
+            }
+            c &= mask();
+        }
+#else
         if constexpr (Reflected) {
             for (Size i = 0; i < len; ++i) {
                 c = (c >> 8) ^ static_cast<uint32_t>(table[(c ^ bytes[i]) & 0xFFu]);
@@ -137,6 +158,7 @@ public:
                          table[((c >> shift) ^ bytes[i]) & 0xFFu])) & mask();
             }
         }
+#endif
         return static_cast<Word>(c);
     }
 

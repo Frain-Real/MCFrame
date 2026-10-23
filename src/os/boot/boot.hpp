@@ -79,6 +79,7 @@ enum class Reason : uint8_t {
     /// поэтому считается попытка, и после нескольких неудач слот помечается
     /// негодным — чтобы устройство не перезагружалось вечно.
     FactoryImage   = 11u,
+    UnsignedImage  = 12u,  ///< подпись обязательна, но метка её не подтверждает
 };
 
 inline const char* reason_text(Reason r) noexcept {
@@ -95,6 +96,7 @@ inline const char* reason_text(Reason r) noexcept {
         case Reason::BadLayout:     return "bad-layout";
         case Reason::UpdatePending: return "update-pending";
         case Reason::FactoryImage:  return "factory-image";
+        case Reason::UnsignedImage:  return "unsigned-image";
     }
     return "?";
 }
@@ -111,6 +113,13 @@ struct Decision {
 
     bool can_load() const noexcept { return action == Action::Load; }
 };
+
+#ifndef MCFRAME_BOOT_VERIFY_HASH
+#define MCFRAME_BOOT_VERIFY_HASH 1
+#endif
+#ifndef MCFRAME_BOOT_REQUIRE_SIGNATURE
+#define MCFRAME_BOOT_REQUIRE_SIGNATURE 0
+#endif
 
 /// Настройка загрузчика.
 struct Config {
@@ -137,8 +146,15 @@ struct Config {
     /// испортился, а прыжок в испорченный образ — это отказ без диагностики.
     bool verify_crc = true;
 
-    /// Проверять SHA-256, если он записан вместе с образом.
-    bool verify_hash = true;
+    /// Проверять SHA-256, если он записан вместе с образом. Политика
+    /// MCFRAME_BOOT_SECURITY задаёт это на уровне сборки; поле можно
+    /// переопределить для конкретного Loader.
+    bool verify_hash = (MCFRAME_BOOT_VERIFY_HASH != 0);
+
+    /// Требовать, чтобы метка слота подтверждала проверенную подпись
+    /// (kRecFlagSignOk). Сама подпись проверяется при OTA-приёме; загрузчик
+    /// лишь не даёт обойти эту проверку. Политика signed включает это поле.
+    bool require_signature = (MCFRAME_BOOT_REQUIRE_SIGNATURE != 0);
 
     /// Подтверждение загрузки: сколько раз разрешено пытаться запустить
     /// активированную прошивку до отката. Значение должно совпадать с
@@ -162,7 +178,7 @@ struct Config {
     ///
     /// Выключайте, если устройство обязано грузить ТОЛЬКО то, что принято по
     /// OTA: тогда слот без метки не грузится.
-    bool allow_unrecorded_image = true;
+    bool allow_unrecorded_image = (MCFRAME_BOOT_REQUIRE_SIGNATURE == 0);
 
     /// Уведомление о решениях (для лога приложения-загрузчика).
     Callback_h on_event = nullptr;

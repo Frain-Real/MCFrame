@@ -58,6 +58,10 @@ public:
     virtual Status ep_write(uint8_t ep, const void* data, Size len) noexcept = 0;
     virtual Status ep_read(uint8_t ep, void* data, Size cap, Size& got) noexcept = 0;
     virtual void stall_ep0() noexcept = 0;
+
+    /// Применить адрес после status stage SET_ADDRESS. Контроллер может
+    /// игнорировать (mock); OTG FS обязан записать DCFG.
+    virtual Status set_address(uint8_t) noexcept { return Status::Ok; }
 };
 
 class Device;
@@ -101,24 +105,32 @@ public:
     Status setup(const Setup& s, const uint8_t* out = nullptr, Size out_len = 0u) noexcept {
         if (hal_ == nullptr || cls_ == nullptr) return Status::Unavailable;
 
+        ctrl_wlength_ = s.length;
         if (s.standard()) {
             switch (s.request) {
-                case 0x00: return Status::Ok;                 // GET_STATUS (0)
-                case 0x01: return Status::Ok;                 // CLEAR_FEATURE
-                case 0x03: return Status::Ok;                 // SET_FEATURE
-                case 0x05:                                    // SET_ADDRESS
+                case 0x00: return get_status(s);              // GET_STATUS
+                case 0x01: return status_ok();                // CLEAR_FEATURE
+                case 0x03: return status_ok();                // SET_FEATURE
+                case 0x05: {                                  // SET_ADDRESS
                     address_ = static_cast<uint8_t>(s.value & 0x7Fu);
-                    return Status::Ok;
+                    const Status st = status_ok();
+                    if (st == Status::Ok) {
+                        const Status a = hal_->set_address(address_);
+                        if (a != Status::Ok) return a;
+                    }
+                    return st;
+                }
                 case 0x06: return get_descriptor(s);
                 case 0x08: return get_configuration();
                 case 0x09:                                    // SET_CONFIGURATION
                     configured_ = (s.value != 0u);
                     if (configured_) cls_->configured();
-                    return Status::Ok;
-                case 0x0A: return Status::Ok;                 // GET_INTERFACE (0)
+                    return status_ok();
+                case 0x0A:                                    // GET_INTERFACE
+                    return get_interface(s);
                 case 0x0B:
                     cls_->set_interface(s.value);
-                    return Status::Ok;
+                    return status_ok();
                 default: break;
             }
         }
@@ -127,15 +139,19 @@ public:
             Size in_len = 0u;
             const Status st = cls_->control(s, out, out_len, in, in_len);
             if (st != Status::Ok) return st;
-            if (s.in() && in != nullptr && in_len > 0u) {
-                return ep0_reply(in, in_len);
+            if (s.in()) {
+                if (in != nullptr && in_len > 0u) return ep0_reply(in, in_len);
+                return status_ok();
             }
-            return Status::Ok;
+            return status_ok();
         }
         return Status::NotSupported;
     }
 
     Status ep0_reply(const void* data, Size len) noexcept {
+        // Контрольная IN-стадия не может быть длиннее wLength. Иначе хост
+        // получает лишние байты и ломает следующий setup.
+        if (len > ctrl_wlength_) len = ctrl_wlength_;
         last_len_ = (len > sizeof(last_)) ? sizeof(last_) : len;
         for (Size i = 0u; i < last_len_; ++i) last_[i] = static_cast<const uint8_t*>(data)[i];
         last_valid_ = true;
@@ -147,6 +163,22 @@ public:
     void clear_response() noexcept { last_valid_ = false; last_len_ = 0u; }
 
 private:
+    Status status_ok() noexcept { return hal_->ep0_write(nullptr, 0u); }
+
+    Status get_status(const Setup& s) noexcept {
+        // Для интерфейса/endpoint статус — два нуля. Для самого устройства
+        // бит self-powered не заявляем (0), remote wakeup выключен.
+        (void)s;
+        static const uint8_t st[2] = {0u, 0u};
+        return ep0_reply(st, sizeof(st));
+    }
+
+    Status get_interface(const Setup& s) noexcept {
+        (void)s;
+        static const uint8_t alt = 0u;
+        return ep0_reply(&alt, 1u);
+    }
+
     Status get_descriptor(const Setup& s) noexcept {
         const uint8_t type = static_cast<uint8_t>(s.value >> 8);
         if (type == 1u) {                                   // DEVICE
@@ -159,10 +191,23 @@ private:
         }
         if (type == 3u) {                                   // STRING
             static const uint8_t lang[4] = {4u, 3u, 0x09u, 0x04u};
-            static const uint8_t prod[] = {24u, 3u, 'M',0,'C',0,'F',0,'r',0,'a',0,'m',0,'e',0,' ',0,'U',0,'S',0,'B',0};
-            if ((s.value & 0xFFu) == 0u) return ep0_reply(lang, sizeof(lang));
-            if ((s.value & 0xFFu) == 1u) return ep0_reply(prod, sizeof(prod));
-            return Status::NotFound;
+            static const uint8_t manufacturer[] = {
+                16u, 3u, 'M',0,'C',0,'F',0,'r',0,'a',0,'m',0,'e',0
+            };
+            static const uint8_t product[] = {
+                24u, 3u, 'M',0,'C',0,'F',0,'r',0,'a',0,'m',0,'e',0,' ',0,
+                'U',0,'S',0,'B',0
+            };
+            static const uint8_t serial[] = {
+                10u, 3u, '0',0,'0',0,'0',0,'1',0
+            };
+            switch (s.value & 0xFFu) {
+                case 0u: return ep0_reply(lang, sizeof(lang));
+                case 1u: return ep0_reply(manufacturer, sizeof(manufacturer));
+                case 2u: return ep0_reply(product, sizeof(product));
+                case 3u: return ep0_reply(serial, sizeof(serial));
+                default: return Status::NotFound;
+            }
         }
         return Status::NotSupported;
     }
@@ -177,9 +222,37 @@ private:
     DeviceDescriptor dd_{};
     bool    configured_ = false;
     uint8_t address_ = 0u;
+    uint16_t ctrl_wlength_ = 0u;
     uint8_t last_[256]{};
     Size    last_len_ = 0u;
     bool    last_valid_ = false;
+};
+
+/// Связка Device + Hal для контроллера, который отдаёт setup-callback
+/// (STM32 OTG FS). Callback сам отправляет ответ/status и STALL-ит EP0 при
+/// неподдержанном запросе.
+class Port {
+public:
+    Port(Hal& hal, Class& cls, const DeviceDescriptor& dd = DeviceDescriptor{}) noexcept
+        : hal_(&hal) {
+        (void)device_.init(hal, cls, dd);
+    }
+
+    Device& device() noexcept { return device_; }
+    Hal& hal() noexcept { return *hal_; }
+
+    static void on_setup(void* ctx, const Setup& s,
+                         const uint8_t* out, Size out_len) noexcept {
+        auto* p = static_cast<Port*>(ctx);
+        if (p == nullptr) return;
+        if (p->device_.setup(s, out, out_len) != Status::Ok) {
+            p->hal_->stall_ep0();
+        }
+    }
+
+private:
+    Hal* hal_ = nullptr;
+    Device device_{};
 };
 
 } // namespace embed::usb

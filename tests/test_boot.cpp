@@ -683,6 +683,35 @@ void test_layout_guard() {
                        L().stats().jumps - jumps_before, 0u);
 }
 
+
+void test_signature_policy() {
+    (void)std::puts("политика подписи:");
+
+    const Config base = make_cfg();
+    reset_world(base);
+    const uint32_t crc = place_image(0u, 23u);
+    put_record(0u, ota::proto::State::Verified, crc);
+
+    Config signed_cfg = base;
+    signed_cfg.require_signature = true;
+    signed_cfg.allow_unrecorded_image = false;
+    check("signed config accepted", L().init(signed_cfg) == Status::Ok);
+
+    Decision d{};
+    check("unsigned record rejected", L().evaluate(d) == Status::Ok &&
+          d.action == Action::Stay && d.reason == Reason::UnsignedImage);
+
+    ota::SlotRecord rec{};
+    check("record still readable", g_store.load(0u, rec) == Status::Ok);
+    rec.state = static_cast<uint8_t>(ota::proto::State::Verified);
+    rec.flags |= ota::kRecFlagSignOk;
+    check("mark signed record", g_store.store(0u, rec) == Status::Ok);
+
+    check("reinit signed", L().init(signed_cfg) == Status::Ok);
+    check("signed record loads", L().evaluate(d) == Status::Ok && d.can_load() &&
+          d.slot == 0u);
+}
+
 } // namespace
 
 int main() {
@@ -710,6 +739,7 @@ int main() {
     test_window_and_hash();
     test_unrecorded_image();
     test_layout_guard();
+    test_signature_policy();
 
     (void)std::printf("\nвсего проверок: %d, провалов: %d\n", g_total, g_failed);
     if (g_failed != 0) (void)std::puts("FAIL");

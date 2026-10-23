@@ -51,9 +51,19 @@ struct BleGattChar {
 
 struct BleGattService {
     BleUuid      uuid{};
+    uint16_t     start_handle = 0u;
+    uint16_t     end_handle = 0u;
     BleGattChar  chars[4]{};
     uint8_t      count = 0u;
 };
+
+using BleGattServiceCallback = void (*)(void* ctx, const BleGattService& svc);
+using BleGattCharCallback = void (*)(void* ctx, const BleGattChar& chr);
+using BleGattReadCallback = void (*)(void* ctx, uint16_t handle, Status st,
+                                     const void* data, Size len);
+using BleGattWriteCallback = void (*)(void* ctx, uint16_t handle, Status st);
+using BleGattNotifyCallback = void (*)(void* ctx, uint16_t handle,
+                                       const void* data, Size len);
 
 using BleWriteCallback = void (*)(void* ctx, uint16_t attr_handle,
                                   const void* data, Size len);
@@ -103,6 +113,36 @@ public:
     }
     virtual Status on_write(BleWriteCallback cb, void* ctx) noexcept {
         (void)cb; (void)ctx; return Status::NotSupported;
+    }
+    /// GATT client: discovery сервисов (характеристики — по handle).
+    virtual Status discover_services(uint16_t conn,
+                                     BleGattServiceCallback cb, void* ctx) noexcept {
+        (void)conn; (void)cb; (void)ctx; return Status::NotSupported;
+    }
+    virtual Status discover_chars(uint16_t conn, uint16_t start_handle,
+                                  uint16_t end_handle, BleGattCharCallback cb,
+                                  void* ctx) noexcept {
+        (void)conn; (void)start_handle; (void)end_handle; (void)cb; (void)ctx;
+        return Status::NotSupported;
+    }
+    virtual Status read_char(uint16_t conn, uint16_t handle,
+                             BleGattReadCallback cb, void* ctx) noexcept {
+        (void)conn; (void)handle; (void)cb; (void)ctx; return Status::NotSupported;
+    }
+    virtual Status write_char(uint16_t conn, uint16_t handle,
+                              const void* data, Size len, bool with_response,
+                              BleGattWriteCallback cb, void* ctx) noexcept {
+        (void)conn; (void)handle; (void)data; (void)len; (void)with_response;
+        (void)cb; (void)ctx;
+        return Status::NotSupported;
+    }
+    /// Включить/выключить notify через CCCD (0x2902). Колбэк получает кадры
+    /// BLE_GAP_EVENT_NOTIFY_RX; discovery CCCD выполняется асинхронно.
+    virtual Status subscribe_notify(uint16_t conn, uint16_t char_handle,
+                                    bool enable, BleGattNotifyCallback cb,
+                                    void* ctx) noexcept {
+        (void)conn; (void)char_handle; (void)enable; (void)cb; (void)ctx;
+        return Status::NotSupported;
     }
     virtual uint32_t caps() const noexcept = 0;
 };

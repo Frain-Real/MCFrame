@@ -12,6 +12,7 @@
 #include "hal/INvs.hpp"
 #include "hal/INetwork.hpp"
 #include "os/net/socket.hpp"
+#include "os/net/tls.hpp"
 #include "hal/IBle.hpp"
 
 #ifndef BOARD_LED_GPIO
@@ -43,6 +44,7 @@ using Gpio    = embed::hal::IGpioPin;
 using Nvs     = embed::hal::INvs;
 using Network = embed::hal::INetwork;
 using Sockets = embed::net::Factory;
+using Tls     = embed::net::TlsFactoryT<4>;
 using Ble     = embed::hal::IBle;
 
 Uart& uart1() noexcept;
@@ -54,6 +56,7 @@ Pwm& pwm1() noexcept;
 Nvs& nvs() noexcept;
 Network& wifi() noexcept;
 Sockets& sockets() noexcept;
+Tls& tls() noexcept;
 Ble& ble() noexcept;
 
 void init() noexcept;

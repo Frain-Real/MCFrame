@@ -27,7 +27,7 @@ bool parse_url(const char* url, Url& out) noexcept {
     while (*p != '\0' && *p != ':' && *p != '/') ++p;
     if (!copy_span(out.host, sizeof(out.host), host_begin, p)) return false;
 
-    out.port = 80u;
+    out.port = out.tls ? 443u : 80u;
     if (*p == ':') {
         ++p;
         uint32_t port = 0u;
