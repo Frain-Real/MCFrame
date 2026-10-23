@@ -181,6 +181,13 @@ jobs:
           toolchain: nightly-2026-07-22
           components: rust-src
 
+      - name: ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib
+
       - name: Host Rust link + tests
         run: |
           ./build.sh mock Release -DMCFRAME_RUST_APP=ON

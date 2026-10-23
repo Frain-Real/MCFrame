@@ -55,7 +55,9 @@ if [[ "${TARGET}" == "esp32c3" ]]; then
         echo "Phase 0: riscv32-esp-elf-gcc не найден — C3 stub на host-компиляторе." >&2; }
 elif [[ "${TARGET}" != "mock" ]]; then
     command -v arm-none-eabi-gcc >/dev/null 2>&1 || {
-        echo "Не найден arm-none-eabi-gcc" >&2; exit 1; }
+        echo "Не найден arm-none-eabi-gcc" >&2
+        echo "Ubuntu/Debian: sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib" >&2
+        exit 1; }
 
     # LTO нужен только для реальных ARM-прошивок; Phase 0 stub F4/G4 не
     # линкуется, поэтому gcc-ar для них пока не требуется.
