@@ -270,6 +270,19 @@ void UsbFsG4Hal::stall_ep0() noexcept {
     USB_REG(kEp0r) = e;
 }
 
+Status UsbFsG4Hal::suspend() noexcept {
+    if (!inited_) return Status::Unavailable;
+    USB_REG(kCntr) |= (1u << 3);           // FSUSP
+    return Status::Ok;
+}
+Status UsbFsG4Hal::resume() noexcept {
+    if (!inited_) return Status::Unavailable;
+    USB_REG(kCntr) &= static_cast<uint16_t>(~(1u << 3));  // clear FSUSP
+    USB_REG(kCntr) |= (1u << 4);           // RESUME
+    USB_REG(kCntr) &= static_cast<uint16_t>(~(1u << 4));
+    return Status::Ok;
+}
+
 Status UsbFsG4Hal::set_address(uint8_t address) noexcept {
     if (!inited_) return Status::Unavailable;
     pending_address_ = static_cast<uint8_t>(address & 0x7Fu);

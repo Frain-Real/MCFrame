@@ -20,7 +20,27 @@ public:
     static constexpr uint8_t kEpOut = 0x01u;
     static constexpr uint8_t kEpIn  = 0x82u;
 
-    explicit Msc(BlockDevice& dev) noexcept : dev_(&dev) {}
+    explicit Msc(BlockDevice& dev) noexcept : dev_(&dev) {
+        for (Size i = 0u; i < sizeof(config_); ++i) config_[i] = kConfig_[i];
+    }
+
+    Status remap_endpoint(uint8_t from, uint8_t to) noexcept override {
+        if (from == 0u || to == 0u) return Status::InvalidArg;
+        bool found = false;
+        for (Size i = 0u; i < sizeof(config_); ) {
+            const uint8_t blen = config_[i];
+            if (blen < 2u || i + blen > sizeof(config_)) return Status::Corruption;
+            if (config_[i + 1u] == 5u && blen >= 7u && config_[i + 2u] == from) {
+                config_[i + 2u] = to;
+                found = true;
+            }
+            i += blen;
+        }
+        if (!found) return Status::NotFound;
+        if (from == kEpOut) ep_out_ = to;
+        if (from == kEpIn) ep_in_ = to;
+        return Status::Ok;
+    }
 
     const uint8_t* config_descriptor(Size& len) const noexcept override {
         len = sizeof(config_);
@@ -110,7 +130,7 @@ public:
         put32(csw + 4u, tag);
         put32(csw + 8u, residue);
         csw[12] = status;
-        (void)hal.ep_write(kEpIn, csw, sizeof(csw));
+        (void)hal.ep_write(ep_in_, csw, sizeof(csw));
         (void)flags;
         last_status_ = status;
         return st;
@@ -123,7 +143,7 @@ private:
                      uint32_t& residue) noexcept {
         Size n = len;
         if (n > dlen) n = dlen;
-        const Status st = hal.ep_write(kEpIn, data, n);
+        const Status st = hal.ep_write(ep_in_, data, n);
         residue = dlen - static_cast<uint32_t>(n);
         return st;
     }
@@ -157,7 +177,11 @@ private:
         p[3] = static_cast<uint8_t>(v >> 24);
     }
 
-    static constexpr uint8_t config_[32] = {
+    uint8_t config_[32]{};
+    uint8_t ep_out_ = kEpOut;
+    uint8_t ep_in_ = kEpIn;
+
+    static constexpr uint8_t kConfig_[32] = {
         9u, 2u, 32u, 0u, 1u, 1u, 0u, 0x80u, 50u,
         9u, 4u, 0u, 0u, 2u, 8u, 6u, 0x50u, 0u,
         7u, 5u, kEpOut, 2u, 64u, 0u, 0u,

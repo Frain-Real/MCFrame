@@ -10,11 +10,35 @@ class Acm final : public Class {
 public:
     static constexpr uint8_t kEpOut = 0x01u;
     static constexpr uint8_t kEpIn  = 0x82u;
+    static constexpr uint8_t kEpNotify = 0x81u;
     static constexpr Size kBuffer = 256u;
+
+    Acm() noexcept {
+        for (Size i = 0u; i < sizeof(config_); ++i) config_[i] = kConfig_[i];
+    }
 
     const uint8_t* config_descriptor(Size& len) const noexcept override {
         len = sizeof(config_);
         return config_;
+    }
+
+    Status remap_endpoint(uint8_t from, uint8_t to) noexcept override {
+        if (from == 0u || to == 0u) return Status::InvalidArg;
+        bool found = false;
+        for (Size i = 0u; i < sizeof(config_); ) {
+            const uint8_t blen = config_[i];
+            if (blen < 2u || i + blen > sizeof(config_)) return Status::Corruption;
+            if (config_[i + 1u] == 5u && blen >= 7u && config_[i + 2u] == from) {
+                config_[i + 2u] = to;
+                found = true;
+            }
+            i += blen;
+        }
+        if (!found) return Status::NotFound;
+        if (from == kEpOut) ep_out_ = to;
+        if (from == kEpIn) ep_in_ = to;
+        if (from == kEpNotify) ep_notify_ = to;
+        return Status::Ok;
     }
 
     Status control(const Setup& s, const uint8_t* out, Size out_len,
@@ -56,7 +80,7 @@ public:
 
     /// Передать данные устройству->хост. Возврат — сколько принято.
     Status write(Hal& hal, const void* data, Size len, Size& sent) noexcept {
-        const Status st = hal.ep_write(kEpIn, data, len);
+        const Status st = hal.ep_write(ep_in_, data, len);
         sent = (st == Status::Ok) ? len : 0u;
         return st;
     }
@@ -75,18 +99,22 @@ public:
 
     /// Отправить class notification (serial state) на EP 0x81.
     Status notify(Hal& hal, uint16_t state) noexcept {
-        static constexpr uint8_t kEpNotify = 0x81u;
         uint8_t b[10] = {0xA1u, 0x20u, 0x00u, 0x00u, 0x00u, 0x00u, 0x02u, 0x00u,
                          static_cast<uint8_t>(state & 0xFFu),
                          static_cast<uint8_t>(state >> 8)};
-        return hal.ep_write(kEpNotify, b, sizeof(b));
+        return hal.ep_write(ep_notify_, b, sizeof(b));
     }
 
     uint16_t line_state() const noexcept { return line_state_; }
     const uint8_t* line_coding() const noexcept { return line_; }
 
 private:
-    static constexpr uint8_t config_[67] = {
+    uint8_t config_[67]{};
+    uint8_t ep_out_ = kEpOut;
+    uint8_t ep_in_ = kEpIn;
+    uint8_t ep_notify_ = kEpNotify;
+
+    static constexpr uint8_t kConfig_[67] = {
         9u, 2u, 67u, 0u, 2u, 1u, 0u, 0x80u, 50u,
         9u, 4u, 0u, 0u, 2u, 2u, 1u, 0u, 0u,
         5u, 0x24u, 0x00u, 0x10u, 0x01u,

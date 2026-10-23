@@ -4,6 +4,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "host/ble_gatt.h"
+#include "host/ble_uuid.h"
 
 struct ble_gap_event;
 struct ble_gatt_access_ctxt;
@@ -57,6 +59,7 @@ public:
                       bool with_response, BleGattWriteCallback cb, void* ctx) noexcept override;
     Status subscribe_notify(uint16_t conn, uint16_t char_handle, bool enable,
                             BleGattNotifyCallback cb, void* ctx) noexcept override;
+    Status set_value(uint16_t handle, const void* data, Size len) noexcept override;
     uint32_t caps() const noexcept override;
 
 private:
@@ -65,6 +68,8 @@ private:
     static int gap_event(::ble_gap_event* event, void* arg);
     static int gatt_access(uint16_t conn, uint16_t attr,
                            ::ble_gatt_access_ctxt* ctxt, void* arg);
+    static int custom_access(uint16_t conn, uint16_t attr,
+                             ::ble_gatt_access_ctxt* ctxt, void* arg);
     static int svc_disc_cb(uint16_t conn, const struct ble_gatt_error* err,
                            const struct ble_gatt_svc* svc, void* arg);
     static int chr_disc_cb(uint16_t conn, const struct ble_gatt_error* err,
@@ -102,6 +107,23 @@ private:
     void* read_ctx_ = nullptr;
     BleGattWriteCallback gatt_write_cb_ = nullptr;
     void* gatt_write_ctx_ = nullptr;
+
+    struct CustomChar {
+        ble_uuid_any_t uuid{};
+        uint8_t value[32]{};
+        uint8_t len = 0u;
+        uint16_t handle = 0u;
+    };
+    struct CustomService {
+        ble_uuid_any_t uuid{};
+        CustomChar chars[4]{};
+        ble_gatt_chr_def defs[5]{};
+        ble_gatt_svc_def svc[2]{};
+        bool used = false;
+    };
+    static constexpr uint8_t kMaxCustomServices = 4u;
+    CustomService custom_[kMaxCustomServices]{};
+    uint8_t custom_count_ = 0u;
     char ssid_[33]{};
     char pass_[65]{};
     QueueHandle_t queue_ = nullptr;

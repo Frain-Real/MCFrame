@@ -62,6 +62,9 @@ public:
     /// Применить адрес после status stage SET_ADDRESS. Контроллер может
     /// игнорировать (mock); OTG FS обязан записать DCFG.
     virtual Status set_address(uint8_t) noexcept { return Status::Ok; }
+    /// Опционально: перевести контроллер в suspend/resume.
+    virtual Status suspend() noexcept { return Status::NotSupported; }
+    virtual Status resume() noexcept { return Status::NotSupported; }
 };
 
 class Device;
@@ -81,6 +84,16 @@ public:
 
     virtual void configured() noexcept {}
     virtual void set_interface(uint16_t) noexcept {}
+    virtual void suspended() noexcept {}
+    virtual void resumed() noexcept {}
+
+    /// Переназначить endpoint (для composite, когда адреса классов
+    /// пересекаются). Реализация обязана обновить свой descriptor и
+    /// внутренние ep-поля. По умолчанию не поддержано.
+    virtual Status remap_endpoint(uint8_t from, uint8_t to) noexcept {
+        (void)from; (void)to;
+        return Status::NotSupported;
+    }
 };
 
 class Device {
@@ -98,7 +111,29 @@ public:
 
     Hal& hal() noexcept { return *hal_; }
     bool configured() const noexcept { return configured_; }
+    bool suspended() const noexcept { return suspended_; }
     uint8_t address() const noexcept { return address_; }
+
+    /// Приложение/контроллер сообщает о suspend/resume шины. Классы получают
+    /// уведомление, контроллер может уснуть/проснуться.
+    Status suspend() noexcept {
+        if (hal_ == nullptr || cls_ == nullptr) return Status::Unavailable;
+        if (!suspended_) {
+            suspended_ = true;
+            cls_->suspended();
+        }
+        const Status st = hal_->suspend();
+        return (st == Status::NotSupported) ? Status::Ok : st;
+    }
+    Status resume() noexcept {
+        if (hal_ == nullptr || cls_ == nullptr) return Status::Unavailable;
+        if (suspended_) {
+            suspended_ = false;
+            cls_->resumed();
+        }
+        const Status st = hal_->resume();
+        return (st == Status::NotSupported) ? Status::Ok : st;
+    }
 
     /// Обработать setup-пакет. Для IN-запроса ответ уже отправлен через
     /// Hal::ep0_write и доступен в last_response().
@@ -221,6 +256,7 @@ private:
     Class* cls_ = nullptr;
     DeviceDescriptor dd_{};
     bool    configured_ = false;
+    bool    suspended_ = false;
     uint8_t address_ = 0u;
     uint16_t ctrl_wlength_ = 0u;
     uint8_t last_[256]{};
@@ -240,6 +276,8 @@ public:
 
     Device& device() noexcept { return device_; }
     Hal& hal() noexcept { return *hal_; }
+    Status suspend() noexcept { return device_.suspend(); }
+    Status resume() noexcept { return device_.resume(); }
 
     static void on_setup(void* ctx, const Setup& s,
                          const uint8_t* out, Size out_len) noexcept {

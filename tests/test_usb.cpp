@@ -50,6 +50,10 @@ public:
     uint32_t writes = 0u;
     bool stalled = false;
     uint8_t address = 0xFFu;
+    uint32_t suspends = 0u;
+    uint32_t resumes = 0u;
+    Status suspend() noexcept override { ++suspends; return Status::Ok; }
+    Status resume() noexcept override { ++resumes; return Status::Ok; }
 };
 
 usb::Setup mk(uint8_t type, uint8_t req, uint16_t value = 0u,
@@ -96,6 +100,9 @@ void test_core_cdc() {
     check("GET_DESCRIPTOR string manufacturer",
           dev.setup(mk(0x80, 6, 0x0301, 0x0409, 64)) == Status::Ok &&
           hal.ep0_len == 16u && hal.ep0[2] == 'M');
+    check("suspend/resume", dev.suspend() == Status::Ok && dev.suspended() &&
+          hal.suspends == 1u && dev.resume() == Status::Ok && !dev.suspended() &&
+          hal.resumes == 1u);
     check("GET_DESCRIPTOR string product",
           dev.setup(mk(0x80, 6, 0x0302, 0x0409, 64)) == Status::Ok &&
           hal.ep0_len == 24u && hal.ep0[18] == 'U');
@@ -166,6 +173,8 @@ void test_composite() {
           hal.ep0_len == 64u && hal.ep0[4] == 3u);   // 3 interfaces
     check("SET_CONFIGURATION composite",
           dev.setup(mk(0x00, 9, 1)) == Status::Ok && comp.is_configured());
+    check("composite suspend/resume", dev.suspend() == Status::Ok &&
+          dev.suspended() && dev.resume() == Status::Ok && !dev.suspended());
     check("DFU class request index 2",
           dev.setup(mk(0xA1, 5, 0, 2, 1)) == Status::Ok && hal.ep0_len == 1u);
     uint8_t line[7] = {0x00, 0xC2u, 0x01u, 0x00, 0x00, 0x00, 0x08u};
@@ -173,6 +182,41 @@ void test_composite() {
           dev.setup(mk(0x21, 0x20, 0, 0, 7), line, sizeof(line)) == Status::Ok);
 }
 
+
+void test_composite_msc() {
+    std::puts("USB composite CDC+MSC:");
+    MockHal hal;
+    usb::cdc::Acm acm;
+    RamBlock block;
+    usb::msc::Msc msc(block);
+    usb::Class* kids[] = {&acm, &msc};
+    usb::Composite<3> comp(kids, 2u);
+    usb::Device dev;
+    check("CDC+MSC composite init", dev.init(hal, comp) == Status::Ok);
+    check("CDC+MSC descriptor", comp.descriptor_length() >= 90u);
+    Size n = 0u;
+    const uint8_t* d = comp.config_descriptor(n);
+    bool ep_out[16]{}, ep_in[16]{}, unique = true;
+    for (Size pos = 9u; d != nullptr && pos + 2u <= n; ) {
+        const uint8_t blen = d[pos];
+        if (blen < 2u || pos + blen > n) { unique = false; break; }
+        if (d[pos + 1u] == 5u && blen >= 7u) {
+            const uint8_t ep = d[pos + 2u];
+            bool& slot = (ep & 0x80u) ? ep_in[ep & 0x0Fu] : ep_out[ep & 0x0Fu];
+            if (slot) unique = false;
+            slot = true;
+        }
+        pos += blen;
+    }
+    check("CDC+MSC endpoints remapped", unique && ep_out[1] && ep_out[2] &&
+          ep_in[1] && ep_in[2] && ep_in[3]);
+    uint8_t cbw[31]{};
+    cbw[0] = 0x55u; cbw[1] = 0x53u; cbw[2] = 0x42u; cbw[3] = 0x43u;
+    cbw[4] = 1u; cbw[8] = 0u; cbw[12] = 0x80u; cbw[14] = 6u;
+    cbw[15] = 0x00u;    // TEST UNIT READY
+    check("MSC uses remapped IN", msc.handle_cbw(cbw, sizeof(cbw), hal) == Status::Ok &&
+          hal.ep == 0x83u);
+}
 
 void test_dfu_storage() {
     std::puts("USB DFU to flash:");
@@ -247,6 +291,9 @@ void test_rndis() {
     eth[0] = 0xFFu;
     check("RNDIS device frame", rndis.send_frame(eth, sizeof(eth)) == Status::Ok);
     check("RNDIS flush", rndis.flush(hal) == 1u && hal.ep == 0x83u);
+    for (uint8_t i = 0u; i < 4u; ++i) (void)rndis.receive(pkt, sizeof(pkt));
+    check("RNDIS backpressure", rndis.receive(pkt, sizeof(pkt)) == Status::NoMemory &&
+          rndis.rx_dropped() == 1u && rndis.rx_count() == 4u);
 }
 
 void test_msc() {
@@ -299,6 +346,7 @@ int main() {
     test_dfu();
     test_msc();
     test_composite();
+    test_composite_msc();
     test_dfu_storage();
     test_cdc_transport();
     test_rndis();

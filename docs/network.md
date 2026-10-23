@@ -136,8 +136,8 @@ client.init(net, mqtt_cfg);
 - CS/SPI/reset/INT — из платы;
 - сокеты 0..5 — приложению, 6 — DNS, 7 — DHCP; слотов до 6;
 - драйвер не привязан к STM32 и тестируется на модели W5500
-  (`tests/test_w5500.cpp`, 21 проверка: SPI, link, IRQ, DHCP/DNS parsers,
-  TCP listen/accept).
+  (`tests/test_w5500.cpp`, 22 проверки: SPI, link, IRQ, DHCP/DNS parsers,
+  DHCP renew, TCP listen/accept); `test_net` — 60 проверок.
 
 ### W5500 HIL
 
@@ -195,3 +195,16 @@ RNDIS-кадрах. DHCP/ARP/TCP на реальном USB-хосте — HIL-з
 CONNACK/SUBACK/PUBLISH (QoS0/1/2), LWT, reconnect, TLS-фабрика через
 fake-provider, TCP shell, HTTP-ответ с Content-Length, SNTP-пакет. Проверяются заголовки,
 разбор, таймауты и отсутствие лишних аллокаций.
+
+
+## DHCP lease renewal и Listener
+
+- [`dhcp.hpp`](../src/os/net/dhcp.hpp) — кодек + `DhcpClient` поверх любого
+  UDP-сокета; `W5500Factory::dhcp_poll()` делает T1-renew и сообщает
+  `Timeout` по истечении lease.
+- [`dns.hpp`](../src/os/net/dns.hpp) — A-record кодек, общий для W5500/RNDIS.
+- [`socket.hpp`](../src/os/net/socket.hpp) — `net::Listener` с явным
+  `open()/accept()/rearm()/close()`; W5500-слушатель после accepted-соединения
+  требует `rearm()`.
+- [`rndis_lwip.hpp`](../src/os/net/rndis_lwip.hpp) — RNDIS как lwIP netif
+  (lwIP владеет TCP/IP; `RndisFactory` остаётся вариантом без lwIP).

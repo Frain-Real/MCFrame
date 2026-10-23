@@ -105,9 +105,41 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "" FORCE)
 endif()
 
+set(MCFRAME_RNDIS_RX_DEPTH "4" CACHE STRING "RNDIS RX packet queue depth")
+set(MCFRAME_RNDIS_TX_DEPTH "4" CACHE STRING "RNDIS TX packet queue depth")
+set(MCFRAME_RNDIS_FACTORY_SOCKETS "4" CACHE STRING "RNDIS net::Factory sockets")
+set_property(CACHE MCFRAME_RNDIS_RX_DEPTH PROPERTY STRINGS 1 2 4 8 16)
+set_property(CACHE MCFRAME_RNDIS_TX_DEPTH PROPERTY STRINGS 1 2 4 8 16)
+set_property(CACHE MCFRAME_RNDIS_FACTORY_SOCKETS PROPERTY STRINGS 1 2 4 6 8)
+
 option(MCFRAME_SANITIZE "ASan/UBSan для host-тестов (mock)" OFF)
 option(MCFRAME_FUZZ "Собрать libFuzzer-цели (Clang)" OFF)
 option(MCFRAME_COVERAGE "Инструментация покрытия host-тестов" OFF)
+# mbedTLS: встроенный submodule third_party/mbedtls. Для F4/G4 включён по
+# умолчанию; F1 не тянет (20 КБ RAM), C3 использует mbedTLS из ESP-IDF.
+if(NOT DEFINED MCFRAME_MBEDTLS)
+    set(_mcframe_tls_default OFF)
+    if((MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4") AND
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/CMakeLists.txt")
+        find_package(Python3 QUIET COMPONENTS Interpreter)
+        if(Python3_Interpreter_FOUND)
+            execute_process(
+                COMMAND "${Python3_EXECUTABLE}" -c "import jsonschema, jinja2"
+                RESULT_VARIABLE _mcframe_tls_py_rc
+                OUTPUT_QUIET ERROR_QUIET)
+            if(_mcframe_tls_py_rc EQUAL 0)
+                set(_mcframe_tls_default ON)
+            else()
+                message(STATUS "mbedTLS: Python deps missing, MCFRAME_MBEDTLS=OFF "
+                               "(pip install -r requirements-mbedtls.txt)")
+            endif()
+        endif()
+    endif()
+    set(MCFRAME_MBEDTLS ${_mcframe_tls_default} CACHE BOOL
+        "Build bundled mbedTLS (STM32 TLS)")
+endif()
+set(MCFRAME_MBEDTLS_INCLUDE_DIR "" CACHE PATH "внешний include-каталог mbedTLS (если submodule не используется)")
+set(MCFRAME_MBEDTLS_LIBRARIES "" CACHE STRING "внешние mbedtls/mbedx509/tfpsacrypto libraries")
 if(MCFRAME_FUZZ)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         message(FATAL_ERROR "MCFRAME_FUZZ требует Clang/libFuzzer")

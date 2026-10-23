@@ -34,7 +34,7 @@
 - [x] C3 headroom:
   - TLS pinned to ISRG Root X1 вместо CA bundle;
   - logs level NONE;
-  - `mcframe_c3.bin` = 0xf1a40; после переразметки слот 1.25 МБ, свободно 0x4e5c0 (~314 КБ, 25%).
+  - `mcframe_c3.bin` = 0xf24e0; после переразметки слот 1.25 МБ, свободно 0x4db20 (~314 КБ, 25%).
 
 ## Проверка
 
@@ -44,7 +44,7 @@ ASan/UBSan        30/30
 NVS               74/74
 mcflash            3/3
 F1/F4/G4 builds   OK
-C3 build          OK (0xf1a40, 25% free)
+C3 build          OK (0xf24e0, 25% free)
 ```
 
 F4/G4 boot:

@@ -256,6 +256,18 @@ constexpr uint32_t FLASH_CR_LOCK = 1u << 31;
 #endif
 
 #define RCC    ((RCC_TypeDef*)0x40023800UL)
+
+typedef struct {
+    volatile uint32_t SR;
+    volatile uint32_t DR;
+    volatile uint32_t CR;
+} RNG_TypeDef;
+#define RNG ((RNG_TypeDef*)0x50060800UL)
+constexpr uint32_t RNG_SR_DRDY = 1u << 0;
+constexpr uint32_t RNG_SR_CEIS = 1u << 5;
+constexpr uint32_t RNG_SR_SEIS = 1u << 6;
+constexpr uint32_t RNG_CR_RNGEN = 1u << 2;
+constexpr uint32_t RCC_AHB2ENR_RNGEN = 1u << 6;
 #if defined(MCFRAME_SOC_STM32G4)
 #define DMA1   ((DMA1_TypeDef*)0x40020000UL)
 #define DMA1_Channel1 ((DMA_Channel_TypeDef*)0x40020008UL)

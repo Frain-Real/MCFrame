@@ -72,8 +72,11 @@ Status BleEsp::init(const BleConfig& cfg) noexcept {
     if (nimble_port_init() != ESP_OK) return Status::HardwareError;
     ble_hs_cfg.sync_cb = &BleEsp::on_sync;
     ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
-    ble_hs_cfg.sm_sc = 1;
-    ble_hs_cfg.sm_mitm = 0;
+    ble_hs_cfg.sm_sc = (cfg.security != hal::BleSecurity::None) ? 1 : 0;
+    ble_hs_cfg.sm_mitm = (cfg.security == hal::BleSecurity::Mitm) ? 1 : 0;
+    ble_hs_cfg.sm_bonding = cfg.bonding ? 1 : 0;
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_svc_gap_init();
     ble_svc_gatt_init();
 
@@ -161,7 +164,86 @@ Status BleEsp::stop_advertise() noexcept {
 }
 
 Status BleEsp::add_service(const BleUuid&) noexcept { return inited_ ? Status::Ok : Status::Unavailable; }
-Status BleEsp::add_gatt_service(const BleGattService&) noexcept { return Status::NotSupported; }
+
+Status BleEsp::add_gatt_service(const BleGattService& svc) noexcept {
+    if (!inited_) return Status::Unavailable;
+    if (custom_count_ >= kMaxCustomServices || svc.count == 0u || svc.count > 4u) {
+        return Status::NoMemory;
+    }
+    CustomService& cs = custom_[custom_count_];
+    if (ble_uuid_init_from_buf(&cs.uuid, svc.uuid.bytes, sizeof(svc.uuid.bytes)) != 0) {
+        return Status::InvalidArg;
+    }
+    for (uint8_t i = 0u; i < svc.count; ++i) {
+        CustomChar& cc = cs.chars[i];
+        if (ble_uuid_init_from_buf(&cc.uuid, svc.chars[i].uuid.bytes,
+                                   sizeof(svc.chars[i].uuid.bytes)) != 0) {
+            return Status::InvalidArg;
+        }
+        cc.len = svc.chars[i].value_len;
+        if (cc.len > sizeof(cc.value)) cc.len = sizeof(cc.value);
+        for (uint8_t k = 0u; k < cc.len; ++k) cc.value[k] = svc.chars[i].value[k];
+        ble_gatt_chr_def& d = cs.defs[i];
+        d.uuid = &cc.uuid.u;
+        d.access_cb = &BleEsp::custom_access;
+        d.arg = &cc;
+        d.val_handle = &cc.handle;
+        d.flags = 0u;
+        if ((svc.chars[i].properties & 0x01u) != 0u) d.flags |= BLE_GATT_CHR_F_READ;
+        if ((svc.chars[i].properties & 0x02u) != 0u) d.flags |= BLE_GATT_CHR_F_WRITE;
+        if ((svc.chars[i].properties & 0x04u) != 0u) d.flags |= BLE_GATT_CHR_F_NOTIFY;
+        if (d.flags == 0u) d.flags = BLE_GATT_CHR_F_READ;
+    }
+    cs.svc[0].type = BLE_GATT_SVC_TYPE_PRIMARY;
+    cs.svc[0].uuid = &cs.uuid.u;
+    cs.svc[0].characteristics = cs.defs;
+    if (ble_gatts_count_cfg(cs.svc) != 0 ||
+        ble_gatts_add_svcs(cs.svc) != 0) {
+        return Status::HardwareError;
+    }
+    cs.used = true;
+    ++custom_count_;
+    return Status::Ok;
+}
+
+Status BleEsp::set_value(uint16_t handle, const void* data, Size len) noexcept {
+    if (data == nullptr || len > 32u) return Status::InvalidArg;
+    for (uint8_t s = 0u; s < custom_count_; ++s) {
+        for (uint8_t i = 0u; i < 4u; ++i) {
+            CustomChar& c = custom_[s].chars[i];
+            if (c.handle == handle) {
+                c.len = static_cast<uint8_t>(len);
+                const auto* p = static_cast<const uint8_t*>(data);
+                for (Size k = 0u; k < len; ++k) c.value[k] = p[k];
+                return Status::Ok;
+            }
+        }
+    }
+    return Status::NotFound;
+}
+
+int BleEsp::custom_access(uint16_t conn, uint16_t, ::ble_gatt_access_ctxt* ctxt,
+                          void* arg) {
+    auto* c = static_cast<CustomChar*>(arg);
+    auto* self = g_ble;
+    if (c == nullptr || ctxt == nullptr) return BLE_ATT_ERR_UNLIKELY;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        return os_mbuf_append(ctxt->om, c->value, c->len) == 0
+            ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        const uint16_t n = OS_MBUF_PKTLEN(ctxt->om);
+        const uint16_t m = n > sizeof(c->value) ? sizeof(c->value) : n;
+        if (os_mbuf_copydata(ctxt->om, 0, m, c->value) != 0) return BLE_ATT_ERR_UNLIKELY;
+        c->len = static_cast<uint8_t>(m);
+        if (self != nullptr && self->write_cb_ != nullptr) {
+            self->write_cb_(self->write_ctx_, c->handle, c->value, m);
+        }
+        return 0;
+    }
+    (void)conn;
+    return BLE_ATT_ERR_UNLIKELY;
+}
 
 Status BleEsp::notify(uint16_t conn, uint16_t attr, const void* data, Size len) noexcept {
     if (!inited_ || data == nullptr) return Status::InvalidArg;
@@ -281,6 +363,13 @@ int BleEsp::gap_event(::ble_gap_event* event, void* arg) {
         case BLE_GAP_EVENT_ADV_COMPLETE:
             self->advertising_ = false;
             break;
+        case BLE_GAP_EVENT_ENC_CHANGE: {
+            BleEvent e{BleEvent::Kind::Secured,
+                       event->enc_change.conn_handle,
+                       event->enc_change.status};
+            self->post(e);
+            break;
+        }
         case BLE_GAP_EVENT_NOTIFY_RX: {
             if (self->notify_cb_ != nullptr && event->notify_rx.om != nullptr) {
                 uint8_t buf[128]{};

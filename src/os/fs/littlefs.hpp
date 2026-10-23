@@ -123,6 +123,7 @@ private:
     }
 
     Status prepare(BlockDevice& dev) noexcept {
+        if (!dev.present()) return Status::Unavailable;
         if (dev.block_size() != BlockSize) return Status::NotSupported;
         if (dev.block_count() == 0u) return Status::InvalidArg;
         dev_ = &dev;
@@ -181,8 +182,11 @@ private:
     static int erase_cb(const struct lfs_config* c, lfs_block_t block) noexcept {
         auto* self = static_cast<LittleFs*>(c->context);
         if (self == nullptr || block >= self->cfg_.block_count) return LFS_ERR_INVAL;
-        // BlockDevice не имеет erase(): для SD перезапись блока 0xFF
-        // эквивалентна стиранию; для NOR нужен реальный erase в драйвере.
+        const Status er = self->device()->erase(static_cast<uint32_t>(block), 1u);
+        if (er == Status::Ok) return 0;
+        if (er != Status::NotSupported) return LFS_ERR_IO;
+        // Fallback для SD/RAM: перезапись 0xFF. Для NOR нужен реальный
+        // erase(), иначе littlefs будет работать некорректно.
         for (lfs_size_t i = 0u; i < BlockSize; ++i) self->tmp_[i] = 0xFFu;
         return self->device()->write(static_cast<uint32_t>(block), self->tmp_, 1u)
             == Status::Ok ? 0 : LFS_ERR_IO;

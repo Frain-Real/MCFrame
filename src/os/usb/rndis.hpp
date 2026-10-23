@@ -12,6 +12,16 @@
 
 namespace embed::usb::rndis {
 
+#ifndef MCFRAME_RNDIS_RX_DEPTH
+#define MCFRAME_RNDIS_RX_DEPTH 4u
+#endif
+#ifndef MCFRAME_RNDIS_TX_DEPTH
+#define MCFRAME_RNDIS_TX_DEPTH 4u
+#endif
+#ifndef MCFRAME_RNDIS_MAX_FRAME
+#define MCFRAME_RNDIS_MAX_FRAME 1536u
+#endif
+
 struct Config {
     uint8_t mac[6] = {0x02, 0x4D, 0x43, 0x00, 0x00, 0x02};
     uint16_t mtu = 1500u;
@@ -25,7 +35,12 @@ public:
     static constexpr uint8_t kEpNotify = 0x81u;
     static constexpr uint8_t kEpOut = 0x02u;
     static constexpr uint8_t kEpIn  = 0x83u;
-    static constexpr Size kMaxFrame = 1536u;
+    static constexpr Size kMaxFrame = MCFRAME_RNDIS_MAX_FRAME;
+    static_assert(kMaxFrame >= 64u && kMaxFrame <= 9000u, "RNDIS: frame size");
+    static_assert(MCFRAME_RNDIS_RX_DEPTH >= 1u && MCFRAME_RNDIS_RX_DEPTH <= 16u,
+                  "RNDIS: RX depth 1..16");
+    static_assert(MCFRAME_RNDIS_TX_DEPTH >= 1u && MCFRAME_RNDIS_TX_DEPTH <= 16u,
+                  "RNDIS: TX depth 1..16");
 
     explicit Rndis(const Config& cfg = Config{}) noexcept : cfg_(cfg) {}
 
@@ -67,7 +82,7 @@ public:
             data_off + data_len > msg_len || data_len > kMaxFrame) {
             return Status::Corruption;
         }
-        if (rx_count_ >= kRxDepth) return Status::NoMemory;
+        if (rx_count_ >= kRxDepth) { ++rx_dropped_; return Status::NoMemory; }
         const Size slot = (rx_head_ + rx_count_) % kRxDepth;
         for (uint32_t i = 0u; i < data_len; ++i) {
             rx_[slot][i] = data[data_off + i];
@@ -81,7 +96,7 @@ public:
     /// Кадр для отправки хостом (device→host). Копируется в очередь.
     Status send_frame(const uint8_t* frame, Size len) noexcept {
         if (frame == nullptr || len == 0u || len > kMaxFrame) return Status::InvalidArg;
-        if (tx_count_ >= kTxDepth) return Status::NoMemory;
+        if (tx_count_ >= kTxDepth) { ++tx_dropped_; return Status::NoMemory; }
         const Size slot = (tx_head_ + tx_count_) % kTxDepth;
         const Size total = 44u + len;
         for (Size i = 0u; i < 44u; ++i) tx_[slot][i] = 0u;
@@ -114,6 +129,10 @@ public:
 
     uint8_t rx_count() const noexcept { return rx_count_; }
     uint8_t tx_count() const noexcept { return tx_count_; }
+    uint32_t rx_dropped() const noexcept { return rx_dropped_; }
+    uint32_t tx_dropped() const noexcept { return tx_dropped_; }
+    Size rx_capacity() const noexcept { return kRxDepth; }
+    Size tx_capacity() const noexcept { return kTxDepth; }
     const uint8_t* rx_frame(Size& len) const noexcept {
         if (rx_count_ == 0u) { len = 0u; return nullptr; }
         len = rx_len_[rx_head_];
@@ -255,8 +274,8 @@ private:
     Size response_len_ = 0u;
     FrameSink sink_ = nullptr;
     void* sink_ctx_ = nullptr;
-    static constexpr Size kRxDepth = 4u;
-    static constexpr Size kTxDepth = 4u;
+    static constexpr Size kRxDepth = MCFRAME_RNDIS_RX_DEPTH;
+    static constexpr Size kTxDepth = MCFRAME_RNDIS_TX_DEPTH;
     uint8_t rx_[kRxDepth][kMaxFrame]{};
     Size rx_len_[kRxDepth]{};
     Size rx_head_ = 0u;
@@ -265,6 +284,8 @@ private:
     Size tx_len_[kTxDepth]{};
     Size tx_head_ = 0u;
     uint8_t tx_count_ = 0u;
+    uint32_t rx_dropped_ = 0u;
+    uint32_t tx_dropped_ = 0u;
 
     static constexpr uint8_t config_[67] = {
         9u, 2u, 67u, 0u, 2u, 1u, 0u, 0x80u, 50u,

@@ -18,6 +18,8 @@ namespace embed::usb {
 
 template <Size MaxChildren = 3u, Size DescriptorCap = 256u>
 class Composite final : public Class {
+    static_assert(MaxChildren >= 1u && MaxChildren <= 8u, "Composite: 1..8 children");
+    static_assert(DescriptorCap >= 32u, "Composite: descriptor buffer too small");
 public:
     Composite(Class* const* children, Size count) noexcept
         : children_(children), count_(count > MaxChildren ? MaxChildren : count) {}
@@ -34,6 +36,8 @@ public:
             if (d == nullptr || n < 9u || d[1] != 2u) return Status::InvalidArg;
             base_[i + 1u] = static_cast<uint8_t>(base_[i] + d[4]);
         }
+        const Status rs = remap_endpoints();
+        if (rs != Status::Ok) return rs;
         return build();
     }
 
@@ -54,6 +58,13 @@ public:
         configured_ = true;
     }
 
+    void suspended() noexcept override {
+        for (Size i = 0u; i < count_; ++i) children_[i]->suspended();
+    }
+    void resumed() noexcept override {
+        for (Size i = 0u; i < count_; ++i) children_[i]->resumed();
+    }
+
     void set_interface(uint16_t iface) noexcept override {
         const int child = child_for_interface(static_cast<uint8_t>(iface));
         if (child >= 0) {
@@ -66,6 +77,43 @@ public:
     Size descriptor_length() const noexcept { return valid_ ? len_ : 0u; }
 
 private:
+    static uint8_t next_ep(uint8_t old, const bool used[256]) noexcept {
+        const uint8_t dir = static_cast<uint8_t>(old & 0x80u);
+        for (uint8_t n = 1u; n < 16u; ++n) {
+            const uint8_t ep = static_cast<uint8_t>(dir | n);
+            if (!used[ep]) return ep;
+        }
+        return 0u;
+    }
+
+    Status remap_endpoints() noexcept {
+        bool used[256]{};
+        for (Size i = 0u; i < count_; ++i) {
+            Size n = 0u;
+            const uint8_t* d = children_[i]->config_descriptor(n);
+            if (d == nullptr || n < 9u) return Status::InvalidArg;
+            for (Size pos = 9u; pos + 2u <= n; ) {
+                const uint8_t blen = d[pos];
+                const uint8_t type = d[pos + 1u];
+                if (blen < 2u || pos + blen > n) return Status::Corruption;
+                if (type == 5u && blen >= 7u) {
+                    const uint8_t ep = d[pos + 2u];
+                    if (ep != 0u && used[ep]) {
+                        const uint8_t to = next_ep(ep, used);
+                        if (to == 0u) return Status::NotSupported;
+                        const Status st = children_[i]->remap_endpoint(ep, to);
+                        if (st != Status::Ok) return Status::NotSupported;
+                        used[to] = true;
+                    } else if (ep != 0u) {
+                        used[ep] = true;
+                    }
+                }
+                pos += blen;
+            }
+        }
+        return Status::Ok;
+    }
+
     int child_for_interface(uint8_t iface) const noexcept {
         for (Size i = 0u; i < count_; ++i) {
             if (iface >= base_[i] && iface < base_[i + 1u]) {

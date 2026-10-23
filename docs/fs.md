@@ -25,7 +25,12 @@ CMD0/CMD8); это нормально для SD SPI.
 - `LittleFs<BlockSize>`: `BlockSize` — erase-блок (SD: 512, NOR: 4096);
   `LittleFs<4096>` создаёт статические буферы по 4 КБ;
 - для SD `board::sd()` уже готов как `BlockDevice`;
-- `format` пишет 0xFF в блок (erase-эмуляция для SD).
+- `format` использует `BlockDevice::erase()`; для SD это CMD32/33/38,
+  для RAM — 0xFF, для NOR нужен реальный секторный erase;
+- `BlockDevice::erase()` и `present()` — контракт для littlefs и hotplug;
+- `Card::poll()` переинициализирует карту после пропадания/возврата;
+- SPI-операции SD берут `ISpi::lock()` — можно делить шину с W5500, но CS
+  должны быть разными.
 
 ```cpp
 fs::LittleFs<512> lfs;          // SD: erase-блок 512
@@ -38,8 +43,8 @@ if (lfs.mount(board::sd()) == Status::Ok) {
 Для NOR с реальным erase нужен драйвер с `erase`; текущий `BlockDevice`
 эмулирует erase перезаписью 0xFF.
 
-Проверка: `tests/test_littlefs.cpp` — format/mount/write/read/mkdir/rename/
-remove/remount на RAM-диске (9 проверок).
+Проверка: `tests/test_littlefs.cpp` — SD hotplug/present, format/mount/write/
+read/mkdir/rename/remove/remount на RAM-диске (12 проверок).
 
 Ограничения: нет `LFS_THREADSAFE`-блокировки (вызывающий сериализует
 операции); FAT/VDI не поддерживаются; littlefs и SD HIL не проводились.

@@ -14,7 +14,8 @@
 #pragma once
 
 #include "socket.hpp"
-#include "w5500.hpp"                 // переиспользуем DNS-парсер
+#include "dhcp.hpp"
+#include "dns.hpp"
 #include "../usb/rndis.hpp"
 #include "../usb/usb.hpp"
 #include "../config/time_config.hpp"
@@ -70,6 +71,7 @@ private:
     Size rx_pos_ = 0u;
     uint8_t udp_rx_[1536]{};
     Size udp_len_ = 0u;
+    uint32_t dropped_ = 0u;
     Endpoint udp_from_{};
 };
 
@@ -209,6 +211,11 @@ public:
     }
 
     const RndisNetConfig& config() const noexcept { return cfg_; }
+    uint32_t dropped() const noexcept {
+        uint32_t n = 0u;
+        for (Size i = 0u; i < kSockets; ++i) n += pool_[i].dropped_;
+        return n;
+    }
     RndisNetConfig& config() noexcept { return cfg_; }
 
     static void frame_sink(void* ctx, const uint8_t* frame, Size len) noexcept {
@@ -218,7 +225,11 @@ public:
 
 private:
     friend class RndisSocket;
-    static constexpr Size kSockets = 4u;
+#ifndef MCFRAME_RNDIS_FACTORY_SOCKETS
+#define MCFRAME_RNDIS_FACTORY_SOCKETS 4u
+#endif
+    static constexpr Size kSockets = MCFRAME_RNDIS_FACTORY_SOCKETS;
+    static_assert(kSockets >= 1u && kSockets <= 8u, "RNDIS factory: 1..8 sockets");
 
     static Status pump_none(void*) { return Status::Ok; }
 
@@ -625,9 +636,11 @@ inline void RndisSocket::on_tcp(const uint8_t* src, uint16_t, const uint8_t* dat
     const Size dlen = tlen - ihl;
     if (dlen > 0u) {
         ack_ = seq + static_cast<uint32_t>(dlen);
-        if (dlen <= sizeof(rx_)) {
+        if (dlen <= sizeof(rx_) && rx_pos_ >= rx_len_) {
             for (Size i = 0u; i < dlen; ++i) rx_[i] = tcp[ihl + i];
             rx_len_ = dlen; rx_pos_ = 0u;
+        } else {
+            ++dropped_;                               // backpressure: старый кадр цел
         }
         (void)send_tcp(0x10u, nullptr, 0u);
     }

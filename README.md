@@ -9,6 +9,17 @@ OTA с двумя слотами, сеть, USB device, TLS и Rust-прилож
 
 ## Быстрый старт
 
+F4/G4 используют bundled mbedTLS из `third_party/mbedtls`:
+```bash
+git submodule update --init --recursive
+python3 -m venv .build/mbedtls-venv
+.build/mbedtls-venv/bin/pip install -r requirements-mbedtls.txt
+export PATH="$PWD/.build/mbedtls-venv/bin:$PATH"
+```
+Без Python-зависимостей CMake соберёт F4/G4 с `MCFRAME_MBEDTLS=OFF`;
+включить TLS можно `-DMCFRAME_MBEDTLS=ON`.
+
+
 ```bash
 # host-тесты (30 наборов)
 ./build.sh mock Debug && ctest --test-dir .build/mock --output-on-failure
@@ -51,20 +62,19 @@ cd firmware/esp32c3 && idf.py set-target esp32c3 && idf.py build
 - **OTA:** CRC32/SHA-256/подпись, два слота, откат, meta-backup;
   F4/G4 bootloader в своих секторах.
 - **Сеть:** MQTT 3.1.1 (QoS0/1/2, LWT, keepalive/reconnect), HTTP/1.1,
-  SNTP, TLS (mbedTLS на C3), W5500 SPI с DHCP/DNS/link/IRQ и TCP listen/accept.
+  SNTP, TLS (mbedTLS на C3), W5500 SPI с DHCP/DNS/link/IRQ, renew и TCP listener/accept.
 - **USB:** CDC-ACM, DFU (RAM/flash), MSC (READ/WRITE), RNDIS + полный
   `net::Factory` (ARP/IPv4/UDP/TCP/DNS/DHCP), composite, F4 OTG FS и G4 USB FS;
   CDC shell/OTA; TCP shell.
 - **BLE:** peripheral/observer/central, GATT client service/char discovery,
   read/write by handle, CCCD/notify.
 - **W5500:** DHCP/DNS/link/IRQ и TCP listen/accept.
-- **Rust:** FFI на GPIO/SPI/I2C/NVS/net/USB.
-- **FS:** SD SPI + встроенный littlefs 2.x (LFS_NO_MALLOC, статические буферы).
+- **FS:** SD SPI + littlefs 2.x (LFS_NO_MALLOC), erase/lock/hotplug.
 - **Качество:** libFuzzer-цели, coverage-скрипт, CI jobs.
-- **Rust:** `no_std` staticlib, C ABI-мост, FFI GPIO/SPI/I2C/NVS/net/USB,
-  F1/F4/G4 targets.
+- **Rust:** `no_std` staticlib, C ABI-мост, safe-ish API, FFI
+  GPIO/SPI/I2C/NVS/net/USB, F1/F4/G4 targets.
 - **Тесты:** 30 host-наборов, ASan/UBSan, fuzz smoke, coverage,
-  CI: GCC/ARM, C3, Rust.
+  FFI NVS/I2C/net/USB; CI: GCC/ARM, C3, Rust.
 
 ## Статус и ограничения
 
@@ -85,6 +95,7 @@ cd firmware/esp32c3 && idf.py set-target esp32c3 && idf.py build
 - [`docs/ble.md`](docs/ble.md) — GATT client;
 - [`docs/shell.md`](docs/shell.md) — shell по USB CDC и TCP;
 - [`docs/rust.md`](docs/rust.md) — Rust + FFI;
+- [`docs/tls.md`](docs/tls.md) — TLS, bundled mbedTLS, CA-store, provisioning;
 - [`docs/hil.md`](docs/hil.md) — HIL-чеклист.
 
 ## CI

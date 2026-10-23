@@ -38,3 +38,11 @@ let _ = nvs.read(b"key", &mut buf);
 
 Ограничения: нет `alloc`/`std`, строки — статические NUL-terminated; для
 форматирования используйте `core::fmt::Write` в свой буфер.
+
+
+## Safe API
+
+`ffi::Socket` — RAII: `Drop` закрывает handle; `close(self)` идемпотентен.
+`ffi::Nvs` принимает `&[u8]` ключи и сам добавляет NUL. Остальные ресурсы —
+не владеющие `Copy`-handle; приложение обязано хранить C++-объект живым.
+Host-тест `tests/test_rust_bridge.cpp` проверяет GPIO/SPI/NVS/I2C/net/USB.

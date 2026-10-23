@@ -10,8 +10,15 @@
 #pragma once
 
 #include "tls.hpp"
+#if MBEDTLS_VERSION_MAJOR >= 4
+#include <psa/crypto.h>
+#endif
 
+#if __has_include(<mbedtls/build_info.h>)
 #include <mbedtls/build_info.h>
+#else
+#include <mbedtls/config.h>
+#endif
 #include <mbedtls/error.h>
 #if MBEDTLS_VERSION_MAJOR < 4
 #include <mbedtls/ctr_drbg.h>
@@ -44,6 +51,9 @@ public:
         initialized_ = true;
 
         int rc = 0;
+#if MBEDTLS_VERSION_MAJOR >= 4
+        if (psa_crypto_init() != PSA_SUCCESS) return fail(-1);
+#endif
 #if MBEDTLS_VERSION_MAJOR < 4
         static const char kPersonalization[] = "mcframe-tls";
         rc = mbedtls_ctr_drbg_seed(&drbg_, mbedtls_entropy_func, &entropy_,
@@ -70,6 +80,11 @@ public:
             mbedtls_ssl_conf_ca_chain(&conf_, &ca_, nullptr);
         }
         if (timeout_ms != 0u) mbedtls_ssl_conf_read_timeout(&conf_, timeout_ms);
+        if (cfg.alpn != nullptr) {
+            alpn_protocols_[0] = cfg.alpn;
+            alpn_protocols_[1] = nullptr;
+            mbedtls_ssl_conf_alpn_protocols(&conf_, alpn_protocols_);
+        }
 
         rc = mbedtls_ssl_setup(&ssl_, &conf_);
         if (rc != 0) return fail(rc);
@@ -166,6 +181,7 @@ private:
     uint32_t timeout_ms_ = 5000u;
     bool initialized_ = false;
     bool active_ = false;
+    const char* alpn_protocols_[2]{};
     mbedtls_ssl_context ssl_{};
     mbedtls_ssl_config conf_{};
     mbedtls_x509_crt ca_{};
@@ -177,6 +193,7 @@ private:
 
 template <Size N = 4u>
 class MbedTlsProvider final : public TlsProvider {
+    static_assert(N >= 1u && N <= 8u, "TLS: 1..8 sessions");
 public:
     Status create(TlsSession*& out) noexcept override {
         for (Size i = 0u; i < N; ++i) {

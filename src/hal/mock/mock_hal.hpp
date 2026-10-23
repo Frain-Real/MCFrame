@@ -395,6 +395,18 @@ public:
         has_service_ = true;
         return Status::Ok;
     }
+    Status add_gatt_service(const BleGattService& svc) noexcept override {
+        if (!ready_ || svc.count == 0u) return Status::Unavailable;
+        gatt_chars_ = svc.count;
+        return Status::Ok;
+    }
+    Status set_value(uint16_t handle, const void* data, Size len) noexcept override {
+        if (data == nullptr || len > sizeof(value_)) return Status::InvalidArg;
+        const auto* p = static_cast<const uint8_t*>(data);
+        for (Size i = 0u; i < len; ++i) value_[i] = p[i];
+        value_len_ = len; value_handle_ = handle;
+        return Status::Ok;
+    }
     Status notify(uint16_t conn_handle, uint16_t attr_handle,
                   const void* data, Size len) noexcept override {
         if (!ready_ || data == nullptr) return Status::InvalidArg;
@@ -413,6 +425,9 @@ public:
     uint32_t caps() const noexcept override {
         return BleCapAdv | BleCapGatt | BleCapNotify | BleCapEvents;
     }
+    uint8_t gatt_chars() const noexcept { return gatt_chars_; }
+    uint16_t value_handle() const noexcept { return value_handle_; }
+    Size value_len() const noexcept { return value_len_; }
 
     bool advertising() const noexcept { return advertising_; }
     bool has_service() const noexcept { return has_service_; }
@@ -430,6 +445,10 @@ private:
     uint16_t last_conn_ = 0u;
     uint16_t last_attr_ = 0u;
     Size last_len_ = 0u;
+    uint8_t gatt_chars_ = 0u;
+    uint8_t value_[32]{};
+    uint16_t value_handle_ = 0u;
+    Size value_len_ = 0u;
     BleEventCallback cb_ = nullptr;
     void* ctx_ = nullptr;
 };

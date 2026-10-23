@@ -16,10 +16,14 @@ namespace embed::stm32::sd {
 
 class Card final : public fs::BlockDevice {
 public:
-    Card(hal::ISpi& bus, hal::IGpioPin& cs) noexcept : bus_(&bus), cs_(&cs) {}
+    Card(hal::ISpi& bus, hal::IGpioPin& cs,
+         hal::IGpioPin* detect = nullptr, bool detect_active_low = true) noexcept
+        : bus_(&bus), cs_(&cs), detect_(detect), detect_low_(detect_active_low) {}
 
     Status init() noexcept {
         if (bus_ == nullptr || cs_ == nullptr) return Status::InvalidArg;
+        BusGuard guard(*bus_, 1000u);
+        if (!guard.ok()) return guard.status();
         hal::SpiConfig slow{};
         slow.hz = 400'000u;
         slow.mode = 0u;
@@ -94,6 +98,8 @@ public:
 
     Status read(uint32_t lba, void* data, uint32_t count) noexcept override {
         if (!inited_ || data == nullptr || count == 0u) return Status::InvalidArg;
+        BusGuard guard(*bus_, 1000u);
+        if (!guard.ok()) return guard.status();
         if (lba >= blocks_ || count > blocks_ - lba) return Status::InvalidArg;
         auto* out = static_cast<uint8_t*>(data);
         for (uint32_t i = 0u; i < count; ++i) {
@@ -111,6 +117,8 @@ public:
 
     Status write(uint32_t lba, const void* data, uint32_t count) noexcept override {
         if (!inited_ || data == nullptr || count == 0u) return Status::InvalidArg;
+        BusGuard guard(*bus_, 1000u);
+        if (!guard.ok()) return guard.status();
         if (lba >= blocks_ || count > blocks_ - lba) return Status::InvalidArg;
         const auto* in = static_cast<const uint8_t*>(data);
         for (uint32_t i = 0u; i < count; ++i) {
@@ -144,10 +152,67 @@ public:
         return Status::Ok;
     }
 
+    /// Стереть диапазон блоков (CMD32/33/38). Для SD это освобождает
+    /// секторы; littlefs использует erase перед программированием.
+    Status erase(uint32_t lba, uint32_t count) noexcept override {
+        if (!inited_ || count == 0u) return Status::InvalidArg;
+        if (lba >= blocks_ || count > blocks_ - lba) return Status::InvalidArg;
+        BusGuard guard(*bus_, 1000u);
+        if (!guard.ok()) return guard.status();
+        const uint32_t first = sdhc_ ? lba : lba * 512u;
+        const uint32_t last = sdhc_ ? (lba + count - 1u) : ((lba + count) * 512u - 1u);
+        uint8_t r = 0u;
+        if (!command(32u, first, 0u, r) || r != 0x00u) return Status::HardwareError;
+        if (!command(33u, last, 0u, r) || r != 0x00u) return Status::HardwareError;
+        if (!command(38u, 0u, 0u, r) || r != 0x00u) return Status::HardwareError;
+        cs_->set(true);
+        return wait_busy(5000u);
+    }
+
+    /// Проверить носитель. Без detect-пина считаем, что карта есть.
+    bool present() const noexcept override {
+        if (detect_ == nullptr) return true;
+        return detect_low_ ? !detect_->get() : detect_->get();
+    }
+
+    /// Hotplug: при пропадании карты сбрасывает init, при возврате
+    /// переинициализирует. Возвращает Ok, если карта готова.
+    Status poll() noexcept {
+        if (!present()) { inited_ = false; return Status::Unavailable; }
+        if (!inited_) return init();
+        return Status::Ok;
+    }
+
     Status sync() noexcept override { return inited_ ? Status::Ok : Status::Unavailable; }
     bool initialized() const noexcept { return inited_; }
 
 private:
+    struct BusGuard {
+        explicit BusGuard(hal::ISpi& b, Timeout t) noexcept : bus(&b) {
+            st = bus->lock(t);
+            held = (st == Status::Ok);
+        }
+        ~BusGuard() noexcept { if (held) bus->unlock(); }
+        bool ok() const noexcept { return held; }
+        Status status() const noexcept { return st; }
+        hal::ISpi* bus = nullptr;
+        Status st = Status::Unavailable;
+        bool held = false;
+    };
+
+    Status wait_busy(uint32_t timeout_ms) noexcept {
+        uint8_t b = 0u;
+        const uint64_t start = config::OsTimer::TimeAvailable()
+            ? config::OsTimer::NowMs() : 0u;
+        for (;;) {
+            (void)bus_->transfer(nullptr, &b, 1u, 1000u);
+            if (b == 0xFFu) return Status::Ok;
+            if (config::OsTimer::TimeAvailable() &&
+                config::OsTimer::NowMs() - start >= timeout_ms) return Status::Timeout;
+            delay_ms(1u);
+        }
+    }
+
     static void delay_ms(uint32_t ms) noexcept {
         if (!config::OsTimer::TimeAvailable()) {
             for (volatile uint32_t i = 0u; i < ms * 8000u; ++i) { }
@@ -190,6 +255,8 @@ private:
 
     hal::ISpi* bus_ = nullptr;
     hal::IGpioPin* cs_ = nullptr;
+    hal::IGpioPin* detect_ = nullptr;
+    bool detect_low_ = true;
     uint32_t blocks_ = 0u;
     bool sdhc_ = false;
     bool inited_ = false;

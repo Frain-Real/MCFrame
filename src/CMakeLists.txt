@@ -53,7 +53,9 @@ set(OS_OTA_SOURCES
 # Абстракция не зависит от lwIP/STM32: backend сокетов даёт платформа/борд.
 set(OS_NET_SOURCES
     os/net/http.cpp
-    os/net/sntp.cpp)
+    os/net/sntp.cpp
+    os/net/dhcp.cpp
+    os/net/dns.cpp)
 
 # ─────────── NVS: key-value поверх ota::Storage ───────────
 set(OS_NVS_SOURCES
@@ -182,6 +184,91 @@ target_include_directories(MCFrame
 # CMAKE_*_FLAGS) плюс include-путь к CMSIS у STM32.
 target_link_libraries(MCFrame PUBLIC mcu_flags)
 
+if(MCFRAME_MBEDTLS)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/mbedtls/CMakeLists.txt")
+        find_package(Python3 QUIET COMPONENTS Interpreter)
+        if(NOT Python3_Interpreter_FOUND)
+            message(FATAL_ERROR
+                "mbedTLS 4.x требует Python3 для генерации файлов. "
+                "Установите Python3 и задайте -DPython3_EXECUTABLE=...")
+        endif()
+        if(Python3_Interpreter_FOUND)
+            execute_process(
+                COMMAND "${Python3_EXECUTABLE}" -c "import jsonschema, jinja2"
+                RESULT_VARIABLE _mbedtls_py_rc
+                OUTPUT_QUIET ERROR_QUIET)
+            if(NOT _mbedtls_py_rc EQUAL 0)
+                message(FATAL_ERROR
+                    "mbedTLS 4.x генератор требует Python-модули jsonschema и jinja2. "
+                    "Установите: python3 -m pip install -r requirements-mbedtls.txt "
+                    "и при необходимости задайте -DPython3_EXECUTABLE=...")
+            endif()
+        endif()
+        if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
+            set(MBEDTLS_CONFIG_FILE "${CMAKE_SOURCE_DIR}/cmake/mbedtls_config_stm32.h"
+                CACHE FILEPATH "" FORCE)
+            set(TF_PSA_CRYPTO_CONFIG_FILE
+                "${CMAKE_SOURCE_DIR}/cmake/tf_psa_crypto_config_stm32.h"
+                CACHE FILEPATH "" FORCE)
+        endif()
+        set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+        set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+        set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
+        set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
+        set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+        set(GEN_FILES ON CACHE BOOL "" FORCE)
+        set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+        add_subdirectory("${CMAKE_SOURCE_DIR}/third_party/mbedtls"
+                         "${CMAKE_BINARY_DIR}/mbedtls" EXCLUDE_FROM_ALL)
+        foreach(_tls_t mbedtls mbedx509 tfpsacrypto builtin everest p256m
+                           platform utilities extras)
+            if(TARGET ${_tls_t})
+                target_link_libraries(${_tls_t} PRIVATE mcu_flags)
+            endif()
+        endforeach()
+        if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
+            add_library(mcframe_tls_platform STATIC
+                "${CMAKE_SOURCE_DIR}/src/platforms/stm32f4g4/tls_platform_mbedtls.cpp")
+            target_link_libraries(mcframe_tls_platform PRIVATE mcu_flags)
+            target_include_directories(mcframe_tls_platform PRIVATE
+                "${CMAKE_SOURCE_DIR}/src"
+                "${CMAKE_SOURCE_DIR}/src/platforms/stm32f4g4"
+                "${CMAKE_SOURCE_DIR}/third_party/mbedtls/include"
+                "${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/include"
+                "${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/drivers/builtin/include"
+                "${CMAKE_BINARY_DIR}/mbedtls/include")
+            target_compile_definitions(mcframe_tls_platform PRIVATE
+                MCFRAME_WITH_MBEDTLS=1
+                MBEDTLS_CONFIG_FILE="${CMAKE_SOURCE_DIR}/cmake/mbedtls_config_stm32.h"
+                TF_PSA_CRYPTO_CONFIG_FILE="${CMAKE_SOURCE_DIR}/cmake/tf_psa_crypto_config_stm32.h")
+        endif()
+        if(TARGET mcframe_tls_platform)
+            set(_mcframe_tls_platform mcframe_tls_platform)
+        else()
+            set(_mcframe_tls_platform "")
+        endif()
+        target_link_libraries(MCFrame PUBLIC
+            $<BUILD_INTERFACE:mbedtls>
+            $<BUILD_INTERFACE:mbedx509>
+            $<BUILD_INTERFACE:tfpsacrypto>
+            $<BUILD_INTERFACE:${_mcframe_tls_platform}>)
+        add_library(mcframe_tls INTERFACE)
+        add_library(MCFrame::Tls ALIAS mcframe_tls)
+        target_link_libraries(mcframe_tls INTERFACE
+            -Wl,--start-group
+            MCFrame mbedtls mbedx509 tfpsacrypto ${_mcframe_tls_platform}
+            -Wl,--end-group)
+    else()
+        if(MCFRAME_MBEDTLS_INCLUDE_DIR)
+            target_include_directories(MCFrame PUBLIC ${MCFRAME_MBEDTLS_INCLUDE_DIR})
+        endif()
+        if(MCFRAME_MBEDTLS_LIBRARIES)
+            target_link_libraries(MCFrame PUBLIC ${MCFRAME_MBEDTLS_LIBRARIES})
+        endif()
+    endif()
+    target_compile_definitions(MCFrame PUBLIC MCFRAME_WITH_MBEDTLS=1)
+endif()
+
 if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
     target_include_directories(MCFrame PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/platforms/stm32f4g4>)
@@ -196,6 +283,9 @@ target_compile_definitions(MCFrame PUBLIC
     MCFRAME_FAULT_REPORT=$<BOOL:${MCFRAME_FAULT_REPORT}>
     MCFRAME_TIME_SLICE_TICKS=${MCFRAME_TIME_SLICE_TICKS}
     MCFRAME_LOG_ENTRIES=${MCFRAME_LOG_ENTRIES}
+    MCFRAME_RNDIS_RX_DEPTH=${MCFRAME_RNDIS_RX_DEPTH}
+    MCFRAME_RNDIS_TX_DEPTH=${MCFRAME_RNDIS_TX_DEPTH}
+    MCFRAME_RNDIS_FACTORY_SOCKETS=${MCFRAME_RNDIS_FACTORY_SOCKETS}
     MCFRAME_LOG_LEVEL=${MCFRAME_LOG_LEVEL})
 
 # F4-загрузчик обязан влезть в 16 КБ вместе с meta-журналом. SHA-256 образа
@@ -244,3 +334,12 @@ install(DIRECTORY boards/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/boards
 install(EXPORT MCFrameTargets
         NAMESPACE MCFrame::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/MCFrame)
+
+
+if(MCFRAME_MBEDTLS)
+    add_library(mcframe_tls_compile OBJECT
+        "${CMAKE_SOURCE_DIR}/tests/tls_provider_compile.cpp")
+    target_link_libraries(mcframe_tls_compile PRIVATE MCFrame)
+    target_include_directories(mcframe_tls_compile PRIVATE
+        "${CMAKE_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/src")
+endif()

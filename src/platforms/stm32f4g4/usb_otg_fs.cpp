@@ -320,6 +320,18 @@ void OtgFsHal::stall_ep0() noexcept {
     OTG_REG(kDoepctl0) |= (1u << 21);
 }
 
+Status OtgFsHal::suspend() noexcept {
+    // OTG FS уходит в suspend автоматически при отсутствии SOF.
+    return inited_ ? Status::Ok : Status::Unavailable;
+}
+Status OtgFsHal::resume() noexcept {
+    if (!inited_) return Status::Unavailable;
+    OTG_REG(kDctl) |= 1u;                  // RWUSIG: resume signalling
+    for (volatile uint32_t i = 0u; i < 80000u; ++i) { }
+    OTG_REG(kDctl) &= ~1u;
+    return Status::Ok;
+}
+
 Status OtgFsHal::set_address(uint8_t address) noexcept {
     if (!inited_) return Status::Unavailable;
     pending_address_ = address & 0x7Fu;

@@ -8,6 +8,8 @@
 #include "os/net/mqtt.hpp"
 #include "os/net/tls.hpp"
 #include "os/shell/net_shell.hpp"
+#include "os/net/ca_store.hpp"
+#include "hal/mock/mock_hal.hpp"
 #include "os/net/sntp.hpp"
 #include "os/time/rtc.hpp"
 #include "os/config/time_config.hpp"
@@ -64,8 +66,17 @@ public:
         ep = net::Endpoint{127, 0, 0, 1, 123};
         return recv(p, cap, got, to);
     }
+    Status listen(uint16_t port) noexcept override {
+        port_ = port; open_ = true; return Status::Ok;
+    }
+    Status accept(net::Socket*& out) noexcept override {
+        if (!open_) return Status::Unavailable;
+        out = this;
+        return Status::Ok;
+    }
     void close() noexcept override { open_ = false; }
     bool open() const noexcept override { return open_; }
+    uint16_t port() const noexcept { return port_; }
 
     Size tx_len() const noexcept { return tx_len_; }
     const uint8_t* tx() const noexcept { return tx_; }
@@ -79,6 +90,7 @@ private:
     uint8_t tx_[4096]{};
     Size tx_len_ = 0u;
     net::Endpoint ep_{};
+    uint16_t port_ = 0u;
     bool open_ = false;
 };
 
@@ -300,6 +312,36 @@ void test_tls_layer() {
 }
 
 
+void test_ca_store() {
+    std::puts("TLS CA store:");
+    net::CaStore store;
+    const uint8_t ca1[] = {0x30, 0x03, 1, 2, 3};
+    check("CA add", store.add(1u, ca1, sizeof(ca1)) == Status::Ok &&
+          store.count() == 1u && store.bundle_len() == sizeof(ca1));
+    check("CA duplicate", store.add(1u, ca1, sizeof(ca1)) == Status::AlreadyExists);
+    check("CA config", store.config().ca == store.bundle() && store.config().verify);
+    hal::mock::MockNvs nvs;
+    check("CA save", store.save(nvs) == Status::Ok);
+    net::CaStore loaded;
+    check("CA load", loaded.load(nvs) == Status::Ok && loaded.bundle_len() == sizeof(ca1));
+    check("CA remove", store.remove(1u) == Status::Ok && store.count() == 0u);
+}
+
+void test_listener() {
+    std::puts("TCP listener:");
+    MockFactory factory;
+    net::Listener listener;
+    check("listener open", listener.open(factory, 2323u) == Status::Ok &&
+          listener.listening() && factory.tcp.port() == 2323u);
+    net::Socket* accepted = nullptr;
+    check("listener accept", listener.accept(accepted) == Status::Ok &&
+          accepted == &factory.tcp && listener.same_socket());
+    check("listener rearm", listener.rearm() == Status::Ok && listener.listening() &&
+          !listener.same_socket());
+    listener.close();
+    check("listener close", !listener.listening());
+}
+
 void test_tcp_shell() {
     std::puts("Shell over TCP:");
     ScriptSocket sock;
@@ -389,6 +431,8 @@ int main() {
     test_socket_ipv4();
     test_mqtt();
     test_tls_layer();
+    test_ca_store();
+    test_listener();
     test_tcp_shell();
     test_http();
     test_sntp();

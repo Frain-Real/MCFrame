@@ -24,6 +24,8 @@ public:
     Status ep_read(uint8_t ep, void* data, Size cap, Size& got) noexcept override;
     void stall_ep0() noexcept override;
     Status set_address(uint8_t address) noexcept override;
+    Status suspend() noexcept override;
+    Status resume() noexcept override;
 
 private:
     void handle_reset() noexcept;

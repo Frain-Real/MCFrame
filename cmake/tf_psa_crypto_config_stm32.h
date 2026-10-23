@@ -1,0 +1,16 @@
+/* MCFrame STM32: TF-PSA-Crypto user config. */
+#ifndef MCFRAME_TF_PSA_CRYPTO_CONFIG_STM32_H
+#define MCFRAME_TF_PSA_CRYPTO_CONFIG_STM32_H
+
+#include "psa/crypto_config.h"
+
+/* No Unix/Windows entropy on bare metal. */
+#undef MBEDTLS_PSA_BUILTIN_GET_ENTROPY
+#define MBEDTLS_PSA_DRIVER_GET_ENTROPY
+#define MBEDTLS_PLATFORM_MS_TIME_ALT
+#define MBEDTLS_PLATFORM_TIME_ALT
+#undef MBEDTLS_PSA_ITS_FILE_C
+#undef MBEDTLS_PSA_CRYPTO_STORAGE_C
+#undef MBEDTLS_PSA_CRYPTO_STORAGE_C
+
+#endif

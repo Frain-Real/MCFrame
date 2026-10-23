@@ -1,5 +1,7 @@
 // tests/test_littlefs.cpp — littlefs на RAM-блочном устройстве.
 #include "os/fs/littlefs.hpp"
+#include "platforms/stm32/sd_spi.hpp"
+#include "hal/mock/mock_hal.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -22,6 +24,11 @@ public:
         std::memcpy(data_ + lba * kBlock, in, count * kBlock);
         return Status::Ok;
     }
+    Status erase(uint32_t lba, uint32_t count) noexcept override {
+        if (lba >= kBlocks || count > kBlocks - lba) return Status::InvalidArg;
+        std::memset(data_ + lba * kBlock, 0xFF, count * kBlock);
+        return Status::Ok;
+    }
     static constexpr uint32_t kBlock = 512u;
     static constexpr uint32_t kBlocks = 64u;
 private:
@@ -38,6 +45,15 @@ void check(const char* what, bool ok) {
 
 int main() {
     std::puts("littlefs:");
+    embed::hal::mock::MockGpioPin cd;
+    embed::hal::mock::MockGpioPin cs;
+    embed::hal::mock::MockSpi sd_bus;
+    embed::stm32::sd::Card sd(sd_bus, cs, &cd, true);
+    cd.set(false);   // active-low card detect: карта вставлена
+    check("SD present (inserted)", sd.present());
+    cd.set(true);
+    check("SD present (removed)", !sd.present());
+    check("SD poll removed", sd.poll() == Status::Unavailable && !sd.initialized());
     RamDisk disk;
     fs::LittleFs<512> lfs;
     check("format", lfs.format(disk) == Status::Ok);

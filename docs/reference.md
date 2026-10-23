@@ -156,7 +156,7 @@ idf.py build
 Phase 5 добавляет WiFi AP+STA (WPA2), BLE NimBLE (peripheral GATT,
 observer, broadcaster, central connect), provisioning по BLE/UART и HTTPS OTA с TLS.
 Реальная сборка выполнена на ESP-IDF 6.0.2; `mcframe_c3.bin` занимает
-0xf1a40 из 1.25 МБ (запас 0x4e5c0, ~25%).
+0xf24e0 из 1.25 МБ (запас 0x4db20, ~25%).
 
 ### Phase 6: NVS и OTA-инструменты
 
@@ -179,7 +179,7 @@ observer, broadcaster, central connect), provisioning по BLE/UART и HTTPS OTA
 - C3: DFS/light sleep, brown-out detector, BLE encryption, shell `heap/tasks/reset/power`;
 - STM32: PVD (`power::Brownout`), F4/G4 bootloader + два слота, NVS-адаптер;
 - ASan/UBSan: `-DMCFRAME_SANITIZE=ON`, CI job `sanitizers`;
-- C3 `mcframe_c3.bin` = 0xf1a40, слот 1.25 МБ, свободно 0x4e5c0 (~314 КБ, 25%).
+- C3 `mcframe_c3.bin` = 0xf24e0, слот 1.25 МБ, свободно 0x4db20 (~314 КБ, 25%).
 
 ### Phase 8: платформенная зрелость и эргономика
 
@@ -198,7 +198,7 @@ observer, broadcaster, central connect), provisioning по BLE/UART и HTTPS OTA
 - **Типобезопасное время** — [`duration.hpp`](../src/os/time/duration.hpp) +
   `sleep_for_ms`/`sleep_until`; на тике 10 мс `sleep_for_ms(1)` — один тик,
   а не ноль.
-- **C3** — слоты 1.25 МБ (0x140000), свободно 0x4e5c0 (~314 КБ) вместо ~72 КБ.
+- **C3** — слоты 1.25 МБ (0x140000), свободно 0x4db20 (~314 КБ) вместо ~72 КБ.
 - **Tickless idle + RTC wall clock** — [`rtc.hpp`](../src/os/time/rtc.hpp):
   F1 — STOP с RTC-будильником; F4/G4 — STOP + RTC wakeup timer
   ([`power_m4.cpp`](../src/platforms/stm32f4g4/power_m4.cpp)) и IWDG;
@@ -2351,10 +2351,13 @@ ctest --test-dir .build/mock --output-on-failure
 .build/mock/tests/mc_tests_time_units    # Duration/TimePoint/округление: 11 проверок
 .build/mock/tests/mc_tests_m4_drivers    # F4 DMA-маршруты и карта платы: 14 проверок
 .build/mock/tests/mc_tests_rtc           # RTC wall clock, перенос через сброс: 15 проверок
-.build/mock/tests/mc_tests_net           # MQTT/HTTP/SNTP/TLS/TCP shell: 50 проверок
-.build/mock/tests/mc_tests_usb           # USB CDC/DFU/MSC/composite/transport: 47 проверок
+.build/mock/tests/mc_tests_net           # MQTT/HTTP/SNTP/TLS/TCP shell/RNDIS: 60 проверок
+.build/mock/tests/mc_tests_usb           # USB CDC/DFU/MSC/composite CDC+MSC/RNDIS/suspend: 62 проверки
 .build/mock/tests/mc_tests_stm32rtc      # F1 RTC backend на модели регистров: 7 проверок
-.build/mock/tests/mc_tests_w5500         # W5500 SPI Ethernet, DHCP/DNS/link/IRQ: 21 проверок
+.build/mock/tests/mc_tests_w5500         # W5500 SPI Ethernet, DHCP/DNS/link/IRQ/listen: 22 проверки
+# littlefs: ./build/mock/tests/mc_tests_littlefs (12 проверок)
+# RNDIS: ./build/mock/tests/mc_tests_rndis (9 проверок)
+# mbedTLS (опционально): cmake ... -DMCFRAME_MBEDTLS=ON; mc_tests_tls_mbedtls
 # Rust (опционально): ./build.sh mock Debug -DMCFRAME_RUST_APP=ON
 # .build/mock/tests/mc_tests_rust        # C ABI Rust <-> C++: 1 проверка
 .build/mock/tests/mc_tests_fault     # P0: запись об аварии, wait queue, PI, таймаут, стек: 76 проверок

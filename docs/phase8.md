@@ -28,7 +28,7 @@
 - [`partitions.csv`](../firmware/esp32c3/partitions.csv): factory/ota_0/ota_1
   по 0x140000 (1.25 МБ), конец — 0x3D0000, 192 КБ оставлены под будущий
   data-раздел.
-- Запас приложения вырос с ~72 КБ (7%) до 0x4e5c0 (~314 КБ, 25%).
+- Запас приложения вырос с ~72 КБ (7%) до 0x4db20 (~314 КБ, 25%).
 
 ### 3. NVS v2
 
@@ -78,7 +78,7 @@ F1 flat          OK (app до 124 КБ, NVS 2 КБ + meta 2 КБ)
 F1 slot          OK (NVS 0)
 F4               OK (meta 16 КБ, backup 16 КБ, NVS 32 КБ, слоты 448/384 КБ)
 G4               OK (NVS 4 КБ, flat и slot)
-C3               OK (ESP-IDF 6.0.2, 0xf1a40, 0x4e5c0 free, 25%)
+C3               OK (ESP-IDF 6.0.2, 0xf24e0, 0x4db20 free, 25%)
 ```
 
 ## Ограничения

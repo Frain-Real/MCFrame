@@ -15,9 +15,13 @@ namespace embed::hal {
 
 enum class BleRole : uint8_t { Peripheral, Central, Observer, Broadcaster };
 
+enum class BleSecurity : uint8_t { None, JustWorks, Mitm };
+
 struct BleConfig {
     const char* name = nullptr;
     uint16_t    mtu  = 247u;
+    BleSecurity security = BleSecurity::JustWorks;
+    bool        bonding = true;
 };
 
 struct BleAddr {
@@ -47,6 +51,8 @@ struct BleGattChar {
     BleUuid uuid{};
     uint8_t properties = 0u;   // bit0 read, bit1 write, bit2 notify
     uint16_t handle = 0u;      // заполняет реализация
+    uint8_t value[32]{};       // для server read/write
+    uint8_t value_len = 0u;
 };
 
 struct BleGattService {
@@ -70,7 +76,7 @@ using BleWriteCallback = void (*)(void* ctx, uint16_t attr_handle,
 
 struct BleEvent {
     enum class Kind : uint8_t { Connected, Disconnected, NotificationSent,
-                                ScanDone, Error } kind = Kind::Error;
+                                ScanDone, Secured, Error } kind = Kind::Error;
     uint16_t conn_handle = 0u;
     int32_t  code = 0;
 };
@@ -97,6 +103,10 @@ public:
     virtual Status add_service(const BleUuid& uuid) noexcept = 0;
     virtual Status add_gatt_service(const BleGattService& svc) noexcept {
         (void)svc; return Status::NotSupported;
+    }
+    /// Обновить значение характеристики, зарегистрированной как GATT server.
+    virtual Status set_value(uint16_t, const void*, Size) noexcept {
+        return Status::NotSupported;
     }
     virtual Status notify(uint16_t conn_handle, uint16_t attr_handle,
                           const void* data, Size len) noexcept = 0;

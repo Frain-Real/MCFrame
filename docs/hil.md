@@ -38,17 +38,18 @@ CI проверяет сборку, host-модели и парсеры; HIL т�
 1. Windows/Linux видит RNDIS/Remote NDIS device, получает MAC/MTU.
 2. Host DHCP выдаёт IP; проверить ICMP/ARP и Ethernet frames.
 3. Проверить `INITIALIZE/QUERY/SET/RESET`, packet filter.
-4. Поднять lwIP netif и пройти HTTP GET; без IP-стека MQTT/HTTP не работают.
+4. Поднять lwIP netif (`rndis_lwip.hpp`) или компактный `RndisFactory`;
+   пройти HTTP GET/DHCP/ARP/TCP.
 
 ## BLE GATT client
 
 1. Подключиться к peripheral, discover services/chars.
 2. Read/write по handle, проверить ошибки/таймауты.
-3. Notify/indicate (CCCD) пока не обёрнут — HIL/доработка.
+3. CCCD/notify, pairing/bonding и произвольный GATT server — HIL.
 
 ## SD/littlefs
 
 1. `Card::init()` на реальной SDHC, READ/WRITE/CSD capacity.
-2. littlefs mount/format/read/write, power-fail.
+2. littlefs mount/format/read/write/erase, power-fail.
 3. Одновременная работа SD и W5500 на SPI1 — проверить CS/lock (сейчас
    общий CS-пин; нужен отдельный CS для второй SPI-периферии).

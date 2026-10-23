@@ -97,7 +97,7 @@ pub mod ffi {
     #[derive(Clone, Copy)] pub struct I2c(pub i32);
     #[derive(Clone, Copy)] pub struct Nvs(pub i32);
     #[derive(Clone, Copy)] pub struct Net(pub i32);
-    #[derive(Clone, Copy)] pub struct Socket(pub i32);
+    pub struct Socket(pub i32);
     #[derive(Clone, Copy)] pub struct Usb(pub i32);
 
     impl Gpio {
@@ -182,6 +182,12 @@ pub mod ffi {
         }
     }
 
+    impl Drop for Socket {
+        fn drop(&mut self) {
+            if self.0 >= 0 { unsafe { mc_net_close(self.0) }; self.0 = -1; }
+        }
+    }
+
     impl Socket {
         pub fn connect(&self, ip: [u8; 4], port: u16) -> bool {
             unsafe { mc_net_connect(self.0, ip.as_ptr(), port, 5000) == 0 }
@@ -197,7 +203,11 @@ pub mod ffi {
                                           timeout_ms, &mut got) };
             (rc == 0).then_some(got as usize)
         }
-        pub fn close(&self) { unsafe { mc_net_close(self.0) } }
+        /// Закрыть явно; Drop идемпотентен.
+        pub fn close(mut self) {
+            unsafe { mc_net_close(self.0) };
+            self.0 = -1;
+        }
     }
 
     impl Usb {

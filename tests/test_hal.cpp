@@ -190,6 +190,12 @@ void test_network_ble() {
     check("ble advertise", ble.advertise({adv, 3u}) == embed::Status::Ok && ble.advertising());
     const embed::hal::BleUuid uuid{};
     check("ble service", ble.add_service(uuid) == embed::Status::Ok && ble.has_service());
+    embed::hal::BleGattService gs{};
+    gs.count = 1u; gs.chars[0].properties = 3u;
+    check("ble gatt server", ble.add_gatt_service(gs) == embed::Status::Ok &&
+          ble.gatt_chars() == 1u);
+    check("ble gatt value", ble.set_value(7u, "v", 1u) == embed::Status::Ok &&
+          ble.value_handle() == 7u && ble.value_len() == 1u);
     BleCtx bctx{};
     check("ble subscribe", ble.subscribe(&ble_cb, &bctx) == embed::Status::Ok);
     const uint8_t value[] = {0x2Au};

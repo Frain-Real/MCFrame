@@ -161,6 +161,10 @@ int main() {
     net::DhcpLease lease{};
     uint8_t dtype = 0u;
     const bool dh = net::DhcpClient::parse_reply(reply, rp, 0x11223344u, dtype, lease);
+    uint8_t renewpkt[300]{};
+    const Size rn = net::DhcpClient::build_renew(renewpkt, sizeof(renewpkt),
+                                                 0x11223344u, mac, lease);
+    check("DHCP renew built", rn > 240u && renewpkt[242] == 3u);
     check("DHCP offer parse", dh && dtype == 2u && lease.ip[3] == 7u &&
           lease.gw[3] == 1u && lease.dns[0] == 8u);
 

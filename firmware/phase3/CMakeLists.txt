@@ -44,3 +44,23 @@ if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
         -specs=nosys.specs)
     set_target_properties(phase3_slot PROPERTIES SUFFIX ".elf")
 endif()
+
+# Diagnostic target: proves that TLS provider + bundled mbedTLS link on F4.
+# Not built by default; run `cmake --build ... --target tls_linkcheck`.
+if(MCFRAME_MBEDTLS AND MCU_TARGET STREQUAL "stm32f4")
+    add_executable(tls_linkcheck EXCLUDE_FROM_ALL
+        tls_linkcheck.cpp
+        ${CMAKE_SOURCE_DIR}/src/platforms/${MCU_TARGET}/startup_${MCU_TARGET}.s
+        ${CMAKE_SOURCE_DIR}/src/platforms/${MCU_TARGET}/system_${MCU_TARGET}.c)
+    target_link_libraries(tls_linkcheck PRIVATE MCFrame::Tls)
+    mcframe_firmware_slot(tls_linkcheck 0)
+    mcframe_flash_layout(tls_linkcheck)
+    target_compile_definitions(tls_linkcheck PRIVATE VECT_TAB_OFFSET=${MCFRAME_FLASH_SLOT0_OFFSET})
+    target_link_options(tls_linkcheck PRIVATE
+        -Wl,--gc-sections
+        -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/tls_linkcheck.map
+        -nostartfiles
+        -specs=nosys.specs)
+
+    set_target_properties(tls_linkcheck PROPERTIES SUFFIX ".elf")
+endif()

@@ -59,31 +59,15 @@ public:
         : factory_(&factory), console_(&console) {}
 
     Status begin(uint16_t port) noexcept {
-        if (listener_ != nullptr) return Status::AlreadyExists;
-        port_ = port;
-        Status st = factory_->create(net::Protocol::Tcp, listener_);
-        if (st != Status::Ok || listener_ == nullptr) {
-            listener_ = nullptr;
-            return (st == Status::Ok) ? Status::NoMemory : st;
-        }
-        st = listener_->listen(port);
-        if (st != Status::Ok) {
-            listener_->close();
-            listener_ = nullptr;
-            return st;
-        }
-        return Status::Ok;
+        if (listener_.listening()) return Status::AlreadyExists;
+        return listener_.open(*factory_, port);
     }
 
     void poll() noexcept {
-        if (listener_ == nullptr) return;
+        if (!listener_.listening()) return;
         if (client_ == nullptr) {
-            if (!listener_->open()) {
-                (void)listener_->listen(port_);
-                if (!listener_->open()) return;
-            }
             net::Socket* accepted = nullptr;
-            const Status st = listener_->accept(accepted);
+            const Status st = listener_.accept(accepted);
             if (st == Status::Ok && accepted != nullptr) {
                 client_ = accepted;
                 client_console_.attach(*client_, *console_);
@@ -96,23 +80,20 @@ public:
 
     void end_client() noexcept {
         client_console_.detach();
-        const bool same = (client_ == listener_);
+        const bool same = listener_.same_socket();
         if (client_ != nullptr) client_->close();
         client_ = nullptr;
-        // W5500: accepted connection и listener — один аппаратный сокет;
-        // после закрытия клиента его нужно снова перевести в LISTEN.
-        if (same && listener_ != nullptr) (void)listener_->listen(port_);
+        if (same) (void)listener_.rearm();
     }
 
-    bool listening() const noexcept { return listener_ != nullptr; }
+    bool listening() const noexcept { return listener_.listening(); }
     bool connected() const noexcept { return client_ != nullptr; }
 
 private:
     net::Factory* factory_ = nullptr;
     Console* console_ = nullptr;
-    net::Socket* listener_ = nullptr;
+    net::Listener listener_{};
     net::Socket* client_ = nullptr;
-    uint16_t port_ = 0u;
     TcpConsole client_console_{};
 };
 

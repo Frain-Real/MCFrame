@@ -71,6 +71,62 @@ public:
     virtual Status resolve(const char* host, Endpoint& out) noexcept = 0;
 };
 
+/// Слушающий TCP-сокет с явным жизненным циклом. Владеет одним Socket из
+/// пула фабрики; close()/rearm() освобождают/пересоздают его.
+class Listener {
+public:
+    Listener() noexcept = default;
+    Listener(const Listener&) = delete;
+    Listener& operator=(const Listener&) = delete;
+    ~Listener() noexcept { close(); }
+
+    Status open(Factory& factory, uint16_t port) noexcept {
+        close();
+        factory_ = &factory;
+        port_ = port;
+        Status st = factory.create(Protocol::Tcp, socket_);
+        if (st != Status::Ok || socket_ == nullptr) {
+            socket_ = nullptr;
+            return (st == Status::Ok) ? Status::NoMemory : st;
+        }
+        st = socket_->listen(port);
+        if (st != Status::Ok) { socket_->close(); socket_ = nullptr; return st; }
+        return Status::Ok;
+    }
+
+    Status accept(Socket*& out) noexcept {
+        out = nullptr;
+        if (socket_ == nullptr) return Status::Unavailable;
+        const Status st = socket_->accept(out);
+        if (st == Status::Ok && out == socket_) same_socket_ = true;
+        return st;
+    }
+
+    /// После accepted-соединения на том же аппаратном сокете (W5500)
+    /// пересоздать listener. Для C3/lwIP с отдельным accepted-сокетом не нужен.
+    Status rearm() noexcept {
+        if (factory_ == nullptr || port_ == 0u) return Status::Unavailable;
+        const uint16_t p = port_;
+        close();
+        return open(*factory_, p);
+    }
+
+    void close() noexcept {
+        if (socket_ != nullptr) { socket_->close(); socket_ = nullptr; }
+        same_socket_ = false;
+    }
+
+    bool listening() const noexcept { return socket_ != nullptr; }
+    bool same_socket() const noexcept { return same_socket_; }
+    uint16_t port() const noexcept { return port_; }
+
+private:
+    Factory* factory_ = nullptr;
+    Socket* socket_ = nullptr;
+    uint16_t port_ = 0u;
+    bool same_socket_ = false;
+};
+
 /// Проверка «host — это IPv4-литерал». Полезно реализациям resolve.
 inline bool parse_ipv4(const char* text, uint8_t out[4]) noexcept {
     if (text == nullptr) return false;

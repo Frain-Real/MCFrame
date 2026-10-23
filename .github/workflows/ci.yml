@@ -39,6 +39,8 @@ jobs:
         target: [stm32f4, stm32g4]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Toolchain
         run: |
@@ -46,6 +48,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi \
             libstdc++-arm-none-eabi-newlib
+
+      - name: mbedTLS Python generator deps
+        run: |
+          python3 -m venv .build/mbedtls-venv
+          .build/mbedtls-venv/bin/pip install --quiet -r requirements-mbedtls.txt
+          echo "$PWD/.build/mbedtls-venv/bin" >> "$GITHUB_PATH"
+          echo "PYTHONPATH=$PWD/.build/mbedtls-venv/lib/python$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')/site-packages" >> "$GITHUB_ENV"
 
       - name: Configure + build Phase 2 self-test
         run: ./build.sh ${{ matrix.target }} Release
@@ -205,6 +214,39 @@ jobs:
             -Z build-std=core --target thumbv7em-none-eabihf
           test -f target/thumbv7m-none-eabi/release/libmcframe_app.a
           test -f target/thumbv7em-none-eabihf/release/libmcframe_app.a
+
+  mbedtls:
+    name: mbedtls
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib
+      - name: mbedTLS Python generator deps
+        run: |
+          python3 -m venv .build/mbedtls-venv
+          .build/mbedtls-venv/bin/pip install --quiet -r requirements-mbedtls.txt
+          echo "$PWD/.build/mbedtls-venv/bin" >> "$GITHUB_PATH"
+          echo "PYTHONPATH=$PWD/.build/mbedtls-venv/lib/python$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')/site-packages" >> "$GITHUB_ENV"
+      - name: Host mbedTLS provider
+        run: |
+          cmake -S . -B .build/mbedtls-host -DMCU_TARGET=mock -DCMAKE_BUILD_TYPE=Release \
+            -DMCFRAME_MBEDTLS=ON -DPython3_EXECUTABLE="$(command -v python3)"
+          cmake --build .build/mbedtls-host --target mc_tests_tls_mbedtls -j2
+          ctest --test-dir .build/mbedtls-host -R tls_mbedtls --output-on-failure
+      - name: F4 mbedTLS build
+        run: |
+          cmake -S . -B .build/mbedtls-f4 \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/toolchain-stm32f4.cmake" \
+            -DMCU_TARGET=stm32f4 -DCMAKE_BUILD_TYPE=Release \
+            -DMCFRAME_MBEDTLS=ON -DPython3_EXECUTABLE="$(command -v python3)"
+          cmake --build .build/mbedtls-f4 --target MCFrame mcframe_tls_compile -j2
 
   fuzz:
     name: fuzz-smoke

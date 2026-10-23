@@ -12,6 +12,8 @@
 #pragma once
 
 #include "socket.hpp"
+#include "dhcp.hpp"
+#include "dns.hpp"
 #include "../../hal/SpiDevice.hpp"
 #include "../../hal/IGpio.hpp"
 #include "../config/time_config.hpp"
@@ -437,82 +439,41 @@ private:
 
 
 // ─────────────────────────── DHCP / DNS ─────────────────────────────────────
+// Кодеки/клиенты вынесены в os/net/{dhcp,dns}.hpp; здесь только адаптеры
+// к выделенным аппаратным сокетам W5500 (7 — DHCP, 6 — DNS).
 
-struct DhcpLease {
-    uint8_t ip[4]{};
-    uint8_t gw[4]{};
-    uint8_t mask[4]{};
-    uint8_t dns[4]{};
-    uint8_t server[4]{};
-    uint32_t lease_s = 0u;
-};
-
-/// DHCP-клиент поверх W5500 UDP. Работает на выделенном слоте 7 (порт 68),
-/// поэтому не занимает пул приложения.
-class DhcpClient {
+class W5500DhcpClient {
 public:
     Status acquire(W5500Core& core, const uint8_t mac[6],
                    W5500Config& cfg, uint32_t timeout_ms) noexcept {
-        if (mac == nullptr) return Status::InvalidArg;
-        W5500Socket sock;
-        Status st = sock.start(&core, 7u, Protocol::Udp, 68u);
-        if (st != Status::Ok) return st;
-
-        const uint32_t xid = 0x4D434631u ^ static_cast<uint32_t>(now_ms());
-        uint8_t pkt[300]{};
-        Size n = build_discover(pkt, sizeof(pkt), xid, mac);
-        if (n == 0u) { sock.close(); return Status::NoMemory; }
-        Endpoint bcast{255, 255, 255, 255, 67u};
-        Size sent = 0u;
-        st = sock.send_to(bcast, pkt, n, sent);
-        if (st != Status::Ok) { sock.close(); return st; }
-
         DhcpLease lease{};
-        bool offered = false;
-        const uint64_t start = now_ms();
-        while (elapsed(start) < timeout_ms) {
-            Endpoint from{};
-            uint8_t rx[512]{};
-            Size got = 0u;
-            st = sock.recv_from(from, rx, sizeof(rx), got, 500u);
-            if (st == Status::Timeout) continue;
-            if (st != Status::Ok) { sock.close(); return st; }
-            uint8_t type = 0u;
-            if (!parse_reply(rx, got, xid, type, lease)) continue;
-            if (type == 2u) { offered = true; break; }   // OFFER
-            if (type == 5u) { offered = true; break; }   // ACK без OFFER
-        }
-        if (!offered) { sock.close(); return Status::Timeout; }
-
-        if (lease.ip[0] == 0u && lease.ip[1] == 0u &&
-            lease.ip[2] == 0u && lease.ip[3] == 0u) {
-            sock.close();
-            return Status::NotFound;
-        }
-        // REQUEST выбранного адреса.
-        n = build_request(pkt, sizeof(pkt), xid, mac, lease);
-        if (n == 0u) { sock.close(); return Status::NoMemory; }
-        st = sock.send_to(bcast, pkt, n, sent);
-        if (st != Status::Ok) { sock.close(); return st; }
-
-        bool acked = false;
-        while (elapsed(start) < timeout_ms) {
-            Endpoint from{};
-            uint8_t rx[512]{};
-            Size got = 0u;
-            st = sock.recv_from(from, rx, sizeof(rx), got, 500u);
-            if (st == Status::Timeout) continue;
-            if (st != Status::Ok) { sock.close(); return st; }
-            uint8_t type = 0u;
-            DhcpLease a{};
-            if (!parse_reply(rx, got, xid, type, a)) continue;
-            if (type == 5u) { lease = a; acked = true; break; }
-        }
-        sock.close();
-        if (!acked) return Status::Timeout;
-
+        Status st = run(core, mac, lease, timeout_ms, false);
+        if (st != Status::Ok) return st;
         const Status ns = core.set_network(lease.ip, lease.gw, lease.mask);
         if (ns != Status::Ok) return ns;
+        apply(cfg, lease);
+        lease_ = lease;
+        return Status::Ok;
+    }
+
+    Status renew(W5500Core& core, const uint8_t mac[6], W5500Config& cfg,
+                 uint32_t timeout_ms) noexcept {
+        DhcpLease lease = lease_;
+        if (lease.lease_s == 0u) return acquire(core, mac, cfg, timeout_ms);
+        Status st = run(core, mac, lease, timeout_ms, true);
+        if (st != Status::Ok) return st;
+        const Status ns = core.set_network(lease.ip, lease.gw, lease.mask);
+        if (ns != Status::Ok) return ns;
+        apply(cfg, lease);
+        lease_ = lease;
+        return Status::Ok;
+    }
+
+    const DhcpLease& lease() const noexcept { return lease_; }
+    bool valid() const noexcept { return lease_.lease_s != 0u; }
+
+private:
+    static void apply(W5500Config& cfg, const DhcpLease& lease) noexcept {
         bool have_dns = false;
         for (uint8_t i = 0u; i < 4u; ++i) {
             cfg.ip[i] = lease.ip[i];
@@ -520,231 +481,37 @@ public:
             cfg.mask[i] = lease.mask[i];
             if (lease.dns[i] != 0u) have_dns = true;
         }
-        if (have_dns) {
-            for (uint8_t i = 0u; i < 4u; ++i) cfg.dns[i] = lease.dns[i];
-        }
-        return Status::Ok;
+        if (have_dns) for (uint8_t i = 0u; i < 4u; ++i) cfg.dns[i] = lease.dns[i];
     }
 
-    static Size build_discover(uint8_t* out, Size cap, uint32_t xid,
-                               const uint8_t mac[6]) noexcept {
-        return build(out, cap, xid, mac, 1u, nullptr);
-    }
-    static Size build_request(uint8_t* out, Size cap, uint32_t xid,
-                              const uint8_t mac[6], const DhcpLease& lease) noexcept {
-        return build(out, cap, xid, mac, 3u, &lease);
-    }
-
-    /// Разобрать DHCP OFFER/ACK. type — 2/5; lease заполняется частично.
-    static bool parse_reply(const uint8_t* pkt, Size len, uint32_t xid,
-                            uint8_t& type, DhcpLease& lease) noexcept {
-        if (pkt == nullptr || len < 240u || pkt[0] != 2u || pkt[1] != 1u || pkt[2] != 6u) {
-            return false;
-        }
-        if (rd32(pkt + 4u) != xid) return false;
-        const uint32_t cookie = rd32be(pkt + 236u);
-        if (cookie != 0x63825363u) return false;
-        for (uint8_t i = 0u; i < 4u; ++i) lease.ip[i] = pkt[16u + i];
-        Size pos = 240u;
-        bool have_type = false;
-        while (pos < len) {
-            const uint8_t code = pkt[pos++];
-            if (code == 0u) continue;                  // pad
-            if (code == 255u) break;                   // end
-            if (pos >= len) return false;
-            const uint8_t olen = pkt[pos++];
-            if (pos + olen > len) return false;
-            if (code == 53u && olen >= 1u) {
-                type = pkt[pos];
-                have_type = true;
-            } else if (code == 1u && olen >= 4u) {
-                for (uint8_t i = 0u; i < 4u; ++i) lease.mask[i] = pkt[pos + i];
-            } else if (code == 3u && olen >= 4u) {
-                for (uint8_t i = 0u; i < 4u; ++i) lease.gw[i] = pkt[pos + i];
-            } else if (code == 6u && olen >= 4u) {
-                for (uint8_t i = 0u; i < 4u; ++i) lease.dns[i] = pkt[pos + i];
-            } else if (code == 54u && olen >= 4u) {
-                for (uint8_t i = 0u; i < 4u; ++i) lease.server[i] = pkt[pos + i];
-            } else if (code == 51u && olen >= 4u) {
-                lease.lease_s = rd32be(pkt + pos);
-            }
-            pos = static_cast<Size>(pos + olen);
-        }
-        return have_type && (type == 2u || type == 5u);
+    Status run(W5500Core& core, const uint8_t mac[6], DhcpLease& lease,
+               uint32_t timeout_ms, bool renew) noexcept {
+        W5500Socket sock;
+        Status st = sock.start(&core, 7u, Protocol::Udp, 68u);
+        if (st != Status::Ok) return st;
+        DhcpClient codec;
+        st = renew ? codec.renew(sock, mac, lease, timeout_ms)
+                   : codec.acquire(sock, mac, lease, timeout_ms);
+        sock.close();
+        return st;
     }
 
-private:
-    static uint32_t now_ms() noexcept {
-        return config::OsTimer::TimeAvailable()
-            ? static_cast<uint32_t>(config::OsTimer::NowMs()) : 0u;
-    }
-    static uint32_t elapsed(uint64_t start) noexcept {
-        return config::OsTimer::TimeAvailable()
-            ? static_cast<uint32_t>(config::OsTimer::NowMs() - start) : 0xFFFFFFFFu;
-    }
-    static uint32_t rd32be(const uint8_t* p) noexcept {
-        return (static_cast<uint32_t>(p[0]) << 24) |
-               (static_cast<uint32_t>(p[1]) << 16) |
-               (static_cast<uint32_t>(p[2]) << 8) |
-               static_cast<uint32_t>(p[3]);
-    }
-    static uint32_t rd32(const uint8_t* p) noexcept {
-        return static_cast<uint32_t>(p[0]) |
-               (static_cast<uint32_t>(p[1]) << 8) |
-               (static_cast<uint32_t>(p[2]) << 16) |
-               (static_cast<uint32_t>(p[3]) << 24);
-    }
-    static void put32(uint8_t* p, uint32_t v) noexcept {
-        p[0] = static_cast<uint8_t>(v);
-        p[1] = static_cast<uint8_t>(v >> 8);
-        p[2] = static_cast<uint8_t>(v >> 16);
-        p[3] = static_cast<uint8_t>(v >> 24);
-    }
-    static Size build(uint8_t* out, Size cap, uint32_t xid, const uint8_t mac[6],
-                      uint8_t type, const DhcpLease* lease) noexcept {
-        if (out == nullptr || cap < 280u || mac == nullptr) return 0u;
-        for (Size i = 0u; i < 240u; ++i) out[i] = 0u;
-        out[0] = 1u; out[1] = 1u; out[2] = 6u;
-        put32(out + 4u, xid);
-        out[10] = 0x80u; out[11] = 0x00u;             // broadcast
-        for (uint8_t i = 0u; i < 6u; ++i) out[28u + i] = mac[i];
-        put32(out + 236u, 0x63825363u);
-        Size n = 240u;
-        out[n++] = 53u; out[n++] = 1u; out[n++] = type;
-        if (lease != nullptr) {
-            out[n++] = 50u; out[n++] = 4u;
-            for (uint8_t i = 0u; i < 4u; ++i) out[n++] = lease->ip[i];
-            out[n++] = 54u; out[n++] = 4u;
-            for (uint8_t i = 0u; i < 4u; ++i) out[n++] = lease->server[i];
-        }
-        out[n++] = 55u; out[n++] = 3u; out[n++] = 1u; out[n++] = 3u; out[n++] = 6u;
-        out[n++] = 255u;
-        return n;
-    }
+    DhcpLease lease_{};
 };
 
-/// DNS-клиент поверх W5500 UDP. Поддерживает A-запросы и сжатые имена.
-class DnsClient {
+class W5500DnsClient {
 public:
     Status resolve(W5500Core& core, const uint8_t dns[4],
                    const char* host, Endpoint& out) noexcept {
-        if (host == nullptr || host[0] == '\0') return Status::InvalidArg;
-        uint8_t ip[4]{};
-        if (parse_ipv4(host, ip)) {
-            for (uint8_t i = 0u; i < 4u; ++i) out.addr[i] = ip[i];
-            return Status::Ok;
-        }
         W5500Socket sock;
         Status st = sock.start(&core, 6u, Protocol::Udp);
         if (st != Status::Ok) return st;
-        uint8_t q[260]{};
-        const Size qn = build_query(q, sizeof(q), host);
-        if (qn == 0u) { sock.close(); return Status::InvalidArg; }
-        Endpoint server{};
-        if (dns == nullptr) { sock.close(); return Status::InvalidArg; }
-        for (uint8_t i = 0u; i < 4u; ++i) server.addr[i] = dns[i];
-        server.port = 53u;
-        Size sent = 0u;
-        st = sock.send_to(server, q, qn, sent);
-        if (st != Status::Ok) { sock.close(); return st; }
-        const uint64_t start = config::OsTimer::TimeAvailable()
-            ? config::OsTimer::NowMs() : 0u;
-        for (uint8_t attempt = 0u; attempt < 8u; ++attempt) {
-            Endpoint from{};
-            uint8_t rx[512]{};
-            Size got = 0u;
-            st = sock.recv_from(from, rx, sizeof(rx), got, 1000u);
-            if (st == Status::Timeout) {
-                if (config::OsTimer::TimeAvailable() &&
-                    config::OsTimer::NowMs() - start > 5000u) break;
-                continue;
-            }
-            if (st != Status::Ok) { sock.close(); return st; }
-            if (parse_answer(rx, got, ip)) {
-                sock.close();
-                for (uint8_t i = 0u; i < 4u; ++i) out.addr[i] = ip[i];
-                return Status::Ok;
-            }
-        }
+        DnsClient codec;
+        st = codec.resolve(sock, dns, host, out);
         sock.close();
-        return Status::Timeout;
-    }
-
-    /// Разобрать первый A-record. Compression pointers поддерживаются.
-    static bool parse_answer(const uint8_t* pkt, Size len, uint8_t ip[4]) noexcept {
-        if (pkt == nullptr || len < 12u || ip == nullptr) return false;
-        if (pkt[0] != 0x12u || pkt[1] != 0x34u) return false;   // transaction id
-        const uint16_t qd = static_cast<uint16_t>((pkt[4] << 8) | pkt[5]);
-        const uint16_t an = static_cast<uint16_t>((pkt[6] << 8) | pkt[7]);
-        if (an == 0u) return false;
-        Size pos = 12u;
-        for (uint16_t i = 0u; i < qd; ++i) {
-            if (!skip_name(pkt, len, pos)) return false;
-            if (pos + 4u > len) return false;
-            pos += 4u;
-        }
-        for (uint16_t i = 0u; i < an; ++i) {
-            if (!skip_name(pkt, len, pos)) return false;
-            if (pos + 10u > len) return false;
-            const uint16_t type = static_cast<uint16_t>((pkt[pos] << 8) | pkt[pos + 1u]);
-            const uint16_t clazz = static_cast<uint16_t>((pkt[pos + 2u] << 8) | pkt[pos + 3u]);
-            const uint16_t rdlen = static_cast<uint16_t>((pkt[pos + 8u] << 8) | pkt[pos + 9u]);
-            pos += 10u;
-            if (pos + rdlen > len) return false;
-            if (type == 1u && clazz == 1u && rdlen == 4u) {
-                for (uint8_t k = 0u; k < 4u; ++k) ip[k] = pkt[pos + k];
-                return true;
-            }
-            pos = static_cast<Size>(pos + rdlen);
-        }
-        return false;
-    }
-
-private:
-    static Size build_query(uint8_t* out, Size cap, const char* host) noexcept {
-        if (out == nullptr || cap < 18u || host == nullptr) return 0u;
-        for (Size i = 0u; i < 12u; ++i) out[i] = 0u;
-        out[0] = 0x12u; out[1] = 0x34u;
-        out[2] = 0x01u; out[3] = 0x00u;             // RD
-        out[4] = 0x00u; out[5] = 0x01u;             // QDCOUNT
-        Size n = 12u;
-        Size label = 0u;
-        for (const char* p = host; ; ++p) {
-            if (*p == '.' || *p == '\0') {
-                if (label == 0u || label > 63u || n + 1u + label + 1u > cap) return 0u;
-                out[n++] = static_cast<uint8_t>(label);
-                for (Size i = 0u; i < label; ++i) out[n++] = static_cast<uint8_t>(p[i - label]);
-                label = 0u;
-                if (*p == '\0') break;
-            } else {
-                ++label;
-                if (label > 63u) return 0u;
-            }
-        }
-        if (n + 5u > cap) return 0u;
-        out[n++] = 0u;
-        out[n++] = 0x00u; out[n++] = 0x01u;         // QTYPE A
-        out[n++] = 0x00u; out[n++] = 0x01u;         // QCLASS IN
-        return n;
-    }
-
-    static bool skip_name(const uint8_t* pkt, Size len, Size& pos) noexcept {
-        for (uint8_t guard = 0u; guard < 64u; ++guard) {
-            if (pos >= len) return false;
-            const uint8_t b = pkt[pos++];
-            if (b == 0u) return true;
-            if ((b & 0xC0u) == 0xC0u) {
-                if (pos >= len) return false;
-                ++pos;
-                return true;
-            }
-            if ((b & 0xC0u) != 0u || pos + b > len) return false;
-            pos = static_cast<Size>(pos + b);
-        }
-        return false;
+        return st;
     }
 };
-
 
 /// Фабрика W5500: до 8 аппаратных сокетов.
 template <Size MaxSockets = 4u>
@@ -815,13 +582,37 @@ public:
     Status dhcp(uint32_t timeout_ms) noexcept {
         return dhcp_.acquire(core_, cfg_.mac, cfg_, timeout_ms);
     }
+    Status renew_dhcp(uint32_t timeout_ms) noexcept {
+        return dhcp_.renew(core_, cfg_.mac, cfg_, timeout_ms);
+    }
+    const DhcpLease& lease() const noexcept { return dhcp_.lease(); }
+    bool dhcp_valid() const noexcept { return dhcp_.valid(); }
+
+    /// Периодический вызов из приложения: T1 renewal и expiry.
+    /// Возврат Timeout — lease истёк, сеть нужно поднимать заново.
+    Status dhcp_poll(uint32_t timeout_ms = 5000u) noexcept {
+        if (!cfg_.use_dhcp || !dhcp_.valid()) return Status::Ok;
+        if (!config::OsTimer::TimeAvailable()) return Status::Ok;
+        const uint64_t now = config::OsTimer::NowMs();
+        const DhcpLease& l = dhcp_.lease();
+        if (DhcpClient::remaining_ms(l, now) == 0u) {
+            for (uint8_t i = 0u; i < 4u; ++i) cfg_.ip[i] = 0u;
+            return Status::Timeout;
+        }
+        const uint32_t t1 = l.t1_s != 0u ? l.t1_s
+                           : (l.lease_s != 0u ? l.lease_s / 2u : 0u);
+        if (t1 != 0u && now - l.obtained_ms >= static_cast<uint64_t>(t1) * 1000u) {
+            return renew_dhcp(timeout_ms);
+        }
+        return Status::Ok;
+    }
 
 private:
     W5500Core core_;
     W5500Socket pool_[MaxSockets];
     W5500Config cfg_{};
-    DhcpClient dhcp_;
-    DnsClient dns_;
+    W5500DhcpClient dhcp_;
+    W5500DnsClient dns_;
 };
 
 template <Size N = 4u>
