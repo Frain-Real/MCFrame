@@ -1,6 +1,7 @@
 // boards/f103_generic/board.cpp
 #include "boards/f103_generic/board.hpp"
 #include "os/nvs/nvs.hpp"
+#include "platforms/stm32/rtc_stm32.hpp"
 
 #ifndef MCFRAME_NVS_SIZE
 #define MCFRAME_NVS_SIZE 0u
@@ -92,6 +93,7 @@ Spi& spi2() noexcept { return g_spi2; }
 Pwm& pwm1() noexcept { return g_pwm; }
 
 void init() noexcept {
+    embed::rtc::WallClock::instance().attach(&embed::stm32::rtc::backend());
     // Пины UART — из карты платы. На F1 альтернативная функция задаётся
     // режимом GPIO (AF push-pull), а не полем AFR: TX — Alternate, RX —
     // вход. Драйвер USART не трогает GPIO, чтобы не завязываться на плату.

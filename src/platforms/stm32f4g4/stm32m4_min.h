@@ -158,6 +158,49 @@ typedef struct {
 #define PWR ((PWR_TypeDef*)0x40007000UL)
 
 typedef struct {
+    volatile uint32_t TR;
+    volatile uint32_t DR;
+    volatile uint32_t CR;
+    volatile uint32_t ISR;
+    volatile uint32_t PRER;
+    volatile uint32_t WUTR;
+    volatile uint32_t CALIBR;
+    volatile uint32_t ALRMAR;
+    volatile uint32_t ALRMBR;
+    volatile uint32_t WPR;
+    volatile uint32_t SSR;
+    volatile uint32_t SHIFTR;
+    volatile uint32_t TSTR;
+    volatile uint32_t TSDR;
+    volatile uint32_t TSSSR;
+    volatile uint32_t CALR;
+    volatile uint32_t TAFCR;
+    volatile uint32_t ALRMASSR;
+    volatile uint32_t ALRMBSSR;
+    volatile uint32_t RESERVED0;
+    volatile uint32_t BKP[20];
+} RTC_TypeDef;
+
+#define RTC ((RTC_TypeDef*)0x40002800UL)
+
+// RCC backup-domain registers. F4 и G4 имеют разные смещения, поэтому
+// адреса заданы явно, а не через минимальную RCC_TypeDef.
+#if defined(MCFRAME_SOC_STM32G4)
+#define MCFRAME_RCC_BDCR_ADDR 0x40021090UL
+#define MCFRAME_RCC_CSR_ADDR  0x40021094UL
+#define MCFRAME_RCC_APB1ENR_PWREN_ADDR 0x40021058UL
+#else
+#define MCFRAME_RCC_BDCR_ADDR 0x40023870UL
+#define MCFRAME_RCC_CSR_ADDR  0x40023874UL
+#define MCFRAME_RCC_APB1ENR_PWREN_ADDR 0x40023840UL
+#endif
+
+#define MCFRAME_RCC_BDCR (*reinterpret_cast<volatile uint32_t*>(MCFRAME_RCC_BDCR_ADDR))
+#define MCFRAME_RCC_CSR  (*reinterpret_cast<volatile uint32_t*>(MCFRAME_RCC_CSR_ADDR))
+#define MCFRAME_RCC_APB1ENR (*reinterpret_cast<volatile uint32_t*>(MCFRAME_RCC_APB1ENR_PWREN_ADDR))
+
+
+typedef struct {
     volatile uint32_t ACR;
     volatile uint32_t KEYR;
     volatile uint32_t OPTKEYR;

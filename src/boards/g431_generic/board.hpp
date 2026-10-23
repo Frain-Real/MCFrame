@@ -14,6 +14,7 @@
 #include "hal/II2c.hpp"
 #include "hal/IAdc.hpp"
 #include "hal/INvs.hpp"
+#include "os/net/w5500.hpp"
 
 #include "stm32_periph_m4.hpp"
 
@@ -27,6 +28,7 @@ using Spi     = embed::hal::ISpi;
 using Pwm     = embed::hal::IPwm;
 using Gpio    = embed::hal::IGpioPin;
 using Nvs     = embed::hal::INvs;
+using Net     = embed::net::W5500FactoryT<4>;
 
 using Pins = PinMap<20>;
 constexpr const Pins& pins() noexcept { return kPins; }
@@ -43,6 +45,7 @@ Spi&  spi1() noexcept;
 Spi&  spi2() noexcept;
 Pwm&  pwm1() noexcept;
 Nvs&  nvs() noexcept;
+Net&  net() noexcept;
 
 template <uint8_t I>
 inline auto& uart() noexcept {

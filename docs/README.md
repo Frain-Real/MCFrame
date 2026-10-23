@@ -11,6 +11,10 @@
 - [Phase 7](phase7.md) — power, security, diagnostics, sanitizers.
 - [Phase 8](phase8.md) — F4/G4 BSP, NVS v2, Duration, декларативная плата, C3 repartition.
 - [HAL и board](hal.md) — интерфейсы Phase 1.
+- [Tickless idle и RTC](rtc.md) — STOP, RTC wall clock, перенос времени.
+- [Сеть](network.md) — сокеты, MQTT, HTTP, SNTP.
+- [USB device](usb.md) — CDC-ACM, DFU, MSC.
+- [Rust](rust.md) — no_std-приложение и C ABI.
 
 ## Architecture Decision Records
 

@@ -1,2 +1,4 @@
 .build/
 build/
+rust/mcframe_app/target/
+.cargo-home/

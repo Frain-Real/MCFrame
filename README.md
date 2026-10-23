@@ -39,6 +39,7 @@ cmake --build build --parallel
 ```bash
 ./build.sh stm32f4 Release        # self-test + phase3_fw (драйверы)
 ./build.sh stm32g4 Release        # self-test + phase3_fw (драйверы)
+./build.sh mock Debug -DMCFRAME_RUST_APP=ON   # + Rust staticlib и mc_tests_rust
 python3 tools/target_plan.py      # проверка матрицы без кросс-компилятора
 ```
 
@@ -153,7 +154,7 @@ idf.py build
 Phase 5 добавляет WiFi AP+STA (WPA2), BLE NimBLE (peripheral GATT,
 observer, broadcaster, central connect), provisioning по BLE/UART и HTTPS OTA с TLS.
 Реальная сборка выполнена на ESP-IDF 6.0.2; `mcframe_c3.bin` занимает
-0xee670 из 1.25 МБ (запас 0x51990, ~25%).
+0xeea90 из 1.25 МБ (запас 0x51570, ~25%).
 
 ### Phase 6: NVS и OTA-инструменты
 
@@ -175,7 +176,7 @@ observer, broadcaster, central connect), provisioning по BLE/UART и HTTPS OTA
 - C3: DFS/light sleep, brown-out detector, BLE encryption, shell `heap/tasks/reset/power`;
 - STM32: PVD (`power::Brownout`), F4/G4 bootloader + два слота, NVS-адаптер;
 - ASan/UBSan: `-DMCFRAME_SANITIZE=ON`, CI job `sanitizers`;
-- C3 `mcframe_c3.bin` = 0xee670, слот 1.25 МБ, свободно 0x51990 (~334 КБ, 25%).
+- C3 `mcframe_c3.bin` = 0xeea90, слот 1.25 МБ, свободно 0x51570 (~333 КБ, 25%).
 
 ### Phase 8: платформенная зрелость и эргономика
 
@@ -194,7 +195,21 @@ observer, broadcaster, central connect), provisioning по BLE/UART и HTTPS OTA
 - **Типобезопасное время** — [`duration.hpp`](src/os/time/duration.hpp) +
   `sleep_for_ms`/`sleep_until`; на тике 10 мс `sleep_for_ms(1)` — один тик,
   а не ноль.
-- **C3** — слоты 1.25 МБ (0x140000), свободно 0x51990 (~334 КБ) вместо ~72 КБ.
+- **C3** — слоты 1.25 МБ (0x140000), свободно 0x51570 (~333 КБ) вместо ~72 КБ.
+- **Tickless idle + RTC wall clock** — [`rtc.hpp`](src/os/time/rtc.hpp):
+  STOP с RTC-будильником уже в супервизоре; календарное время переживает
+  сброс (F1 — RTC CNT, F4/G4 — RTC TR/DR BCD, mock — `SoftBackend`).
+- **Сеть** — [`net/socket.hpp`](src/os/net/socket.hpp), MQTT 3.1.1,
+  HTTP/1.1 и SNTP; на C3 — lwIP backend
+  [`net_socket_esp.cpp`](src/boards/esp32c3/net_socket_esp.cpp), на STM32 —
+  W5500 по SPI [`w5500.hpp`](src/os/net/w5500.hpp).
+- **USB device** — [`usb.hpp`](src/os/usb/usb.hpp): CDC-ACM, DFU 1.1 и
+  MSC/BOT+SCSI поверх `usb::Hal`; F4 OTG FS адаптер
+  [`usb_otg_fs.cpp`](src/platforms/stm32f4g4/usb_otg_fs.cpp).
+- **Rust** — `no_std` staticlib, C ABI-мост
+  [`rust_bridge.cpp`](src/os/rust/rust_bridge.cpp), `MCFRAME_RUST_APP=ON` и
+  [`docs/rust.md`](docs/rust.md); проверены `thumbv7m-none-eabi` (F1,
+  85 468 Б flat) и `thumbv7em-none-eabihf` (F4/G4).
 
 ### LTO
 
@@ -2260,7 +2275,7 @@ st-flash write .build/stm32/example_fw.bin    0x08005000   # слот A
 
 `.github/workflows/ci.yml` проверяет то, что легко сломать незаметно:
 
-* **mock Debug** — сборка с ASan/UBSan и все 23 набора;
+* **mock Debug** — сборка с ASan/UBSan и все 28 наборов;
 * **mock Release** — LTO-сборка (проверяет, что LTO не ломает таблицы
   векторов/`naked`-функции) и те же наборы;
 * **stm32** — кросс-сборка `flat`, `flat + shell` и `slot`, плюс бюджет
@@ -2312,6 +2327,13 @@ ctest --test-dir .build/mock --output-on-failure
 .build/mock/tests/mc_tests_ota_meta      # OTA meta-журнал: append/компакция/обрыв: 13 проверок
 .build/mock/tests/mc_tests_time_units    # Duration/TimePoint/округление: 11 проверок
 .build/mock/tests/mc_tests_m4_drivers    # F4 DMA-маршруты и карта платы: 14 проверок
+.build/mock/tests/mc_tests_rtc           # RTC wall clock, перенос через сброс: 15 проверок
+.build/mock/tests/mc_tests_net           # MQTT/HTTP/SNTP на сокетах: 30 проверок
+.build/mock/tests/mc_tests_usb           # USB CDC/DFU/MSC на mock-HAL: 25 проверок
+.build/mock/tests/mc_tests_stm32rtc      # F1 RTC backend на модели регистров: 7 проверок
+.build/mock/tests/mc_tests_w5500         # W5500 SPI Ethernet + net::Factory: 11 проверок
+# Rust (опционально): ./build.sh mock Debug -DMCFRAME_RUST_APP=ON
+# .build/mock/tests/mc_tests_rust        # C ABI Rust <-> C++: 1 проверка
 .build/mock/tests/mc_tests_fault     # P0: запись об аварии, wait queue, PI, таймаут, стек: 76 проверок
 .build/mock/tests/mc_tests_ipc       # P1: очереди/события/WorkQueue/log/shell/статистика: 98 проверок
 .build/mock/tests/mc_tests_hal       # Phase 1: HAL-интерфейсы, mock, board, kernel, arch-frame: 78 проверок
@@ -2319,10 +2341,11 @@ ctest --test-dir .build/mock --output-on-failure
 .build/mock/tests/mc_tests_stm32periph # Phase 3: F1 GPIO/SPI/PWM на модели: 14 проверок
 ```
 
-`ctest` прогоняет семнадцать наборов: `core_selftest`, `async_io`, `uart_i2c`,
+`ctest` прогоняет двадцать восемь наборов: `core_selftest`, `async_io`, `uart_i2c`,
 `stm32_hal_strategies`, `dma_arbiter`, `power_supervisor`, `stm32_power`,
 `watchdog`, `stm32_watchdog`, `boot`, `ota`, `crypto`, `fault_and_wait`,
-`ipc_shell`, `hal_interfaces`, `f4_regs` и `stm32_periph`.
+`ipc_shell`, `hal_interfaces`, `f4_regs`, `stm32_periph`, `ota_meta`, `rtc`,
+`net`, `usb`, `stm32rtc` и `w5500`; при `MCFRAME_RUST_APP=ON` добавляется `rust`.
 
 Набор `dma_arbiter` (`tests/host/test_dma_arbiter.cpp`) проверяет собственно
 арбитрацию, без драйверов и железа: ожидание занятого канала (USART1_TX и

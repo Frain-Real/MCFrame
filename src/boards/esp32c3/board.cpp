@@ -1,6 +1,7 @@
 #include "boards/esp32c3/board.hpp"
 #include "boards/esp32c3/hal_esp32c3.hpp"
 #include "boards/esp32c3/wifi_esp.hpp"
+#include "boards/esp32c3/net_socket_esp.hpp"
 #include "boards/esp32c3/ble_esp.hpp"
 
 namespace {
@@ -28,6 +29,7 @@ Spi& spi1() noexcept { return g_spi; }
 Pwm& pwm1() noexcept { return g_pwm; }
 Nvs& nvs() noexcept { return g_nvs; }
 Network& wifi() noexcept { return g_wifi; }
+Sockets& sockets() noexcept { return embed::esp32c3::sockets(); }
 Ble& ble() noexcept { return g_ble; }
 
 void init() noexcept {

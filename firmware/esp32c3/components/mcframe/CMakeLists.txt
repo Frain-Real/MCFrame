@@ -10,6 +10,7 @@ idf_component_register(
         "${MCFRAME_ROOT}/src/boards/esp32c3/hal_esp32c3.cpp"
         "${MCFRAME_ROOT}/src/boards/esp32c3/board.cpp"
         "${MCFRAME_ROOT}/src/boards/esp32c3/wifi_esp.cpp"
+        "${MCFRAME_ROOT}/src/boards/esp32c3/net_socket_esp.cpp"
         "${MCFRAME_ROOT}/src/boards/esp32c3/ble_esp.cpp"
         "${MCFRAME_ROOT}/src/boards/esp32c3/esp_partition_storage.cpp"
         "ota_https.cpp"
@@ -30,6 +31,7 @@ idf_component_register(
         esp_wifi
         esp_netif
         esp_event
+        lwip
         bt
         bootloader_support
         esp_partition

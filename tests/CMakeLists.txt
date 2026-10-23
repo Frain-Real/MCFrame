@@ -205,6 +205,48 @@ add_executable(mc_tests_ota_meta test_ota_meta.cpp)
 target_link_libraries(mc_tests_ota_meta PRIVATE MCFrame::MCFrame)
 target_include_directories(mc_tests_ota_meta PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
+# ─────────── Rust C ABI: линковка staticlib с C++ (опционально) ───────────
+if(MCFRAME_RUST_APP AND TARGET mcframe_rust_app)
+    add_executable(mc_tests_rust test_rust_bridge.cpp)
+    add_dependencies(mc_tests_rust mcframe_rust_app)
+    target_link_libraries(mc_tests_rust PRIVATE MCFrame::MCFrame ${MCFRAME_RUST_STATICLIB})
+    target_include_directories(mc_tests_rust PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+endif()
+
+# ─────────── STM32F1 RTC backend на модели регистров ───────────
+add_executable(mc_tests_stm32rtc
+    host/test_rtc_stm32.cpp
+    host/stm32_regs_fake.cpp
+    ../src/platforms/stm32/rtc_stm32.cpp)
+target_link_libraries(mc_tests_stm32rtc PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_stm32rtc PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/host
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/platforms/stm32)
+target_compile_definitions(mc_tests_stm32rtc PRIVATE
+    MCFRAME_STM32_REGS_FAKE=1
+    STM32F10X_MD=1)
+
+# ─────────── W5500: SPI Ethernet + net::Factory на модели регистров ───────────
+add_executable(mc_tests_w5500 test_w5500.cpp)
+target_link_libraries(mc_tests_w5500 PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_w5500 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# ─────────── USB device: CDC-ACM, DFU, MSC на mock-HAL ───────────
+add_executable(mc_tests_usb test_usb.cpp)
+target_link_libraries(mc_tests_usb PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_usb PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# ─────────── Сеть: сокеты, MQTT, HTTP, SNTP ───────────
+add_executable(mc_tests_net test_net.cpp)
+target_link_libraries(mc_tests_net PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_net PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# ─────────── RTC wall clock: перенос времени через сброс ───────────
+add_executable(mc_tests_rtc test_rtc.cpp)
+target_link_libraries(mc_tests_rtc PRIVATE MCFrame::MCFrame)
+target_include_directories(mc_tests_rtc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
 # ─────────── Phase 6: NVS, две копии банка, CRC, power-fail ───────────
 add_executable(mc_tests_nvs test_nvs.cpp)
 target_link_libraries(mc_tests_nvs PRIVATE MCFrame::MCFrame)
@@ -313,6 +355,14 @@ if(BUILD_TESTING)
     add_test(NAME time_units COMMAND mc_tests_time_units)
 
     add_test(NAME ota_meta COMMAND mc_tests_ota_meta)
+    add_test(NAME rtc COMMAND mc_tests_rtc)
+    add_test(NAME net COMMAND mc_tests_net)
+    add_test(NAME usb COMMAND mc_tests_usb)
+    add_test(NAME stm32rtc COMMAND mc_tests_stm32rtc)
+    add_test(NAME w5500 COMMAND mc_tests_w5500)
+    if(TARGET mc_tests_rust)
+        add_test(NAME rust COMMAND mc_tests_rust)
+    endif()
 
     add_test(NAME uart_multi COMMAND mc_tests_uart_multi)
     set_tests_properties(uart_multi PROPERTIES

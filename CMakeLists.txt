@@ -86,6 +86,7 @@ mcframe_apply_target_definitions(mcu_flags)
 # линкер-скрипта к конкретной прошивке. Один источник чисел на загрузчик,
 # приложение и линкер — см. cmake/firmware_layout.cmake.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/firmware_layout.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rust.cmake)
 
 # enable_testing() обязан вызываться в корневом CMakeLists до add_subdirectory,
 # иначе ctest не увидит тесты подпроекта.

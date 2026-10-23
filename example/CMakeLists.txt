@@ -70,6 +70,21 @@ else()
         target_compile_definitions(example_fw PRIVATE MCFRAME_APP_MINIMAL=0)
     endif()
 
+    if(MCFRAME_RUST_APP AND TARGET mcframe_rust_app)
+        add_dependencies(example_fw mcframe_rust_app)
+        # Rust staticlib — ДО MCFrame: её объект ссылается на C ABI-мост
+        # (mc_log/mc_sleep_ms), который лежит в libMCFrame.a. При обратном
+        # порядке компоновщик уже прошёл архив и не вытащит мост.
+        target_link_libraries(example_fw PRIVATE ${MCFRAME_RUST_STATICLIB})
+        # C ABI-мост лежит в libMCFrame.a, а Rust-архив идёт после неё.
+        # --undefined заставляет вытащить объект моста до обработки Rust.
+        target_link_options(example_fw PRIVATE
+            -Wl,--undefined=mc_log
+            -Wl,--undefined=mc_sleep_ms
+            -Wl,--undefined=mc_uptime_ms)
+        target_compile_definitions(example_fw PRIVATE MCFRAME_RUST_APP=1)
+    endif()
+
     if(MCFRAME_IMAGE STREQUAL "slot")
         mcframe_firmware_slot(example_fw 0)
         # ВАЖНО: таблицу векторов приложение переставляет САМО, во время

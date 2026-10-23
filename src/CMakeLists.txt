@@ -15,6 +15,8 @@ set(OS_CORE_SOURCES
     os/core/memory/global_allocator.cpp
     os/core/task/sheduler.cpp
     os/power/power.cpp
+    os/time/rtc.cpp
+    os/rust/rust_bridge.cpp
     os/watchdog/watchdog.cpp
     os/interfaces/dma_manager.cpp
     os/interfaces/dma_arbiter.cpp)
@@ -46,6 +48,12 @@ set(OS_CRYPTO_SOURCES
 set(OS_OTA_SOURCES
     os/ota/ota.cpp)
 
+# ─────────── Сеть: сокеты и протоколы MQTT/HTTP/SNTP ───────────
+# Абстракция не зависит от lwIP/STM32: backend сокетов даёт платформа/борд.
+set(OS_NET_SOURCES
+    os/net/http.cpp
+    os/net/sntp.cpp)
+
 # ─────────── NVS: key-value поверх ota::Storage ───────────
 set(OS_NVS_SOURCES
     os/nvs/nvs.cpp
@@ -62,7 +70,7 @@ set(OS_BOOT_SOURCES
     os/boot/boot.cpp
     os/boot/boot_app.cpp)
 
-foreach(_f ${OS_CORE_SOURCES} ${OS_CRYPTO_SOURCES} ${OS_OTA_SOURCES} ${OS_NVS_SOURCES} ${OS_BOOT_SOURCES})
+foreach(_f ${OS_CORE_SOURCES} ${OS_CRYPTO_SOURCES} ${OS_OTA_SOURCES} ${OS_NVS_SOURCES} ${OS_BOOT_SOURCES} ${OS_NET_SOURCES})
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_f}")
         message(FATAL_ERROR "Нет источника ядра/криптографии/OTA: ${_f}")
     endif()
@@ -73,13 +81,16 @@ endforeach()
 # ЛЮБОЙ платформы. platform.cpp содержит периферию (DMA/ADC) и присутствует
 # только там, где она реально нужна.
 if(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
-    set(OS_PLATFORM_SOURCES platforms/stm32f4g4/platform_ops.cpp)
+    set(OS_PLATFORM_SOURCES
+        platforms/stm32f4g4/platform_ops.cpp
+        platforms/stm32f4g4/rtc_m4.cpp
+        platforms/stm32f4g4/usb_otg_fs.cpp)
 else()
     set(OS_PLATFORM_SOURCES platforms/${MCU_TARGET}/platform_ops.cpp)
 endif()
 
 foreach(_extra platform.cpp platform_adc.cpp power_stm32.cpp watchdog_stm32.cpp
-               brownout_stm32.cpp brownout_m4.cpp
+               brownout_stm32.cpp brownout_m4.cpp rtc_stm32.cpp rtc_m4.cpp
                flash_stm32.cpp flash_mock.cpp boot_stm32.cpp boot_mock.cpp)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/platforms/${MCU_TARGET}/${_extra}")
         list(APPEND OS_PLATFORM_SOURCES platforms/${MCU_TARGET}/${_extra})
@@ -138,7 +149,8 @@ if(NOT MCFRAME_OVERRIDE_GLOBAL_ALLOCATOR)
 endif()
 
 add_library(MCFrame STATIC ${_core} ${OS_CRYPTO_SOURCES} ${OS_OTA_SOURCES}
-                          ${OS_NVS_SOURCES} ${OS_BOOT_SOURCES} ${OS_PLATFORM_SOURCES})
+                          ${OS_NVS_SOURCES} ${OS_BOOT_SOURCES} ${OS_NET_SOURCES}
+                          ${OS_PLATFORM_SOURCES})
 add_library(MCFrame::MCFrame ALIAS MCFrame)
 
 # Приложение видит ТОЛЬКО ядро (os/...). Платформенные заголовки — PRIVATE:

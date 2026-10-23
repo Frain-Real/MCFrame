@@ -1,5 +1,6 @@
 #include "boards/f407_generic/board.hpp"
 #include "os/nvs/nvs.hpp"
+#include "platforms/stm32f4g4/rtc_m4.hpp"
 
 #ifndef MCFRAME_NVS_SIZE
 #define MCFRAME_NVS_SIZE (32u * 1024u)
@@ -53,6 +54,10 @@ embed::stm32::Spi2 g_spi2{board::kPins.pin(board::Signal::SpiSck, 2u),
 
 embed::stm32::GpioPin g_led{board::kPins.pin(board::Signal::Led, 0u)};
 embed::stm32::GpioPin g_cs{board::kPins.pin(board::Signal::SpiCs, 1u)};
+
+// W5500 на SPI1/CS. Инициализация сети — приложением: chip может быть
+// не распаян, и board::init() не должен висеть на SPI.
+embed::net::W5500FactoryT<4> g_net{g_spi1, g_cs};
 embed::stm32::Pwm g_pwm{TIM2, 1u,
                         board::kPins.pin(board::Signal::Pwm, 2u, 1u),
                         board::kPins.alternate(board::Signal::Pwm, 2u, 1u),
@@ -74,6 +79,7 @@ Spi&  spi1() noexcept { return g_spi1; }
 Spi&  spi2() noexcept { return g_spi2; }
 Pwm&  pwm1() noexcept { return g_pwm; }
 Nvs&  nvs() noexcept { return g_nvs; }
+Net&  net() noexcept { return g_net; }
 
 void init_peripherals() noexcept {
     embed::hal::GpioConfig out{};
@@ -101,6 +107,7 @@ void init_peripherals() noexcept {
 }
 
 void init() noexcept {
+    embed::rtc::WallClock::instance().attach(&embed::stm32f4g4::rtc::backend());
     init_peripherals();
 #if MCFRAME_NVS_SIZE > 0
     if (g_nvs_store.init({&g_nvs_flash, MCFRAME_NVS_SIZE / 2u}) == embed::Status::Ok) {

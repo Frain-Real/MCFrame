@@ -14,6 +14,7 @@
 #include "os/core/task/sheduler.hpp"
 #include "os/fault/fault.hpp"
 #include "os/power/power.hpp"
+#include "os/time/rtc.hpp"
 #include "os/watchdog/watchdog.hpp"
 
 #include "board.hpp"
@@ -145,6 +146,11 @@ int main() {
         platform_log_line("MCFrame: timer init failed");
         return 1;
     }
+
+    // ── 4a. RTC wall clock ──
+    // Если board привязала backend и RTC уже идёт, время переживает сброс.
+    // TimeNotSynced — нормальное состояние для платы без RTC/батарейки.
+    (void)rtc::WallClock::instance().init();
 
     // ── 5. Супервизор энергосбережения ──
     //

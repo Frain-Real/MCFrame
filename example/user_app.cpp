@@ -24,6 +24,9 @@
 #include "os/ota/ota.hpp"
 #include "os/ota/ota_transport.hpp"
 #include "os/power/power.hpp"
+#if MCFRAME_RUST_APP
+#include "os/rust/rust_bridge.hpp"
+#endif
 #include "os/watchdog/watchdog.hpp"
 
 #if MCFRAME_APP_SHELL
@@ -54,6 +57,9 @@ embed::Status user_app_shell_register(embed::scheduler& sched) noexcept;
 // 1792 Б RAM.
 constexpr uint32_t kBlinkStackWords  = 48u;    // 192 Б
 constexpr uint32_t kWorkerStackWords = 64u;    // 256 Б
+#if MCFRAME_RUST_APP
+constexpr uint32_t kRustStackWords   = 512u;   // Rust-приложению нужен запас
+#endif
 
 // ── Задачи ──
 embed::task     g_blink_tcb;
@@ -61,6 +67,13 @@ uint32_t        g_blink_stack[kBlinkStackWords];
 
 embed::task     g_worker_tcb;
 uint32_t        g_worker_stack[kWorkerStackWords];
+
+#if MCFRAME_RUST_APP
+extern "C" void mcframe_rust_main(void);
+embed::task     g_rust_tcb;
+uint32_t        g_rust_stack[kRustStackWords];
+void rust_task(void*) noexcept { mcframe_rust_main(); }
+#endif
 
 // Счётчики задач — embed::atomic_t, а не std::atomic: <atomic> тянет
 // libstdc++ и не собирается для «голого» Cortex-M3. Инкремент идёт из задачи,
@@ -136,6 +149,14 @@ embed::Status user_app_register(embed::scheduler& sched) noexcept {
     if (!sched.add_task(&g_worker_tcb, g_worker_stack, kWorkerStackWords)) {
         return embed::Status::NoMemory;
     }
+
+#if MCFRAME_RUST_APP
+    st = g_rust_tcb.init(&rust_task, nullptr, "rust", kRustStackWords, 4u);
+    if (st != embed::Status::Ok) return st;
+    if (!sched.add_task(&g_rust_tcb, g_rust_stack, kRustStackWords)) {
+        return embed::Status::NoMemory;
+    }
+#endif
 
     // Задача приёма прошивки: она опрашивает интерфейс, объявленный в
     // настройке OTA (см. user_app_ota_init).
