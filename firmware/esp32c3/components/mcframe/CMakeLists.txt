@@ -42,6 +42,8 @@ idf_component_register(
         app_update
 )
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LFS_NO_MALLOC LFS_NO_ASSERT)
+set_source_files_properties("${MCFRAME_ROOT}/src/os/fs/lfs.c"
+    PROPERTIES COMPILE_OPTIONS "-w")
 
 
 target_compile_definitions(${COMPONENT_LIB} PUBLIC

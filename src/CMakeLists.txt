@@ -154,6 +154,13 @@ if(NOT MCFRAME_OVERRIDE_GLOBAL_ALLOCATOR)
     list(REMOVE_ITEM _core os/core/memory/global_allocator.cpp)
 endif()
 
+# littlefs — сторонний C-код; его -Wconversion/-Wsign-conversion шумят
+# в общем логе, не относясь к MCFrame. Ошибки при этом всё равно видны.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/os/fs/lfs.c"
+        PROPERTIES COMPILE_OPTIONS "-w")
+endif()
+
 add_library(MCFrame STATIC ${_core} ${OS_CRYPTO_SOURCES} ${OS_OTA_SOURCES}
                           ${OS_NVS_SOURCES} ${OS_BOOT_SOURCES} ${OS_NET_SOURCES}
                           ${OS_PLATFORM_SOURCES})
