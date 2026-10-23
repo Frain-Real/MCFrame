@@ -83,11 +83,11 @@ W5500 держит TCP/UDP-сокеты в железе, поэтому MQTT/HTT
 `net::Socket` без lwIP.
 
 ```cpp
-// F4/G4: board::net() уже собран на SPI1/CS; на других платах создайте
-// net::W5500FactoryT<4> net{board::spiX(), board::spi_cs()}.
+net::W5500FactoryT<4> net{board::spi1(), board::spi_cs()};
+
 net::W5500Config cfg{};              // MAC, IP, GW, mask
 cfg.ip[3] = 50;
-(void)board::net().init(cfg);
+(void)net.init(cfg);
 
 // Дальше — как на C3:
 mqtt::Client<768> client;

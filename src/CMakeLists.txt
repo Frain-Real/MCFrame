@@ -111,6 +111,7 @@ endif()
 if(MCU_TARGET STREQUAL "stm32")
     list(APPEND OS_PLATFORM_SOURCES
         platforms/stm32/startup_stm32f10x_md.s
+        platforms/stm32/cxx_runtime.cpp
         platforms/stm32/system_stm32f10x.c
         platforms/stm32/core_cm3.c
         platforms/stm32/exti_stm32.cpp
@@ -127,6 +128,7 @@ elseif(MCU_TARGET STREQUAL "stm32f4" OR MCU_TARGET STREQUAL "stm32g4")
     endif()
     list(APPEND OS_PLATFORM_SOURCES
         arch/armv7m/context.cpp
+        platforms/stm32/cxx_runtime.cpp
         platforms/stm32f4g4/exti_m4.cpp
         platforms/stm32f4g4/periph_m4_instantiate.cpp)
 endif()
@@ -191,6 +193,12 @@ if(DEFINED MCFRAME_NVS_SIZE)
     target_compile_definitions(MCFrame PUBLIC
         MCFRAME_NVS_OFFSET=${MCFRAME_NVS_OFFSET}
         MCFRAME_NVS_SIZE=${MCFRAME_NVS_SIZE})
+endif()
+
+# F4-загрузчик должен уложиться в 16 КБ. SHA-256 образа проверяется при
+# OTA-приёме; в загрузчике остаются CRC32 и проверка вектора.
+if(MCU_TARGET STREQUAL "stm32f4")
+    target_compile_definitions(MCFrame PUBLIC MCFRAME_BOOT_VERIFY_HASH=0)
 endif()
 
 # CMSIS нужен и приложению: драйверы STM32 включают stm32f10x.h.

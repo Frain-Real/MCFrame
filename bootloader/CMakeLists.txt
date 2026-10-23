@@ -38,6 +38,9 @@ else()
         # LTO-оптимизация задаётся и на линковке: иначе -O3 из Release
         # перебивает -Oz и размер не меняется.
         target_link_options(bootloader_fw PRIVATE -Oz -Wl,--gc-sections)
+        # 16-КБ загрузчик: BOOT_LOG в этой сборке не нужен, строки только
+        # увеличивают образ. Диагностика остаётся в приложении.
+        target_compile_definitions(bootloader_fw PRIVATE MCFRAME_BOOT_LOGS=0)
     endif()
 
     # Образ загрузчика: адрес и размер — из общей раскладки.

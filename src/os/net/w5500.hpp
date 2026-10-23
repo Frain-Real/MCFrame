@@ -133,7 +133,8 @@ public:
     Status read16(uint8_t bsb, uint16_t addr, uint16_t& v) noexcept {
         uint8_t b[2]{};
         const Status st = read(bsb, addr, b, 2u);
-        v = static_cast<uint16_t>(b[0]) | (static_cast<uint16_t>(b[1]) << 8);
+        v = static_cast<uint16_t>(static_cast<uint16_t>(b[0]) |
+                                  (static_cast<uint16_t>(b[1]) << 8));
         return st;
     }
     Status write16(uint8_t bsb, uint16_t addr, uint16_t v) noexcept {

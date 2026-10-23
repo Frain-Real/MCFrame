@@ -106,6 +106,7 @@ constexpr uint32_t kWindowMs = 0u;
 /// Шаг цикла и бюджет приёма, мс.
 constexpr uint32_t kStepMs = 100u;
 
+#if MCFRAME_BOOTLOADER_OTA
 /// Поднять время: без него не работают таймауты кадров и сессии.
 /// Обработчик SysTick уже определён платформой (он вызывает OsTimer::TickIsr),
 /// поэтому здесь достаточно Init + Start.
@@ -120,7 +121,6 @@ Status init_time() noexcept {
     return config::OsTimer::Start();
 }
 
-#if MCFRAME_BOOTLOADER_OTA
 /// Настроить интерфейс приёма. Драйвер работает опросом: загрузчик не должен
 /// зависеть от прерываний периферии — перед прыжком он их всё равно запретит.
 void init_link() noexcept {

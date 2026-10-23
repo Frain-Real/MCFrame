@@ -333,6 +333,7 @@ struct BigInt {
 
     //  Операторы сравнения
 
+    constexpr bool operator!=(const BigInt& b) const { return !(*this == b); }
     constexpr bool operator==(const BigInt& b) const {
         if (neg != b.neg || len != b.len) return false;
         for (size_t i = 0; i < len; ++i)

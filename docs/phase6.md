@@ -20,6 +20,8 @@
 - [x] C3 `EspPartitionStorage` (ota::Storage) поверх `esp_partition`.
 - [x] F407/G431 загрузчик и два слота:
   - F4: boot 16 КБ, meta 16 КБ, NVS 32 КБ, слоты по 448 КБ;
+    в 16-КБ загрузчик не влезает SHA-256, поэтому на F4 он проверяет CRC32 и
+    вектор, а SHA-256/подпись — при OTA-приёме;
   - G4: boot 20 КБ, слоты по 50 КБ, meta 4 КБ, NVS 4 КБ;
   - `bootloader_fw`, `phase3_slot` (адрес слота A), VTOR;
   - `BootOps` F4/G4: проверка SP/вектора, VTOR, MSP, переход.
